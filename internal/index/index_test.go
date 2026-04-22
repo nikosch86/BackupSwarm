@@ -30,12 +30,17 @@ func makeEntry(t *testing.T, path string, chunkCount int) index.FileEntry {
 	t.Helper()
 	chunks := make([]index.ChunkRef, chunkCount)
 	for i := range chunks {
-		data := make([]byte, 32)
-		if _, err := io.ReadFull(rand.Reader, data); err != nil {
+		plaintext := make([]byte, 32)
+		if _, err := io.ReadFull(rand.Reader, plaintext); err != nil {
 			t.Fatalf("rand: %v", err)
 		}
-		chunks[i].Hash = sha256.Sum256(data)
-		chunks[i].Size = int64(len(data))
+		ciphertext := make([]byte, 32)
+		if _, err := io.ReadFull(rand.Reader, ciphertext); err != nil {
+			t.Fatalf("rand: %v", err)
+		}
+		chunks[i].PlaintextHash = sha256.Sum256(plaintext)
+		chunks[i].CiphertextHash = sha256.Sum256(ciphertext)
+		chunks[i].Size = int64(len(ciphertext))
 		peer := make([]byte, 32)
 		if _, err := io.ReadFull(rand.Reader, peer); err != nil {
 			t.Fatalf("rand: %v", err)
@@ -105,8 +110,11 @@ func TestPutGet_RoundTrip(t *testing.T) {
 		t.Fatalf("len(Chunks) = %d, want %d", len(got.Chunks), len(entry.Chunks))
 	}
 	for i := range entry.Chunks {
-		if got.Chunks[i].Hash != entry.Chunks[i].Hash {
-			t.Errorf("Chunks[%d].Hash mismatch", i)
+		if got.Chunks[i].PlaintextHash != entry.Chunks[i].PlaintextHash {
+			t.Errorf("Chunks[%d].PlaintextHash mismatch", i)
+		}
+		if got.Chunks[i].CiphertextHash != entry.Chunks[i].CiphertextHash {
+			t.Errorf("Chunks[%d].CiphertextHash mismatch", i)
 		}
 		if got.Chunks[i].Size != entry.Chunks[i].Size {
 			t.Errorf("Chunks[%d].Size = %d, want %d", i, got.Chunks[i].Size, entry.Chunks[i].Size)
@@ -135,7 +143,7 @@ func TestPut_Overwrites(t *testing.T) {
 	if len(got.Chunks) != 5 {
 		t.Errorf("Chunks len after overwrite = %d, want 5", len(got.Chunks))
 	}
-	if got.Chunks[0].Hash == first.Chunks[0].Hash {
+	if got.Chunks[0].PlaintextHash == first.Chunks[0].PlaintextHash {
 		t.Error("overwrite did not replace chunks")
 	}
 }

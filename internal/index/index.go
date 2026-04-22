@@ -40,12 +40,22 @@ const (
 // from underlying IO or decode errors.
 var ErrFileNotFound = errors.New("file not found in index")
 
-// ChunkRef is the locator for one chunk of a backed-up file: its content
-// hash, byte length, and the peers known to hold a copy.
+// ChunkRef is the locator for one chunk of a backed-up file.
+//
+// PlaintextHash is sha256 of the original file bytes covered by this chunk
+// (the content address used by internal/chunk); backup/restore uses it for
+// integrity verification after decryption and, eventually, cross-file
+// dedup in M6. CiphertextHash is sha256 of the serialized encrypted blob
+// stored on storage peers — it is the content address used to fetch the
+// chunk over the wire, and matches the internal/store address on the peer.
+// Size is the byte length of the ciphertext blob (the number of bytes that
+// will be transferred to restore the chunk). Peers lists the Ed25519 public
+// keys of storage peers known to hold the ciphertext blob.
 type ChunkRef struct {
-	Hash  [32]byte // sha256 of the chunk content (matches internal/store address)
-	Size  int64    // byte length of the chunk as sent to peers
-	Peers [][]byte // ed25519 public keys (raw 32-byte encoding) of peers holding this chunk
+	PlaintextHash  [32]byte
+	CiphertextHash [32]byte
+	Size           int64
+	Peers          [][]byte
 }
 
 // FileEntry is the index record for a single backed-up file. Chunks is

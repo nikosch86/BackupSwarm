@@ -36,8 +36,7 @@ test:
 
 # Packages measured for coverage: library code only. cmd/ is a thin wrapper
 # around internal/cli and is exercised via `make build` / end-to-end tests.
-# Expand this list as pkg/ subpackages are introduced (e.g. ./pkg/... from M2.1).
-COVERAGE_PKGS := ./internal/...
+COVERAGE_PKGS := ./internal/... ./pkg/...
 
 ## coverage: run tests with coverage and enforce $(COVERAGE_MIN)% minimum
 coverage:
