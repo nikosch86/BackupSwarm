@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/quic-go/quic-go v0.59.0
 	github.com/spf13/cobra v1.10.2
+	go.etcd.io/bbolt v1.4.3
 	golang.org/x/crypto v0.50.0
 )
 

@@ -20,7 +20,8 @@ GOFLAGS      ?=
 
 .PHONY: all build test coverage coverage-report lint fmt fmt-fix vet check clean \
         docker-build docker-run docker-compose-up docker-compose-down \
-        trivy-deps trivy-image security-scan story-done help
+        trivy-deps trivy-image security-scan story-done help \
+        mod-get mod-tidy
 
 all: check build
 
@@ -74,6 +75,16 @@ check: lint test
 ## clean: remove build artifacts and coverage output
 clean:
 	rm -rf $(BUILD_DIR) $(COVERAGE_OUT)
+
+## mod-get: add/update a module dependency — make mod-get PKG=<path>[@version]
+mod-get:
+	@test -n "$(PKG)" || { echo "usage: make mod-get PKG=<module-path>[@version]"; exit 1; }
+	$(GO) get $(PKG)
+	$(GO) mod tidy
+
+## mod-tidy: reconcile go.mod/go.sum with current imports
+mod-tidy:
+	$(GO) mod tidy
 
 ## docker-build: build the multi-stage Docker image
 docker-build:

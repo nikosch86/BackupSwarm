@@ -6,7 +6,7 @@ A peer-to-peer encrypted backup tool. Share encrypted chunks of your data with a
 - **Configurable redundancy** (1–N copies per chunk) and per-volume storage limits.
 - **Explicit membership** via single-use join tokens — no open discovery, no auto-trust.
 
-Status: **early development**. See [`plan.md`](plan.md) for the milestone/story roadmap.
+Status: **early development**.
 
 ---
 
@@ -22,8 +22,6 @@ Status: **early development**. See [`plan.md`](plan.md) for the milestone/story 
 | Metadata | Local `bbolt` index, encrypted backup of the index to the swarm |
 | Placement | Weighted random by reported free capacity, lazy re-replication on churn |
 | Deployment | Docker image (primary), multi-platform binaries (secondary) |
-
-Full design decisions, features, and non-functional requirements live in [`plan.md`](plan.md).
 
 ---
 
@@ -68,6 +66,8 @@ All development operations go through the Makefile — never invoke `go` or `doc
 | `make fmt-fix` | Rewrite files in place to satisfy `gofmt` |
 | `make check` | Lint + test — **stories are only complete when this is clean** |
 | `make clean` | Remove `bin/` and coverage artifacts |
+| `make mod-get PKG=<module>[@version]` | Add or update a Go module dependency (runs `go get` + `go mod tidy`) |
+| `make mod-tidy` | Reconcile `go.mod`/`go.sum` with current imports |
 
 ### Docker
 
@@ -92,7 +92,7 @@ Trivy runs inside Docker (pinned version, see Makefile). The vulnerability DB is
 
 | Target | Purpose |
 |---|---|
-| `make story-done` | Runs `check` + `coverage` + `security-scan`. **Must pass cleanly before a story is marked ✅ in `plan.md`.** |
+| `make story-done` | Runs `check` + `coverage` + `security-scan`. **Must pass cleanly before a story is marked complete.** |
 
 Run `make help` to list all targets with descriptions.
 
@@ -142,14 +142,7 @@ A full threat model lands in M7.7 (`THREAT_MODEL.md`).
 
 ---
 
-## Development Workflow
-
-This project uses a story-driven pair-programming workflow with strict TDD:
-
-- [`workflow.md`](workflow.md) — Red-Green-Refactor loop, verification format, completion checklist.
-- [`plan.md`](plan.md) — Milestones, stories, and status (single source of truth for what's next).
-- [`technical_considerations.md`](technical_considerations.md) — Per-story lessons learned.
-- [`design-questions.md`](design-questions.md) — Q&A from the initial design session.
+## Contributing
 
 Contributions follow conventional commits: `feat:`, `fix:`, `test:`, `refactor:`, `docs:`.
 
