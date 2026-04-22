@@ -18,7 +18,7 @@ TRIVY_SEVERITY := HIGH,CRITICAL
 GO           ?= go
 GOFLAGS      ?=
 
-.PHONY: all build test coverage lint fmt vet check clean \
+.PHONY: all build test coverage coverage-report lint fmt fmt-fix vet check clean \
         docker-build docker-run docker-compose-up docker-compose-down \
         trivy-deps trivy-image security-scan story-done help
 
@@ -45,12 +45,21 @@ coverage:
 	echo "Total coverage: $${total}%"; \
 	awk -v t="$${total}" -v min="$(COVERAGE_MIN)" 'BEGIN { if (t+0 < min+0) { printf "FAIL: coverage %.1f%% is below required %s%%\n", t, min; exit 1 } else { printf "OK: coverage %.1f%% meets %s%% target\n", t, min } }'
 
+## coverage-report: print per-function coverage (requires coverage.out from `make coverage`)
+coverage-report:
+	@test -s $(COVERAGE_OUT) || { echo "no $(COVERAGE_OUT); run 'make coverage' first"; exit 1; }
+	$(GO) tool cover -func=$(COVERAGE_OUT)
+
 ## fmt: check formatting (fails if any file needs gofmt)
 fmt:
 	@out=$$(gofmt -l .); \
 	if [ -n "$$out" ]; then \
 		echo "gofmt needs to be run on:"; echo "$$out"; exit 1; \
 	fi
+
+## fmt-fix: rewrite any files that need gofmt in place
+fmt-fix:
+	gofmt -w .
 
 ## vet: run go vet across all packages
 vet:

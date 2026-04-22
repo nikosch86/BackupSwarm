@@ -15,7 +15,11 @@ func NewRootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 
-	root.AddCommand(newInitCmd())
+	var dataDir string
+	root.PersistentFlags().StringVar(&dataDir, "data-dir", "",
+		"Node data directory (default $BACKUPSWARM_DATA_DIR or $XDG_DATA_HOME/backupswarm)")
+
+	root.AddCommand(newInitCmd(&dataDir))
 
 	return root
 }

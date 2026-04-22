@@ -39,8 +39,11 @@ Full design decisions, features, and non-functional requirements live in [`plan.
 # Build the binary
 make build
 
-# Initialize a new node
+# Initialize a new node (generates an Ed25519 identity on first run).
+# Default data dir: $XDG_DATA_HOME/backupswarm or ~/.local/share/backupswarm.
+# Override with --data-dir or $BACKUPSWARM_DATA_DIR.
 ./bin/backupswarm init
+./bin/backupswarm --data-dir /custom/path init
 
 # Run the full test suite
 make test
@@ -60,7 +63,9 @@ All development operations go through the Makefile — never invoke `go` or `doc
 | `make build` | Compile the `backupswarm` binary into `bin/` |
 | `make test` | Run the full test suite with the race detector |
 | `make coverage` | Run tests with coverage and enforce the 90% minimum |
+| `make coverage-report` | Print per-function coverage from the last `make coverage` run |
 | `make lint` | Static analysis (`gofmt -l` + `go vet`) |
+| `make fmt-fix` | Rewrite files in place to satisfy `gofmt` |
 | `make check` | Lint + test — **stories are only complete when this is clean** |
 | `make clean` | Remove `bin/` and coverage artifacts |
 

@@ -19,7 +19,7 @@ func TestRun_HelpReturnsZero(t *testing.T) {
 
 func TestRun_InitReturnsZero(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"init"}, &stdout, &stderr)
+	code := run([]string{"--data-dir", t.TempDir(), "init"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run(init) exit code = %d, want 0 (stderr=%q)", code, stderr.String())
 	}

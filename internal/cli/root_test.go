@@ -40,7 +40,7 @@ func TestInitCmd_RunsSuccessfully(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	root.SetOut(&stdout)
 	root.SetErr(&stderr)
-	root.SetArgs([]string{"init"})
+	root.SetArgs([]string{"--data-dir", t.TempDir(), "init"})
 
 	if err := root.Execute(); err != nil {
 		t.Fatalf("executing 'init' failed: %v (stderr=%q)", err, stderr.String())
