@@ -9,11 +9,18 @@ COVERAGE_MIN := 90
 
 DOCKER_IMAGE := backupswarm:dev
 
+# Trivy — pinned version for reproducible security scans.
+# Named docker volume keeps the vulnerability DB cached across runs.
+TRIVY_IMAGE    := aquasec/trivy:0.70.0
+TRIVY_CACHE    := backupswarm-trivy-cache
+TRIVY_SEVERITY := HIGH,CRITICAL
+
 GO           ?= go
 GOFLAGS      ?=
 
 .PHONY: all build test coverage lint fmt vet check clean \
-        docker-build docker-run docker-compose-up docker-compose-down help
+        docker-build docker-run docker-compose-up docker-compose-down \
+        trivy-deps trivy-image security-scan story-done help
 
 all: check build
 
@@ -74,6 +81,45 @@ docker-compose-up:
 ## docker-compose-down: tear down the local swarm
 docker-compose-down:
 	docker compose down -v
+
+## trivy-deps: scan source tree for vulnerable deps, secrets, and misconfigs (HIGH+CRITICAL)
+# Misconfig scanners restricted to dockerfile — cloud/terraform checks don't apply here
+# and Trivy's embedded AWS rego currently spams parse errors.
+trivy-deps:
+	docker volume inspect $(TRIVY_CACHE) >/dev/null 2>&1 || docker volume create $(TRIVY_CACHE) >/dev/null
+	docker run --rm \
+		-v "$(CURDIR):/src:ro" \
+		-v $(TRIVY_CACHE):/root/.cache/trivy \
+		$(TRIVY_IMAGE) \
+		fs \
+		--scanners vuln,secret,misconfig \
+		--misconfig-scanners dockerfile \
+		--severity $(TRIVY_SEVERITY) \
+		--exit-code 1 \
+		--no-progress \
+		/src
+
+## trivy-image: scan the built Docker image for vulnerable OS/app packages
+trivy-image: docker-build
+	docker volume inspect $(TRIVY_CACHE) >/dev/null 2>&1 || docker volume create $(TRIVY_CACHE) >/dev/null
+	docker run --rm \
+		-v /var/run/docker.sock:/var/run/docker.sock \
+		-v $(TRIVY_CACHE):/root/.cache/trivy \
+		$(TRIVY_IMAGE) \
+		image \
+		--severity $(TRIVY_SEVERITY) \
+		--exit-code 1 \
+		--no-progress \
+		$(DOCKER_IMAGE)
+
+## security-scan: run all security scans (deps + built image)
+security-scan: trivy-deps trivy-image
+
+## story-done: full story-completion gate — check + coverage + security-scan
+# Must pass cleanly before a story can be marked ✅ in plan.md.
+story-done: check coverage security-scan
+	@echo ""
+	@echo "story-done: all gates passed (lint, tests, coverage ≥ $(COVERAGE_MIN)%, security scan clean)"
 
 ## help: list documented targets
 help:

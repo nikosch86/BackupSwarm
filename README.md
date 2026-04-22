@@ -1,0 +1,155 @@
+# BackupSwarm
+
+A peer-to-peer encrypted backup tool. Share encrypted chunks of your data with a group of trusted nodes — like torrents, but for the kind of data that should live safely off-site.
+
+- **Zero plaintext leaves your node.** All chunks are encrypted locally before they touch the wire.
+- **Configurable redundancy** (1–N copies per chunk) and per-volume storage limits.
+- **Explicit membership** via single-use join tokens — no open discovery, no auto-trust.
+
+Status: **early development**. See [`plan.md`](plan.md) for the milestone/story roadmap.
+
+---
+
+## Design Highlights
+
+| Area | Choice |
+|---|---|
+| Language | Go |
+| Transport | QUIC (`quic-go`), TLS 1.3 built-in |
+| Identity | Ed25519 per-node keypair (public key = node ID) |
+| Encryption | Chunk-then-encrypt, X25519 + XChaCha20-Poly1305 (hybrid) |
+| Discovery | Explicit single-use join tokens, no auto-discovery |
+| Metadata | Local `bbolt` index, encrypted backup of the index to the swarm |
+| Placement | Weighted random by reported free capacity, lazy re-replication on churn |
+| Deployment | Docker image (primary), multi-platform binaries (secondary) |
+
+Full design decisions, features, and non-functional requirements live in [`plan.md`](plan.md).
+
+---
+
+## Requirements
+
+- **Go 1.24+** (for local development)
+- **Docker** (for container builds, multi-node testing, and security scanning)
+- **Make** (everything is driven through the Makefile)
+
+## Getting Started
+
+```bash
+# Build the binary
+make build
+
+# Initialize a new node
+./bin/backupswarm init
+
+# Run the full test suite
+make test
+
+# Lint + test (the pre-PR gate)
+make check
+```
+
+## Makefile Targets
+
+All development operations go through the Makefile — never invoke `go` or `docker` directly.
+
+### Build & Test
+
+| Target | Purpose |
+|---|---|
+| `make build` | Compile the `backupswarm` binary into `bin/` |
+| `make test` | Run the full test suite with the race detector |
+| `make coverage` | Run tests with coverage and enforce the 90% minimum |
+| `make lint` | Static analysis (`gofmt -l` + `go vet`) |
+| `make check` | Lint + test — **stories are only complete when this is clean** |
+| `make clean` | Remove `bin/` and coverage artifacts |
+
+### Docker
+
+| Target | Purpose |
+|---|---|
+| `make docker-build` | Build the multi-stage Docker image (`backupswarm:dev`) |
+| `make docker-run` | Run a single node in Docker (foreground) |
+| `make docker-compose-up` | Spin up a local multi-node swarm for testing |
+| `make docker-compose-down` | Tear down the local swarm |
+
+### Security
+
+| Target | Purpose |
+|---|---|
+| `make trivy-deps` | Scan source tree for vulnerable deps, leaked secrets, and misconfigs |
+| `make trivy-image` | Scan the built Docker image for vulnerable OS/app packages |
+| `make security-scan` | Run both — fails on any HIGH or CRITICAL finding |
+
+Trivy runs inside Docker (pinned version, see Makefile). The vulnerability DB is cached in a named Docker volume (`backupswarm-trivy-cache`) so subsequent runs are fast. See the [Security](#security) section below for when to run these.
+
+### Story-completion gate
+
+| Target | Purpose |
+|---|---|
+| `make story-done` | Runs `check` + `coverage` + `security-scan`. **Must pass cleanly before a story is marked ✅ in `plan.md`.** |
+
+Run `make help` to list all targets with descriptions.
+
+---
+
+## Project Layout
+
+```
+cmd/backupswarm/           CLI entrypoint (thin wrapper around internal/cli)
+internal/
+  chunk/                   Chunking logic
+  crypto/                  Encryption, key generation, key wrapping
+  index/                   Local bbolt index
+  node/                    Node identity, lifecycle
+  protocol/                Wire protocol messages and handlers
+  quic/                    QUIC transport and connection management
+  nat/                     STUN / TURN / hole-punching (M4)
+  store/                   On-disk chunk storage
+  swarm/                   Membership, announcements, placement
+  replication/             Redundancy tracking, re-replication
+  cli/                     Cobra command wiring
+pkg/token/                 Join token generation and parsing (public)
+configs/                   Default config templates
+Dockerfile                 Multi-stage build (distroless runtime)
+docker-compose.yml         Local multi-node test setup
+Makefile                   All development operations
+```
+
+---
+
+## Security
+
+BackupSwarm holds itself to a few hard rules:
+
+- **No plaintext on the wire or at rest on remote nodes.** Chunks are encrypted with per-chunk symmetric keys; those keys are wrapped per-recipient.
+- **Every protocol message is signed** with the sender's Ed25519 key and verified before it is acted on; replay protection via timestamp + monotonic sequence number.
+- **Private key material is protected by 0600 permissions.**
+- **No dependency with a known HIGH or CRITICAL vulnerability ships in the repo.** The `make security-scan` target (Trivy in Docker) enforces this — run it before opening a PR and in CI.
+
+The scan covers three layers:
+
+1. **Filesystem scan** (`trivy fs`) — Go modules (`go.mod` / `go.sum`), secrets accidentally committed, and Dockerfile/compose misconfigurations.
+2. **Image scan** (`trivy image`) — OS packages and Go binaries in the built `backupswarm:dev` runtime image.
+3. **(Planned, M5+)** SBOM generation and supply-chain provenance.
+
+A full threat model lands in M7.7 (`THREAT_MODEL.md`).
+
+---
+
+## Development Workflow
+
+This project uses a story-driven pair-programming workflow with strict TDD:
+
+- [`workflow.md`](workflow.md) — Red-Green-Refactor loop, verification format, completion checklist.
+- [`plan.md`](plan.md) — Milestones, stories, and status (single source of truth for what's next).
+- [`technical_considerations.md`](technical_considerations.md) — Per-story lessons learned.
+- [`design-questions.md`](design-questions.md) — Q&A from the initial design session.
+
+Contributions follow conventional commits: `feat:`, `fix:`, `test:`, `refactor:`, `docs:`.
+
+---
+
+## License
+
+TBD.
