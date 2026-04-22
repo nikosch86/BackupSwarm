@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 func TestNewRootCmd_HasNameAndShortDescription(t *testing.T) {
@@ -42,6 +44,44 @@ func TestInitCmd_RunsSuccessfully(t *testing.T) {
 
 	if err := root.Execute(); err != nil {
 		t.Fatalf("executing 'init' failed: %v (stderr=%q)", err, stderr.String())
+	}
+}
+
+// TestInitCmd_HasRunE pins the invariant that 'init' is actually wired to a
+// handler. Without this, a future refactor that drops RunE would still let
+// TestInitCmd_RunsSuccessfully pass (cobra treats no-op commands as success).
+func TestInitCmd_HasRunE(t *testing.T) {
+	root := NewRootCmd()
+
+	var initCmd *cobra.Command
+	for _, sub := range root.Commands() {
+		if sub.Name() == "init" {
+			initCmd = sub
+			break
+		}
+	}
+	if initCmd == nil {
+		t.Fatal("init subcommand not found")
+	}
+	if initCmd.RunE == nil && initCmd.Run == nil {
+		t.Error("init subcommand has neither RunE nor Run handler")
+	}
+	if initCmd.Short == "" {
+		t.Error("init subcommand is missing Short description")
+	}
+}
+
+// TestRootCmd_SilencesUsageAndErrors verifies the CLI contract that errors
+// are surfaced via structured logs (from run()), not via cobra's default
+// usage/error dump. These flags are user-facing behavior worth pinning.
+func TestRootCmd_SilencesUsageAndErrors(t *testing.T) {
+	root := NewRootCmd()
+
+	if !root.SilenceUsage {
+		t.Error("root SilenceUsage = false, want true (usage dump is handled elsewhere)")
+	}
+	if !root.SilenceErrors {
+		t.Error("root SilenceErrors = false, want true (errors logged via slog)")
 	}
 }
 

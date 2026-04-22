@@ -31,4 +31,13 @@ func TestRun_UnknownCommandReturnsNonZero(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("run(unknown) exit code = 0, want non-zero")
 	}
+	// The CLI contract is: errors go to stderr as structured JSON logs.
+	// Verify the failure was actually logged (not silently swallowed) and
+	// that it reached stderr rather than stdout.
+	if !strings.Contains(stderr.String(), "command failed") {
+		t.Errorf("expected 'command failed' log on stderr, got: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `"level":"ERROR"`) {
+		t.Errorf("expected JSON-formatted ERROR log on stderr, got: %q", stderr.String())
+	}
 }
