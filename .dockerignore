@@ -1,0 +1,8 @@
+bin/
+coverage.out
+*.md
+.git/
+.gitignore
+Dockerfile
+docker-compose.yml
+.dockerignore

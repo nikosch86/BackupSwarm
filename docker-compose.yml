@@ -1,0 +1,31 @@
+# Local multi-node swarm for end-to-end testing (wired up properly in M1.10).
+# For M1.1 this just verifies both nodes can start from the same image.
+
+services:
+  node-a:
+    build: .
+    image: backupswarm:dev
+    container_name: backupswarm-node-a
+    command: ["init"]
+    volumes:
+      - node-a-data:/data
+    networks:
+      - swarm
+
+  node-b:
+    build: .
+    image: backupswarm:dev
+    container_name: backupswarm-node-b
+    command: ["init"]
+    volumes:
+      - node-b-data:/data
+    networks:
+      - swarm
+
+networks:
+  swarm:
+    driver: bridge
+
+volumes:
+  node-a-data:
+  node-b-data:
