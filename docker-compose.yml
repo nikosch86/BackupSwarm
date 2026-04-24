@@ -1,31 +1,113 @@
-# Local multi-node swarm for end-to-end testing (wired up properly in M1.10).
-# For M1.1 this just verifies both nodes can start from the same image.
+# Two-node swarm that backs up a seeded directory end-to-end via a
+# simple `docker compose up -d`. No manual orchestration: node-b starts
+# `invite --then-run --token-out /shared/token.txt`, writing the token
+# into a shared tmpfs; node-a starts `join --token-file ... --then-run`,
+# which polls the shared file until the token appears, dials node-b,
+# handshakes over live QUIC, and continues as a backup source.
+#
+# The automated byte-for-byte verifier for the pipeline lives in
+# internal/cli/e2e_test.go (run by `make test`). This compose file is
+# the containerized sibling of that test — standing up the same flow
+# inside Docker to validate the packaged image.
+#
+# Usage:
+#   make docker-compose-up                 # brings up seeder, node-b, node-a
+#   docker compose logs -f node-a          # watch backup progress
+#   docker compose logs node-b             # peer joined + chunks received
+#   docker compose exec node-a backupswarm --data-dir /data restore /tmp/out
+#   docker compose down -v                 # tear down and drop volumes
+#
+# Fixed IPs on the bridge network make the listen address inside the
+# token (emitted by node-b) routable from node-a — binding to 0.0.0.0
+# would otherwise put a useless bind-all address into the token.
 
 services:
-  node-a:
-    build: .
-    image: backupswarm:dev
-    container_name: backupswarm-node-a
-    command: ["init"]
+  # One-off: seed node-a's backup volume with random bytes and chown
+  # every named volume to UID 65532 (the distroless `nonroot` user our
+  # backupswarm image runs as). Without the chown step, freshly-created
+  # docker volumes land root-owned and node-b fails writing to /shared.
+  # Merged into a single prep container so `docker compose up -d`
+  # doesn't need manual setup.
+  seeder:
+    image: busybox:1.37
     volumes:
-      - node-a-data:/data
-    networks:
-      - swarm
+      - backup-src:/backup
+      - shared-token:/shared
+      - node-a-data:/data-a
+      - node-b-data:/data-b
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        mkdir -p /backup/nested/sub
+        printf 'hello swarm\n' > /backup/hello.txt
+        printf 'nested greeting\n' > /backup/nested/greet.txt
+        dd if=/dev/urandom of=/backup/nested/sub/big.bin bs=1M count=3 status=none
+        chown -R 65532:65532 /backup /shared /data-a /data-b
+        echo "prep done: seeded /backup and chowned volumes to nonroot"
+    restart: "no"
 
   node-b:
     build: .
     image: backupswarm:dev
-    container_name: backupswarm-node-b
-    command: ["init"]
+    depends_on:
+      seeder:
+        condition: service_completed_successfully
     volumes:
       - node-b-data:/data
+      - shared-token:/shared
     networks:
-      - swarm
+      swarm:
+        ipv4_address: 172.28.0.20
+    command:
+      - invite
+      - --listen
+      - 172.28.0.20:7777
+      - --timeout
+      - 2m
+      - --token-out
+      - /shared/token.txt
+      - --then-run
+
+  node-a:
+    build: .
+    image: backupswarm:dev
+    depends_on:
+      seeder:
+        condition: service_completed_successfully
+      node-b:
+        condition: service_started
+    volumes:
+      - node-a-data:/data
+      - backup-src:/backup:ro
+      - shared-token:/shared:ro
+    networks:
+      swarm:
+        ipv4_address: 172.28.0.21
+    command:
+      - join
+      - --token-file
+      - /shared/token.txt
+      - --timeout
+      - 2m
+      - --then-run
+      - --backup-dir
+      - /backup
+      - --listen
+      - 172.28.0.21:7778
+      - --scan-interval
+      - 5s
 
 networks:
   swarm:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
 
 volumes:
   node-a-data:
   node-b-data:
+  backup-src:
+  shared-token:

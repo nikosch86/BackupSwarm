@@ -19,7 +19,7 @@ GO           ?= go
 GOFLAGS      ?=
 
 .PHONY: all build test coverage coverage-report lint fmt fmt-fix vet check clean \
-        docker-build docker-run docker-compose-up docker-compose-down \
+        docker-build docker-run docker-compose-up docker-compose-down docker-compose-test \
         trivy-deps trivy-image security-scan story-done help \
         mod-get mod-tidy
 
@@ -99,6 +99,29 @@ docker-compose-up:
 
 ## docker-compose-down: tear down the local swarm
 docker-compose-down:
+	docker compose down -v
+
+## docker-compose-test: end-to-end smoke test of the containerised 2-node swarm
+# Brings up the swarm detached, waits for both nodes to join and for node-a to
+# finish at least one scan pass (asserted via log grep), then tears everything
+# down. Runs against the image built by docker-compose.
+docker-compose-test:
+	docker compose up -d --build
+	@echo "waiting for node-b to accept the join handshake..."
+	@for i in $$(seq 1 60); do \
+		if docker compose logs node-b 2>/dev/null | grep -q '"msg":"peer joined"'; then break; fi; \
+		sleep 1; \
+	done
+	@docker compose logs node-b 2>/dev/null | grep -q '"msg":"peer joined"' || \
+		{ echo "node-b never logged 'peer joined'"; docker compose logs node-b; docker compose down -v; exit 1; }
+	@echo "waiting for node-a to complete at least one scan pass..."
+	@for i in $$(seq 1 60); do \
+		if docker compose logs node-a 2>/dev/null | grep -q 'backed up /backup/'; then break; fi; \
+		sleep 1; \
+	done
+	@docker compose logs node-a 2>/dev/null | grep -q 'backed up /backup/' || \
+		{ echo "node-a never logged 'backed up'"; docker compose logs node-a; docker compose down -v; exit 1; }
+	@echo "docker-compose-test: swarm formed and node-a backed up the seeded tree"
 	docker compose down -v
 
 ## trivy-deps: scan source tree for vulnerable deps, secrets, and misconfigs (HIGH+CRITICAL)

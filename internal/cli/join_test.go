@@ -5,7 +5,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,4 +83,101 @@ func TestJoinCmd_WrongPubkeyDoesNotPersist(t *testing.T) {
 	}
 	// If the file doesn't exist yet, that's also fine — means the
 	// command bailed early enough not to open peers.db at all.
+}
+
+// TestJoinCmd_TokenFileAndArgConflict rejects combinations that would
+// leave it ambiguous where the token should come from.
+func TestJoinCmd_TokenFileAndArgConflict(t *testing.T) {
+	root := NewRootCmd()
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"join",
+		"--token-file", filepath.Join(t.TempDir(), "tok"),
+		"some-token-positional",
+	})
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected error when --token-file and positional <token> are both set")
+	}
+	if !strings.Contains(err.Error(), "--token-file cannot be combined") {
+		t.Errorf("unexpected error text: %v", err)
+	}
+}
+
+// TestJoinCmd_TokenFileMissingTimesOut exercises the polling path when
+// the file never appears — must return a timeout-wrapped context error
+// rather than looping forever.
+func TestJoinCmd_TokenFileMissingTimesOut(t *testing.T) {
+	root := NewRootCmd()
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"join",
+		"--token-file", filepath.Join(t.TempDir(), "never-appears"),
+		"--timeout", "300ms",
+	})
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected DeadlineExceeded in error chain, got: %v", err)
+	}
+}
+
+// TestJoinCmd_TokenFileLateArrival asserts that join waits for the
+// file to appear mid-poll instead of failing when it's missing at
+// startup. This is the docker-compose orchestration case.
+func TestJoinCmd_TokenFileLateArrival(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "joiner")
+	tokenPath := filepath.Join(t.TempDir(), "token.txt")
+
+	// Craft a malformed-but-decodable-looking token first to prove
+	// partial contents are tolerated. We later overwrite it with a
+	// well-formed (but pointing-nowhere) token so DoJoin fails on
+	// dial — the assertion is that we got *past* the polling stage,
+	// not that the handshake succeeds.
+	_, pub, err := ed25519Gen()
+	if err != nil {
+		t.Fatalf("gen key: %v", err)
+	}
+	goodTok, err := token.Encode("127.0.0.1:1", pub)
+	if err != nil {
+		t.Fatalf("encode token: %v", err)
+	}
+	// Land the file ~150 ms after the command starts (two poll ticks).
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		_ = os.WriteFile(tokenPath, []byte(goodTok+"\n"), 0o600)
+	}()
+
+	root := NewRootCmd()
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"--data-dir", dataDir,
+		"join",
+		"--token-file", tokenPath,
+		"--timeout", "2s",
+	})
+	err = root.Execute()
+	// We expect a dial failure (target port isn't serving QUIC) — the
+	// important bit is we didn't error on "file not found" before then.
+	if err == nil {
+		t.Fatal("expected join to fail on dial after successfully reading the late-arriving token file")
+	}
+	if !strings.Contains(err.Error(), "join:") {
+		t.Errorf("expected dial-phase error, got: %v", err)
+	}
+}
+
+func ed25519Gen() (ed25519.PrivateKey, ed25519.PublicKey, error) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	return priv, pub, nil
 }

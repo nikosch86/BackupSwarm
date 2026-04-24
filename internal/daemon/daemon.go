@@ -134,8 +134,19 @@ type Options struct {
 	// with the swarm.
 	BackupDir string
 	// ListenAddr is the UDP address for the inbound QUIC listener
-	// (storage-peer role).
+	// (storage-peer role). Ignored when Listener is non-nil.
 	ListenAddr string
+	// Listener, when non-nil, is used as the inbound QUIC listener
+	// instead of binding ListenAddr. Ownership is handed off — Run
+	// closes it on exit. Callers pass a pre-bound listener to avoid
+	// the close/rebind race that breaks ":0" ports (e.g. after an
+	// `invite` handshake transitioning into the daemon).
+	Listener *bsquic.Listener
+	// PeerStore, when non-nil, is used instead of opening one at
+	// <DataDir>/peers.db. Ownership is handed off — Run closes it on
+	// exit. Lets `invite`/`join` hand their already-open peer store
+	// into the daemon without a bbolt flock hiccup.
+	PeerStore *peers.Store
 	// ChunkSize is the target chunk size for backups (bytes).
 	ChunkSize int
 	// ScanInterval is the period between scan passes. Zero uses a
@@ -203,9 +214,12 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer func() { _ = st.Close() }()
 
-	peerStore, err := peers.Open(filepath.Join(opts.DataDir, peers.DefaultFilename))
-	if err != nil {
-		return fmt.Errorf("open peer store: %w", err)
+	peerStore := opts.PeerStore
+	if peerStore == nil {
+		peerStore, err = peers.Open(filepath.Join(opts.DataDir, peers.DefaultFilename))
+		if err != nil {
+			return fmt.Errorf("open peer store: %w", err)
+		}
 	}
 	defer func() { _ = peerStore.Close() }()
 
@@ -232,9 +246,12 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
-	listener, err := bsquic.Listen(opts.ListenAddr, id.PrivateKey)
-	if err != nil {
-		return fmt.Errorf("listen on %q: %w", opts.ListenAddr, err)
+	listener := opts.Listener
+	if listener == nil {
+		listener, err = bsquic.Listen(opts.ListenAddr, id.PrivateKey)
+		if err != nil {
+			return fmt.Errorf("listen on %q: %w", opts.ListenAddr, err)
+		}
 	}
 	defer func() { _ = listener.Close() }()
 
