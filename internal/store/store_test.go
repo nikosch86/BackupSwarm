@@ -261,11 +261,17 @@ func TestStore_PersistsAcrossInstances(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
+	// Release any lazily-opened resources before reopening at the same root —
+	// bbolt's file lock would otherwise block a second store on the same dir.
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close #1: %v", err)
+	}
 
 	second, err := store.New(root)
 	if err != nil {
 		t.Fatalf("New #2: %v", err)
 	}
+	t.Cleanup(func() { _ = second.Close() })
 	got, err := second.Get(h)
 	if err != nil {
 		t.Fatalf("Get across instances: %v", err)
@@ -490,5 +496,6 @@ func newStore(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }

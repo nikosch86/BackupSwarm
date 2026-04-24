@@ -1,10 +1,11 @@
 // Package protocol defines the BackupSwarm peer-to-peer wire format.
 //
-// For M1.8 the vocabulary is a single message pair, PutChunkRequest and
-// PutChunkResponse, exchanged on a dedicated QUIC stream per chunk. The
-// request carries an opaque blob (the marshaled EncryptedChunk from
-// internal/crypto) and the response carries either the sha256 of that
-// blob (as stored on the peer) or an application-level error string.
+// For M1.8 the vocabulary was a single message pair, PutChunkRequest and
+// PutChunkResponse, exchanged on a dedicated QUIC stream per chunk. M1.9
+// adds DeleteChunkRequest/DeleteChunkResponse for owner-authorized
+// removal. Both live on the same listener, so every server-bound stream
+// starts with a single MessageType byte that the dispatcher reads first
+// to route the body.
 //
 // Framing is deliberately minimal and deterministic: big-endian length
 // prefixes, no schema-ful encoders. The wire shape is expected to evolve
@@ -14,11 +15,41 @@
 package protocol
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 )
+
+// MessageType tags the first byte of every peer-bound data-plane stream
+// so the server dispatcher can route PutChunk vs DeleteChunk without
+// speculatively parsing both frame shapes.
+type MessageType byte
+
+const (
+	// MsgPutChunk prefixes a PutChunkRequest body.
+	MsgPutChunk MessageType = 0x01
+	// MsgDeleteChunk prefixes a DeleteChunkRequest body.
+	MsgDeleteChunk MessageType = 0x02
+)
+
+// WriteMessageType writes t as a single byte.
+func WriteMessageType(w io.Writer, t MessageType) error {
+	if _, err := w.Write([]byte{byte(t)}); err != nil {
+		return fmt.Errorf("write message type: %w", err)
+	}
+	return nil
+}
+
+// ReadMessageType reads one byte and returns it as a MessageType.
+func ReadMessageType(r io.Reader) (MessageType, error) {
+	var b [1]byte
+	if _, err := io.ReadFull(r, b[:]); err != nil {
+		return 0, fmt.Errorf("read message type: %w", err)
+	}
+	return MessageType(b[0]), nil
+}
 
 // Response status codes.
 const (
@@ -234,5 +265,78 @@ func ReadJoinAck(r io.Reader) (string, error) {
 		return string(body), nil
 	default:
 		return "", fmt.Errorf("unknown ack status byte %d", status[0])
+	}
+}
+
+// WriteDeleteChunkRequest frames the content hash on w. The body is a
+// fixed-length 32-byte sha256 hash; the dispatch byte (MsgDeleteChunk)
+// is written separately by the caller so server-side routing stays
+// symmetric with the PutChunk path.
+func WriteDeleteChunkRequest(w io.Writer, hash [sha256.Size]byte) error {
+	if _, err := w.Write(hash[:]); err != nil {
+		return fmt.Errorf("write delete request hash: %w", err)
+	}
+	return nil
+}
+
+// ReadDeleteChunkRequest reads a 32-byte hash from r.
+func ReadDeleteChunkRequest(r io.Reader) ([sha256.Size]byte, error) {
+	var hash [sha256.Size]byte
+	if _, err := io.ReadFull(r, hash[:]); err != nil {
+		return hash, fmt.Errorf("read delete request hash: %w", err)
+	}
+	return hash, nil
+}
+
+// WriteDeleteChunkResponse writes a response frame with the same OK/Err
+// shape as WriteJoinAck: [statusOK] on success, [statusErr][4B len][bytes]
+// on application error (owner mismatch, chunk not found, etc.).
+func WriteDeleteChunkResponse(w io.Writer, appErr string) error {
+	if appErr == "" {
+		if _, err := w.Write([]byte{statusOK}); err != nil {
+			return fmt.Errorf("write delete response status: %w", err)
+		}
+		return nil
+	}
+	if _, err := w.Write([]byte{statusErr}); err != nil {
+		return fmt.Errorf("write delete response status: %w", err)
+	}
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(appErr)))
+	if _, err := w.Write(lenBuf[:]); err != nil {
+		return fmt.Errorf("write delete response error length: %w", err)
+	}
+	if _, err := w.Write([]byte(appErr)); err != nil {
+		return fmt.Errorf("write delete response error body: %w", err)
+	}
+	return nil
+}
+
+// ReadDeleteChunkResponse reads a delete response frame, returning the
+// application-level error string (empty on success) or a transport error.
+func ReadDeleteChunkResponse(r io.Reader) (string, error) {
+	var status [1]byte
+	if _, err := io.ReadFull(r, status[:]); err != nil {
+		return "", fmt.Errorf("read delete response status: %w", err)
+	}
+	switch status[0] {
+	case statusOK:
+		return "", nil
+	case statusErr:
+		var lenBuf [4]byte
+		if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+			return "", fmt.Errorf("read delete response error length: %w", err)
+		}
+		n := binary.BigEndian.Uint32(lenBuf[:])
+		if n > MaxErrorMessageLen {
+			return "", fmt.Errorf("delete response error length %d exceeds max %d", n, MaxErrorMessageLen)
+		}
+		body := make([]byte, n)
+		if _, err := io.ReadFull(r, body); err != nil {
+			return "", fmt.Errorf("read delete response error body: %w", err)
+		}
+		return string(body), nil
+	default:
+		return "", fmt.Errorf("unknown delete response status byte %d", status[0])
 	}
 }

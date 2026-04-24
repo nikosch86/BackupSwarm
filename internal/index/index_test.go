@@ -95,6 +95,8 @@ func TestOpen_FailsWhenParentIsFile(t *testing.T) {
 func TestPutGet_RoundTrip(t *testing.T) {
 	ix := newIndex(t)
 	entry := makeEntry(t, "/home/user/docs/report.pdf", 3)
+	entry.Size = 12345
+	entry.ModTime = time.Date(2026, time.April, 22, 10, 30, 0, 0, time.UTC)
 
 	if err := ix.Put(entry); err != nil {
 		t.Fatalf("Put: %v", err)
@@ -105,6 +107,12 @@ func TestPutGet_RoundTrip(t *testing.T) {
 	}
 	if got.Path != entry.Path {
 		t.Errorf("Path = %q, want %q", got.Path, entry.Path)
+	}
+	if got.Size != entry.Size {
+		t.Errorf("Size = %d, want %d", got.Size, entry.Size)
+	}
+	if !got.ModTime.Equal(entry.ModTime) {
+		t.Errorf("ModTime = %v, want %v", got.ModTime, entry.ModTime)
 	}
 	if len(got.Chunks) != len(entry.Chunks) {
 		t.Fatalf("len(Chunks) = %d, want %d", len(got.Chunks), len(entry.Chunks))

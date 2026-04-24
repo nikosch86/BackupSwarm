@@ -1,0 +1,59 @@
+package cli
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"backupswarm/internal/daemon"
+)
+
+func newRunCmd(dataDir *string) *cobra.Command {
+	var (
+		backupDir    string
+		listenAddr   string
+		chunkSize    int
+		scanInterval time.Duration
+		dialTimeout  time.Duration
+		restore      bool
+		purge        bool
+	)
+	cmd := &cobra.Command{
+		Use:   "run",
+		Short: "Run the sync daemon (serve chunks for peers and/or back up --backup-dir)",
+		Long: "Run the sync daemon. Omit --backup-dir to run as a pure storage peer " +
+			"that only serves chunks for others. The storage peer to back up to is read " +
+			"from peers.db (populated by `invite`/`join`); no --peer flag is needed. With " +
+			"no dialable peer and no --backup-dir, the daemon is a pure storage peer.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if listenAddr == "" {
+				return fmt.Errorf("--listen is required")
+			}
+
+			dir, err := resolveDataDir(*dataDir)
+			if err != nil {
+				return err
+			}
+			return daemon.Run(cmd.Context(), daemon.Options{
+				DataDir:      dir,
+				BackupDir:    backupDir,
+				ListenAddr:   listenAddr,
+				ChunkSize:    chunkSize,
+				ScanInterval: scanInterval,
+				DialTimeout:  dialTimeout,
+				Restore:      restore,
+				Purge:        purge,
+				Progress:     cmd.OutOrStdout(),
+			})
+		},
+	}
+	cmd.Flags().StringVar(&backupDir, "backup-dir", "", "Directory whose contents are kept synced to the swarm (optional; omit for pure storage-peer role)")
+	cmd.Flags().StringVar(&listenAddr, "listen", "", "UDP address for the inbound QUIC listener, e.g. 0.0.0.0:7777 (required)")
+	cmd.Flags().IntVar(&chunkSize, "chunk-size", 1<<20, "Target chunk size in bytes (default 1 MiB)")
+	cmd.Flags().DurationVar(&scanInterval, "scan-interval", 60*time.Second, "Period between incremental scan passes")
+	cmd.Flags().DurationVar(&dialTimeout, "dial-timeout", 30*time.Second, "Timeout for the initial dial to the storage peer")
+	cmd.Flags().BoolVar(&restore, "restore", false, "Start in restore mode (required if backup-dir empty but index populated). M1.10 implements the actual restore.")
+	cmd.Flags().BoolVar(&purge, "purge", false, "Clear all indexed chunks from the swarm and reset the index (required alternative to --restore when backup-dir empty)")
+	return cmd
+}

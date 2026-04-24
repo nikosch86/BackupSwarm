@@ -2,10 +2,7 @@ package cli
 
 import (
 	"bytes"
-	"strings"
 	"testing"
-
-	"github.com/spf13/cobra"
 )
 
 func TestNewRootCmd_HasNameAndShortDescription(t *testing.T) {
@@ -19,55 +16,27 @@ func TestNewRootCmd_HasNameAndShortDescription(t *testing.T) {
 	}
 }
 
-func TestNewRootCmd_HasInitSubcommand(t *testing.T) {
+func TestRootCmd_HasDataDirFlag(t *testing.T) {
 	root := NewRootCmd()
-
-	var found bool
-	for _, sub := range root.Commands() {
-		if sub.Name() == "init" {
-			found = true
-			break
-		}
+	f := root.PersistentFlags().Lookup("data-dir")
+	if f == nil {
+		t.Fatal("root command missing --data-dir persistent flag")
 	}
-	if !found {
-		t.Error("expected root command to have an 'init' subcommand")
+	if f.Usage == "" {
+		t.Error("--data-dir flag has empty usage string")
 	}
 }
 
-func TestInitCmd_RunsSuccessfully(t *testing.T) {
+// TestRootCmd_NoInitSubcommand: identity is auto-ensured by
+// invite/join/run, so a standalone `init` is redundant and was dropped
+// in M1.9's cleanup. This test pins the removal so a future
+// well-meaning refactor doesn't resurrect it by accident.
+func TestRootCmd_NoInitSubcommand(t *testing.T) {
 	root := NewRootCmd()
-
-	var stdout, stderr bytes.Buffer
-	root.SetOut(&stdout)
-	root.SetErr(&stderr)
-	root.SetArgs([]string{"--data-dir", t.TempDir(), "init"})
-
-	if err := root.Execute(); err != nil {
-		t.Fatalf("executing 'init' failed: %v (stderr=%q)", err, stderr.String())
-	}
-}
-
-// TestInitCmd_HasRunE pins the invariant that 'init' is actually wired to a
-// handler. Without this, a future refactor that drops RunE would still let
-// TestInitCmd_RunsSuccessfully pass (cobra treats no-op commands as success).
-func TestInitCmd_HasRunE(t *testing.T) {
-	root := NewRootCmd()
-
-	var initCmd *cobra.Command
 	for _, sub := range root.Commands() {
 		if sub.Name() == "init" {
-			initCmd = sub
-			break
+			t.Error("root command has `init` subcommand; should be dropped (identity is auto-ensured)")
 		}
-	}
-	if initCmd == nil {
-		t.Fatal("init subcommand not found")
-	}
-	if initCmd.RunE == nil && initCmd.Run == nil {
-		t.Error("init subcommand has neither RunE nor Run handler")
-	}
-	if initCmd.Short == "" {
-		t.Error("init subcommand is missing Short description")
 	}
 }
 
@@ -85,18 +54,16 @@ func TestRootCmd_SilencesUsageAndErrors(t *testing.T) {
 	}
 }
 
-func TestRootCmd_HelpListsInit(t *testing.T) {
+func TestRootCmd_HelpRuns(t *testing.T) {
 	root := NewRootCmd()
-
 	var stdout bytes.Buffer
 	root.SetOut(&stdout)
 	root.SetErr(&stdout)
 	root.SetArgs([]string{"--help"})
-
 	if err := root.Execute(); err != nil {
-		t.Fatalf("executing --help failed: %v", err)
+		t.Fatalf("--help failed: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "init") {
-		t.Errorf("help output does not mention 'init' subcommand:\n%s", stdout.String())
+	if stdout.Len() == 0 {
+		t.Error("--help produced no output")
 	}
 }

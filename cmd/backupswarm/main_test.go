@@ -12,16 +12,11 @@ func TestRun_HelpReturnsZero(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--help) exit code = %d, want 0 (stderr=%q)", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "init") {
-		t.Errorf("help output missing 'init' subcommand:\n%s", stdout.String())
-	}
-}
-
-func TestRun_InitReturnsZero(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"--data-dir", t.TempDir(), "init"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("run(init) exit code = %d, want 0 (stderr=%q)", code, stderr.String())
+	// Spot-check that the help output lists the live subcommands.
+	for _, sub := range []string{"invite", "join", "run"} {
+		if !strings.Contains(stdout.String(), sub) {
+			t.Errorf("help output missing %q subcommand:\n%s", sub, stdout.String())
+		}
 	}
 }
 

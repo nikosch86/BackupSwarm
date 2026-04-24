@@ -34,6 +34,22 @@ var randReader io.Reader = rand.Reader
 // NextProtocol is the ALPN identifier negotiated for BackupSwarm peer connections.
 const NextProtocol = "bsw/1"
 
+// defaultKeepAlivePeriod is the interval at which idle connections send
+// PING frames to keep NAT/firewall state and avoid quic-go's default
+// 30s MaxIdleTimeout tearing down a connection between scan passes.
+// 10s is well under 1/3 of the idle timeout — the common rule of thumb
+// so a single lost PING doesn't cascade into a close.
+const defaultKeepAlivePeriod = 10 * time.Second
+
+// newQUICConfig returns the quic-go Config used by both Listen and
+// Dial. Factored out so white-box tests can assert the invariants
+// (keep-alive enabled, etc.) on a single source of truth.
+func newQUICConfig() *qgo.Config {
+	return &qgo.Config{
+		KeepAlivePeriod: defaultKeepAlivePeriod,
+	}
+}
+
 // ErrPeerPubkeyMismatch is returned when a dial pins an expected peer public
 // key and the peer presents a certificate with a different one.
 var ErrPeerPubkeyMismatch = errors.New("peer Ed25519 public key mismatch")
@@ -64,7 +80,7 @@ func Listen(addr string, priv ed25519.PrivateKey) (*Listener, error) {
 		MinVersion: tls.VersionTLS13,
 		NextProtos: []string{NextProtocol},
 	}
-	inner, err := qgo.ListenAddr(addr, tlsConf, &qgo.Config{})
+	inner, err := qgo.ListenAddr(addr, tlsConf, newQUICConfig())
 	if err != nil {
 		return nil, fmt.Errorf("quic listen %q: %w", addr, err)
 	}
@@ -118,7 +134,7 @@ func Dial(ctx context.Context, addr string, priv ed25519.PrivateKey, expectedPee
 		MinVersion: tls.VersionTLS13,
 		NextProtos: []string{NextProtocol},
 	}
-	qc, err := qgo.DialAddr(ctx, addr, tlsConf, &qgo.Config{})
+	qc, err := qgo.DialAddr(ctx, addr, tlsConf, newQUICConfig())
 	if err != nil {
 		return nil, fmt.Errorf("quic dial %q: %w", addr, err)
 	}

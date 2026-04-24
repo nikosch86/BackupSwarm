@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"go.etcd.io/bbolt"
 )
 
 // withCreateTempFunc swaps createTempFunc for the duration of a test.
@@ -30,6 +32,24 @@ func withReadAllFunc(t *testing.T, fn func(r io.Reader) ([]byte, error)) {
 	prev := readAllFunc
 	readAllFunc = fn
 	t.Cleanup(func() { readAllFunc = prev })
+}
+
+// withChmodFunc swaps chmodFunc for the duration of a test.
+// White-box only — production never reassigns it.
+func withChmodFunc(t *testing.T, fn func(name string, mode os.FileMode) error) {
+	t.Helper()
+	prev := chmodFunc
+	chmodFunc = fn
+	t.Cleanup(func() { chmodFunc = prev })
+}
+
+// withDBUpdateFunc swaps dbUpdateFunc for the duration of a test.
+// White-box only — production never reassigns it.
+func withDBUpdateFunc(t *testing.T, fn func(db *bbolt.DB, fn func(*bbolt.Tx) error) error) {
+	t.Helper()
+	prev := dbUpdateFunc
+	dbUpdateFunc = fn
+	t.Cleanup(func() { dbUpdateFunc = prev })
 }
 
 // fakeTempFile wraps a real *os.File so we still get a valid tmp path on
@@ -198,6 +218,80 @@ func TestGet_ReadAllFailure(t *testing.T) {
 	if errors.Is(err, ErrChunkNotFound) {
 		t.Errorf("Get err = %v, must not wrap ErrChunkNotFound for read failures", err)
 	}
+}
+
+// TestEnsureOwnersDB_ChmodFailure exercises the os.Chmod error wrap
+// inside ensureOwnersDB. bbolt.Open has just successfully opened the
+// file, so a real Chmod failure is a stdlib invariant violation —
+// only the seam reaches this branch. Same pattern as the chmodFunc
+// seam in internal/index / internal/peers.
+func TestEnsureOwnersDB_ChmodFailure(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	sentinel := errors.New("forced chmod failure")
+	withChmodFunc(t, func(name string, mode os.FileMode) error {
+		return sentinel
+	})
+
+	// PutOwned is the shortest path to ensureOwnersDB from the exported
+	// API; Put would skip it. The recorded error must wrap the sentinel
+	// and mention the chmod stage.
+	_, err = s.PutOwned([]byte("owned"), []byte("alice"))
+	if err == nil {
+		t.Fatal("PutOwned succeeded despite injected chmod failure")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+	if !containsSubstr(err.Error(), "chmod owners db") {
+		t.Errorf("err = %q, want 'chmod owners db' prefix", err.Error())
+	}
+}
+
+// TestEnsureOwnersDB_BucketCreateFailure exercises the db.Update error
+// wrap inside ensureOwnersDB. CreateBucketIfNotExists on a healthy
+// freshly-opened db with a non-empty bucket name cannot fail in normal
+// operation — only the seam reaches this branch.
+func TestEnsureOwnersDB_BucketCreateFailure(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	sentinel := errors.New("forced update failure")
+	withDBUpdateFunc(t, func(db *bbolt.DB, fn func(*bbolt.Tx) error) error {
+		return sentinel
+	})
+
+	_, err = s.PutOwned([]byte("owned"), []byte("alice"))
+	if err == nil {
+		t.Fatal("PutOwned succeeded despite injected Update failure")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+	if !containsSubstr(err.Error(), "create owners bucket") {
+		t.Errorf("err = %q, want 'create owners bucket' prefix", err.Error())
+	}
+}
+
+// containsSubstr is a trivial substring helper used by the tests above
+// to avoid importing strings into this white-box test file.
+func containsSubstr(s, sub string) bool {
+	if len(sub) > len(s) {
+		return false
+	}
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
 
 // Sanity check: the sharded path helper is what determines where a

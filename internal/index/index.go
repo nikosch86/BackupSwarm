@@ -61,9 +61,17 @@ type ChunkRef struct {
 // FileEntry is the index record for a single backed-up file. Chunks is
 // ordered: Chunks[i] is the i-th chunk of the file. An empty Chunks
 // slice represents a zero-byte file.
+//
+// Size and ModTime are the plaintext file's size (in bytes) and last
+// modification time as observed on the owner's disk at backup time. The
+// daemon's incremental scan (M1.9) uses these two fields as a cheap
+// "has this file changed?" key: a stat match means the file is up to
+// date and the scan can skip chunking/uploading the body.
 type FileEntry struct {
-	Path   string
-	Chunks []ChunkRef
+	Path    string
+	Size    int64
+	ModTime time.Time
+	Chunks  []ChunkRef
 }
 
 // Index is a bbolt-backed local index. Safe for concurrent use —

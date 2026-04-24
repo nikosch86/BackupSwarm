@@ -21,6 +21,23 @@ func withRandReader(t *testing.T, r io.Reader) {
 	t.Cleanup(func() { randReader = prev })
 }
 
+// TestDefaultQUICConfig_EnablesKeepAlive pins the invariant that the
+// shared quic-go Config has a non-zero KeepAlivePeriod. Without it, a
+// connection that stays idle across two scan intervals (or any gap
+// longer than the 30s default MaxIdleTimeout) tears down with
+// "timeout: no recent network activity" and the next OpenStream fails.
+// Setting KeepAlivePeriod to ~10s keeps the connection warm with cheap
+// PING frames.
+func TestDefaultQUICConfig_EnablesKeepAlive(t *testing.T) {
+	cfg := newQUICConfig()
+	if cfg.KeepAlivePeriod == 0 {
+		t.Error("quic Config KeepAlivePeriod = 0; connections will time out on idle scan intervals")
+	}
+	if cfg.KeepAlivePeriod > 20*1_000_000_000 { // > 20s
+		t.Errorf("KeepAlivePeriod = %v is too close to MaxIdleTimeout; need 1/3 or less", cfg.KeepAlivePeriod)
+	}
+}
+
 func newTestKey(t *testing.T) ed25519.PrivateKey {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
