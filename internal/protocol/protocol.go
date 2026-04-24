@@ -1,18 +1,8 @@
-// Package protocol defines the BackupSwarm peer-to-peer wire format.
-//
-// For M1.8 the vocabulary was a single message pair, PutChunkRequest and
-// PutChunkResponse, exchanged on a dedicated QUIC stream per chunk. M1.9
-// adds DeleteChunkRequest/DeleteChunkResponse for owner-authorized
-// removal; M1.10 adds GetChunkRequest/GetChunkResponse for restore. All
-// three live on the same listener, so every server-bound stream starts
-// with a single MessageType byte that the dispatcher reads first to
-// route the body.
-//
-// Framing is deliberately minimal and deterministic: big-endian length
-// prefixes, no schema-ful encoders. The wire shape is expected to evolve
-// in M3 when protobuf is introduced; the goal here is that the format is
-// small enough to reason about and that the peer can detect malformed or
-// maliciously-sized input without allocating attacker-controlled buffers.
+// Package protocol defines the BackupSwarm peer-to-peer wire format:
+// PutChunk, DeleteChunk, and GetChunk request/response pairs, each on a
+// dedicated QUIC stream prefixed by a single MessageType byte. Framing
+// is big-endian length prefixes with caller-supplied size caps to bound
+// allocations from malicious or malformed input.
 package protocol
 
 import (
@@ -93,9 +83,8 @@ func WritePutChunkRequest(w io.Writer, blob []byte) error {
 }
 
 // ReadPutChunkRequest reads a single request frame from r, returning the
-// opaque blob bytes. maxBlobLen bounds the blob size; frames whose
-// advertised length exceeds this cap are rejected with ErrBlobTooLarge
-// before any body read is attempted.
+// opaque blob bytes. Frames whose advertised length exceeds maxBlobLen
+// are rejected with ErrBlobTooLarge without allocating the body.
 func ReadPutChunkRequest(r io.Reader, maxBlobLen int) ([]byte, error) {
 	var hdr [4]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {

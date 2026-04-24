@@ -430,11 +430,9 @@ func TestRun_WithPeer_FirstBackupShipsChunks(t *testing.T) {
 	}
 }
 
-// TestRun_RestoreMode: after a backup, empty the backup dir and restart
-// the daemon with --restore. Every file previously backed up must be
-// rewritten to disk under backupDir with original content and mtime.
-// Paths in the index are absolute (under backupDir), so Dest = "/"
-// puts them back where they originally were.
+// TestRun_RestoreMode: after a backup, empty backupDir and restart with
+// --restore; every indexed file must be rewritten to its absolute path
+// with matching content and mtime.
 func TestRun_RestoreMode(t *testing.T) {
 	peer := newPeerRig(t)
 	dataDir := t.TempDir()
@@ -657,8 +655,7 @@ func TestRun_DialFailure(t *testing.T) {
 }
 
 // TestRun_MultiplePeers rejects startup when peers.db has more than
-// one dialable entry. M1.9 assumes a single storage peer; M2.14 adds
-// weighted-random placement across multiple peers.
+// one dialable entry (single-peer mode only).
 func TestRun_MultiplePeers(t *testing.T) {
 	dataDir := t.TempDir()
 	backupDir := t.TempDir()

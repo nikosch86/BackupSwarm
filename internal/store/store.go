@@ -1,19 +1,8 @@
-// Package store is the on-disk chunk store: a content-addressed,
-// flat-file repository of opaque byte blobs keyed by sha256(content).
-//
-// Callers pass raw bytes to Put and receive the SHA-256 hash used as the
-// content address. The store is agnostic about what the bytes mean — on
-// owner nodes it typically holds encrypted chunks produced by
-// internal/crypto, on storage peers it holds whatever ciphertext arrived
-// over the wire. Mapping from plaintext chunk hashes (see internal/chunk)
-// to on-disk blob hashes lives in the index (M1.7), not here.
-//
-// Layout: <root>/<hh>/<full-hex-hash>, where <hh> is the first byte of
-// the hash in lowercase hex. 256 shard directories keep any single
-// directory well below filesystem fan-out limits. An optional owners db
-// lives at <root>/owners.db (bbolt) and records the Ed25519 pubkey of
-// the uploading peer for each blob written via PutOwned; DeleteForOwner
-// consults it to enforce owner-authorized deletion (M1.9).
+// Package store is the on-disk chunk store: opaque byte blobs keyed by
+// sha256(content), laid out as <root>/<hh>/<full-hex-hash> for 256-way
+// sharding. An optional <root>/owners.db (bbolt) records the Ed25519
+// pubkey of the uploading peer for each blob written via PutOwned so
+// DeleteForOwner can enforce owner-authorized deletion.
 package store
 
 import (
@@ -40,93 +29,64 @@ const (
 	ownersLockTimout = 2 * time.Second
 )
 
-// tempFile is the subset of *os.File that Put uses for its temp-file
-// write-then-rename dance. Abstracted as an interface so internal tests
-// can substitute a fake that fails Write or Close — the syscall error
-// paths in Put are otherwise unreachable without fault injection.
+// tempFile lets tests substitute a fake that fails Write or Close.
 type tempFile interface {
 	Name() string
 	Write(p []byte) (n int, err error)
 	Close() error
 }
 
-// Package-level seams so internal tests can exercise post-CreateTemp
-// error branches (write, close, rename) and Get's mid-read failure.
-// Production code never reassigns these — same pattern as the
-// randReader seam in internal/crypto and internal/quic.
+// Test-only seams; production never reassigns these.
 var (
 	createTempFunc = func(dir, pattern string) (tempFile, error) {
 		return os.CreateTemp(dir, pattern)
 	}
-	renameFunc  = os.Rename
-	readAllFunc = io.ReadAll
-	// chmodFunc seams the post-bbolt.Open os.Chmod call in
-	// ensureOwnersDB. A real chmod on a file the current process just
-	// successfully opened is a stdlib-invariant success; fault injection
-	// is the only way to exercise the error wrap. Same pattern as the
-	// chmodFunc seam in internal/index and internal/peers.
-	chmodFunc = os.Chmod
-	// dbUpdateFunc seams the bucket-creation Update on a freshly-opened
-	// owners db. Bolt's Update never fails on a healthy db that
-	// CreateBucketIfNotExists was just called on with a non-empty name,
-	// so the error wrap is only reachable via the seam. Same pattern as
-	// the dbUpdateFunc seam in internal/index and internal/peers.
+	renameFunc   = os.Rename
+	readAllFunc  = io.ReadAll
+	chmodFunc    = os.Chmod
 	dbUpdateFunc = func(db *bbolt.DB, fn func(*bbolt.Tx) error) error {
 		return db.Update(fn)
 	}
 )
 
-// ErrChunkNotFound is returned by Get, Delete, and DeleteForOwner when a
-// hash has never been stored or has already been deleted. Callers use
-// errors.Is to distinguish "missing" from other IO errors.
+// ErrChunkNotFound is returned by Get, Delete, and DeleteForOwner when
+// no blob exists for the given hash.
 var ErrChunkNotFound = errors.New("chunk not found")
 
 // ErrNoOwnerRecorded is returned by Owner when a blob exists on disk but
-// was stored via Put (not PutOwned) and therefore has no associated
-// uploader pubkey. Callers distinguish this from a plain missing blob so
-// the delete path can refuse unowned blobs loudly rather than silently.
+// was stored via Put (not PutOwned) and has no uploader pubkey.
 var ErrNoOwnerRecorded = errors.New("no owner recorded for blob")
 
-// ErrOwnerMismatch is returned by PutOwned when a second PutOwned for
-// the same content arrives from a different owner, and by DeleteForOwner
-// when the requesting owner does not match the stored owner (or when the
-// blob has no owner recorded at all). Callers use errors.Is to map this
-// to an authz failure on the peer-side protocol handler.
+// ErrOwnerMismatch is returned when a PutOwned or DeleteForOwner request
+// does not match the stored owner (maps to an authz failure).
 var ErrOwnerMismatch = errors.New("owner mismatch")
 
 // Store is a content-addressed chunk store rooted at a local directory.
-// A Store is safe for concurrent use: Put is atomic via temp-file + rename
-// and idempotent for repeated writes of identical content.
+// Safe for concurrent use: Put is atomic via temp-file + rename and
+// idempotent for repeated writes of identical content.
 type Store struct {
 	root string
 
-	// owners is lazily opened on first call that needs owner tracking
-	// (PutOwned / Owner / DeleteForOwner). Plain Put never touches it,
-	// so stores created purely for content-addressed reads pay no bbolt
-	// cost. Access is guarded by ownersMu so lazy-open is race-safe.
+	// owners is lazily opened on first owner-tracking call; plain Put
+	// never touches it. ownersMu makes lazy-open race-safe.
 	ownersMu sync.Mutex
 	owners   *bbolt.DB
 }
 
-// New opens (or initializes) a store rooted at dir. The directory is
-// created at 0700 if missing; an existing directory has its permissions
-// tightened to 0700. Returns an error if dir cannot be created as a
-// directory (e.g. path exists as a regular file, or a parent is not
-// writable).
+// New opens (or initializes) a store rooted at dir. Dir is created and
+// chmod'd to 0700; returns an error if dir is not creatable as a directory.
 func New(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return nil, fmt.Errorf("create store dir %q: %w", dir, err)
 	}
-	// MkdirAll is a no-op on an existing dir with looser perms; force-tighten.
+	// Tighten perms in case dir pre-existed with a looser mode.
 	if err := os.Chmod(dir, dirPerm); err != nil {
 		return nil, fmt.Errorf("chmod store dir %q: %w", dir, err)
 	}
 	return &Store{root: dir}, nil
 }
 
-// Close releases any lazily-opened backing resources (currently the
-// owners bbolt handle). Close is idempotent and safe to call on a Store
-// that never touched its owners db.
+// Close releases the lazily-opened owners bbolt handle. Idempotent.
 func (s *Store) Close() error {
 	s.ownersMu.Lock()
 	defer s.ownersMu.Unlock()
@@ -138,24 +98,15 @@ func (s *Store) Close() error {
 	return err
 }
 
-// Put writes data to the store and returns its SHA-256 content address.
-// If a blob with the same hash already exists, Put is a no-op and returns
-// the same hash without error. Writes land atomically via temp-file +
-// rename so concurrent Puts of the same content never tear.
-//
-// Put records no owner; callers that need owner-authorized deletion
-// (storage peers accepting chunks from the wire) must use PutOwned.
+// Put writes data and returns its SHA-256. Idempotent; no owner recorded.
+// Callers needing owner-authorized delete must use PutOwned instead.
 func (s *Store) Put(data []byte) ([sha256.Size]byte, error) {
 	return s.putBytes(data)
 }
 
-// PutOwned is Put plus an owner record: the uploader's public key
-// is persisted alongside the blob so DeleteForOwner can later enforce
-// that only the same owner authorizes removal.
-//
-// If the content already exists and the recorded owner does not equal
-// owner, PutOwned returns ErrOwnerMismatch and leaves the stored owner
-// unchanged. Same owner + same content is a no-op and returns nil.
+// PutOwned is Put plus an owner record. Same-owner + same-content is a
+// no-op; different owner for existing content returns ErrOwnerMismatch
+// without overwriting.
 func (s *Store) PutOwned(data, owner []byte) ([sha256.Size]byte, error) {
 	hash, err := s.putBytes(data)
 	if err != nil {
@@ -210,8 +161,7 @@ func (s *Store) putBytes(data []byte) ([sha256.Size]byte, error) {
 	return hash, nil
 }
 
-// Get returns the bytes previously stored under hash, or ErrChunkNotFound
-// if no such blob exists.
+// Get returns the bytes stored under hash, or ErrChunkNotFound.
 func (s *Store) Get(hash [sha256.Size]byte) ([]byte, error) {
 	path := s.pathFor(hash)
 	f, err := os.Open(path)
@@ -243,10 +193,8 @@ func (s *Store) Has(hash [sha256.Size]byte) (bool, error) {
 	return false, fmt.Errorf("stat %q: %w", path, err)
 }
 
-// Delete removes the blob for hash. Returns ErrChunkNotFound if no such
-// blob exists. Delete does NOT consult the owners db and does NOT
-// enforce owner-authorized deletion — callers that need authorization
-// (the peer-side DeleteChunk handler) must use DeleteForOwner instead.
+// Delete removes the blob for hash. Does NOT enforce owner authorization —
+// callers needing that must use DeleteForOwner.
 func (s *Store) Delete(hash [sha256.Size]byte) error {
 	path := s.pathFor(hash)
 	err := os.Remove(path)
@@ -283,13 +231,9 @@ func (s *Store) Owner(hash [sha256.Size]byte) ([]byte, error) {
 	return out, nil
 }
 
-// DeleteForOwner removes the blob at hash only if the recorded owner
-// equals owner. Returns ErrChunkNotFound if the blob does not exist on
-// disk, and ErrOwnerMismatch if the owner check fails (including the
-// case where no owner was recorded for the blob).
-//
-// On success the blob and its owner entry are both removed; on any
-// error the on-disk state is untouched.
+// DeleteForOwner removes the blob only if the recorded owner matches.
+// Returns ErrChunkNotFound (no blob) or ErrOwnerMismatch (owner check
+// failed, including unowned blobs). On error, disk state is untouched.
 func (s *Store) DeleteForOwner(hash [sha256.Size]byte, owner []byte) error {
 	ok, err := s.Has(hash)
 	if err != nil {

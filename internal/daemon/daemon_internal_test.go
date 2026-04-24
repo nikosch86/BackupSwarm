@@ -117,12 +117,9 @@ func TestPurgeAll_ContextCancelled(t *testing.T) {
 	}
 }
 
-// TestPurgeAll_PruneFailurePropagates exercises the inner `backup.Prune`
-// error return. The index is seeded with a dangling entry (file gone on
-// disk) so Prune attempts a DeleteChunk, but the QUIC connection is
-// closed before purgeAll runs so the send fails and the error surfaces
-// unwrapped back to the caller — this is the branch that was previously
-// uncovered (happy-path integration covered the success arm only).
+// TestPurgeAll_PruneFailurePropagates exercises the inner backup.Prune
+// error return. A dangling index entry forces Prune to DeleteChunk; the
+// closed QUIC conn makes the send fail, surfacing the wrapped error.
 func TestPurgeAll_PruneFailurePropagates(t *testing.T) {
 	// Build a minimal peer listener so we can dial a real QUIC conn
 	// against it, then close the conn so the inner Prune fails at its

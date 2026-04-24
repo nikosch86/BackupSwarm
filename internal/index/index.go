@@ -1,13 +1,6 @@
-// Package index is a local bbolt-backed index that maps each backed-up
-// file path to its ordered list of chunks and the peers known to hold
-// each chunk.
-//
-// The owner node is authoritative over its own index. Backup (M1.8)
-// upserts entries as files are chunked and shipped to peers; restore
-// (M1.9) consults the index to locate each chunk. An encrypted snapshot
-// of the whole index is backed up to the swarm in M3.4 as a regular
-// chunk with the owner as the recipient — the index format is the
-// serialization contract for that snapshot.
+// Package index is a local bbolt-backed index mapping each backed-up
+// file path to its ordered chunk list and the peers known to hold each
+// chunk. The owner is authoritative over its own index.
 package index
 
 import (
@@ -29,28 +22,18 @@ const (
 
 	bucketName = "files"
 
-	// openLockTimeout bounds how long Open will wait for bbolt's file
-	// lock. Trying to open an already-open index is a caller bug (two
-	// Index values on the same file), so we fail fast rather than hang.
+	// openLockTimeout fails fast on an already-open index (caller bug).
 	openLockTimeout = 2 * time.Second
 )
 
-// ErrFileNotFound is returned by Get and Delete when no entry exists for
-// the given path. Callers use errors.Is to distinguish "not indexed"
-// from underlying IO or decode errors.
+// ErrFileNotFound is returned by Get and Delete when no entry exists.
 var ErrFileNotFound = errors.New("file not found in index")
 
-// ChunkRef is the locator for one chunk of a backed-up file.
-//
-// PlaintextHash is sha256 of the original file bytes covered by this chunk
-// (the content address used by internal/chunk); backup/restore uses it for
-// integrity verification after decryption and, eventually, cross-file
-// dedup in M6. CiphertextHash is sha256 of the serialized encrypted blob
-// stored on storage peers — it is the content address used to fetch the
-// chunk over the wire, and matches the internal/store address on the peer.
-// Size is the byte length of the ciphertext blob (the number of bytes that
-// will be transferred to restore the chunk). Peers lists the Ed25519 public
-// keys of storage peers known to hold the ciphertext blob.
+// ChunkRef locates one chunk of a backed-up file. PlaintextHash is the
+// sha256 of the plaintext bytes (used for post-decrypt integrity).
+// CiphertextHash is the sha256 of the encrypted blob (the wire/store
+// address on peers). Size is the ciphertext blob length. Peers lists
+// Ed25519 pubkeys of storage peers known to hold the blob.
 type ChunkRef struct {
 	PlaintextHash  [32]byte
 	CiphertextHash [32]byte
@@ -58,15 +41,9 @@ type ChunkRef struct {
 	Peers          [][]byte
 }
 
-// FileEntry is the index record for a single backed-up file. Chunks is
-// ordered: Chunks[i] is the i-th chunk of the file. An empty Chunks
-// slice represents a zero-byte file.
-//
-// Size and ModTime are the plaintext file's size (in bytes) and last
-// modification time as observed on the owner's disk at backup time. The
-// daemon's incremental scan (M1.9) uses these two fields as a cheap
-// "has this file changed?" key: a stat match means the file is up to
-// date and the scan can skip chunking/uploading the body.
+// FileEntry is the index record for one backed-up file. Chunks is ordered;
+// Size and ModTime are the plaintext file's stat at backup time and drive
+// the scan's incremental-skip stat-match.
 type FileEntry struct {
 	Path    string
 	Size    int64
@@ -74,38 +51,25 @@ type FileEntry struct {
 	Chunks  []ChunkRef
 }
 
-// Index is a bbolt-backed local index. Safe for concurrent use —
-// bbolt serializes all write transactions internally.
+// Index is a bbolt-backed local index. Safe for concurrent use — bbolt
+// serializes all write transactions internally.
 type Index struct {
 	db *bbolt.DB
 }
 
-// Package-level seams so internal tests can exercise otherwise-defensive
-// branches (encode failures, db-level failures caught via a closed db).
-// Production code never reassigns these — same pattern as the
-// createTempFunc / randReader seams in internal/store and internal/crypto.
+// Test-only seams; production never reassigns these.
 var (
 	gobEncodeFunc = func(w io.Writer, v any) error {
 		return gob.NewEncoder(w).Encode(v)
 	}
-	// chmodFunc seams the post-Open os.Chmod call. A real chmod on a
-	// file the current process just successfully opened is a
-	// stdlib-invariant success; fault injection is the only way to
-	// exercise the error wrap.
-	chmodFunc = os.Chmod
-	// dbUpdateFunc seams the bucket-creation Update on a freshly-opened
-	// db. Bolt's Update never fails on a healthy db that CreateBucketIfNotExists
-	// was just called on with a non-empty name, so the error wrap is only
-	// reachable via the seam.
+	chmodFunc    = os.Chmod
 	dbUpdateFunc = func(db *bbolt.DB, fn func(*bbolt.Tx) error) error {
 		return db.Update(fn)
 	}
 )
 
-// Open opens (or initializes) the index at path. The parent directory is
-// created at 0700 if missing; the bbolt file is created at 0600 (an
-// explicit Chmod is applied afterwards so the on-disk mode is
-// deterministic regardless of the process umask).
+// Open opens (or initializes) the index at path. Parent is mkdir 0700;
+// the bbolt file is chmod'd to 0600 explicitly to defeat a lax umask.
 func Open(path string) (*Index, error) {
 	parent := filepath.Dir(path)
 	if err := os.MkdirAll(parent, dirPerm); err != nil {
@@ -115,8 +79,7 @@ func Open(path string) (*Index, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open index %q: %w", path, err)
 	}
-	// bbolt.Open honours the process umask; force the required mode
-	// explicitly so a lax umask can't leave the db world-readable.
+	// Defeat umask — keep the db 0600 on disk.
 	if err := chmodFunc(path, filePerm); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("chmod index %q: %w", path, err)

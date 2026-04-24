@@ -27,10 +27,8 @@ func TestRootCmd_HasDataDirFlag(t *testing.T) {
 	}
 }
 
-// TestRootCmd_NoInitSubcommand: identity is auto-ensured by
-// invite/join/run, so a standalone `init` is redundant and was dropped
-// in M1.9's cleanup. This test pins the removal so a future
-// well-meaning refactor doesn't resurrect it by accident.
+// TestRootCmd_NoInitSubcommand pins that no `init` subcommand exists —
+// identity is auto-ensured by invite/join/run.
 func TestRootCmd_NoInitSubcommand(t *testing.T) {
 	root := NewRootCmd()
 	for _, sub := range root.Commands() {

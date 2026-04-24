@@ -203,10 +203,8 @@ func TestHandlePutChunkStream_ReadRequestError(t *testing.T) {
 	}
 }
 
-// TestHandleDeleteChunkStream_AuthorizedDelete exercises the happy path
-// on the delete handler: a blob previously stored via PutOwned by owner
-// can be removed by a DeleteChunk request with that same owner key, and
-// the response is a success frame.
+// TestHandleDeleteChunkStream_AuthorizedDelete: a blob stored via
+// PutOwned is removable by a DeleteChunk from the same owner key.
 func TestHandleDeleteChunkStream_AuthorizedDelete(t *testing.T) {
 	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
 	if err != nil {

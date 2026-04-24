@@ -1,15 +1,7 @@
-// Package backup implements the M1.8 end-to-end backup pipeline:
-// the owner side walks a local path, splits each file into fixed-size
-// chunks, encrypts them for a recipient X25519 key, ships each chunk to a
-// storage peer over a QUIC stream, and records the resulting placements
-// in the local bbolt index; the peer side accepts those streams and
-// content-addresses the ciphertext blobs in its local store.
-//
-// Owner and peer speak internal/protocol.PutChunk on a dedicated
-// bidirectional QUIC stream per chunk. One chunk = one stream keeps the
-// wire vocabulary minimal — there is no multiplexing, no pipelining, and
-// no connection-level state beyond the mutual-TLS identity already
-// established by internal/quic.
+// Package backup implements the end-to-end backup pipeline: owner walks a
+// path, splits files into fixed-size chunks, encrypts for a recipient
+// X25519 key, ships each chunk on one QUIC stream, and records placements
+// in the local index; the peer stores received ciphertext by content hash.
 package backup
 
 import (
@@ -29,23 +21,13 @@ import (
 	"backupswarm/internal/store"
 )
 
-// maxBlobLen bounds how many bytes the peer will accept for a single
-// PutChunkRequest body. The largest legitimate chunk is chunk.MaxChunkSize
-// plus the serialization overhead from crypto.MarshalBinary
-// (version + nonce + two length prefixes + wrapped key). 4 MiB + a
-// generous kilobyte is ample and keeps a malicious peer from forcing a
-// multi-MB allocation.
+// maxBlobLen caps one PutChunkRequest body: MaxChunkSize + headroom for
+// the crypto.MarshalBinary overhead. Keeps a malicious peer from forcing
+// a huge allocation.
 const maxBlobLen = chunk.MaxChunkSize + 1024
 
-// Package-level seams so internal tests can exercise otherwise-defensive
-// branches. Production code never reassigns these — same pattern as the
-// gobEncodeFunc / chmodFunc seams in internal/index.
+// Test-only seams; production never reassigns these.
 var (
-	// indexDeleteFunc seams the index.Delete call made by Prune after
-	// it has already sent DeleteChunk for every chunk of a dangling
-	// entry. A real Delete failure at that point requires either a
-	// racy index close or a bbolt IO error — neither is reproducible
-	// without the seam.
 	indexDeleteFunc = func(idx *index.Index, path string) error {
 		return idx.Delete(path)
 	}
@@ -123,12 +105,7 @@ func backupFile(ctx context.Context, opts RunOptions, path string, peerKey []byt
 		return fmt.Errorf("stat %q: %w", path, err)
 	}
 
-	// Incremental skip: if the index already has this path with the
-	// same size and modtime, the file is unchanged and there's nothing
-	// to chunk, encrypt, or ship. This is the core of the M1.9 scan —
-	// the expected steady-state is that most files match their index
-	// entry on every rescan, so the fast path must be cheap (one stat
-	// syscall per file, already done above).
+	// Incremental skip: stat-matching index entry means unchanged file.
 	if existing, err := opts.Index.Get(path); err == nil {
 		if existing.Size == info.Size() && existing.ModTime.Equal(info.ModTime()) {
 			fmt.Fprintf(opts.Progress, "unchanged %s\n", path)
@@ -181,33 +158,22 @@ func backupFile(ctx context.Context, opts RunOptions, path string, peerKey []byt
 
 // PruneOptions is the owner-side configuration for a Prune sweep.
 type PruneOptions struct {
-	// Root constrains the sweep to index entries whose Path lies under
-	// Root. Entries outside Root are left alone — a safeguard against a
-	// misconfigured daemon wiping unrelated backups.
+	// Root scopes the sweep; entries whose Path lies outside Root are
+	// left alone (guards against a misconfigured daemon wiping unrelated
+	// backups).
 	Root string
-	// Conn is the QUIC connection to the storage peer that currently
-	// holds the chunks (M1.9 assumes one storage peer per swarm; M2.14
-	// generalizes to the weighted-random set).
+	// Conn is the QUIC connection to the storage peer holding the chunks.
 	Conn *bsquic.Conn
-	// Index is the local bbolt index; Prune both reads it (to decide
-	// what's gone) and writes it (to remove entries after successful
-	// remote deletes).
+	// Index is the local bbolt index.
 	Index *index.Index
 	// Progress receives a per-entry line when a delete is performed.
 	// nil is treated as io.Discard.
 	Progress io.Writer
 }
 
-// Prune sends DeleteChunk to the storage peer for every index entry
-// whose file has disappeared from disk under opts.Root, then removes
-// the entry from the local index. Entries whose files still exist on
-// disk, or whose paths are outside opts.Root, are left alone.
-//
-// The index is the source of truth for "what's been backed up"; Prune
-// makes it match the current on-disk reality for the subtree under
-// Root. On any delete failure (transport error, owner-mismatch at the
-// peer, etc.) the corresponding index entry is retained and an error
-// is returned — the owner can retry on the next scan.
+// Prune sends DeleteChunk for every index entry under Root whose file is
+// gone from disk, then removes the entry. On any delete failure the entry
+// is retained so the owner can retry on the next scan.
 func Prune(ctx context.Context, opts PruneOptions) error {
 	if opts.Progress == nil {
 		opts.Progress = io.Discard
@@ -254,29 +220,20 @@ func Prune(ctx context.Context, opts PruneOptions) error {
 	return nil
 }
 
-// streamOpener is the subset of *bsquic.Conn that sendChunk needs.
-// Keeping sendChunk's first argument an interface (rather than the
-// concrete type) lets white-box tests inject failing stream openers to
-// exercise each post-OpenStream error wrap — otherwise unreachable
-// without actually kicking the real QUIC transport mid-write. Same
-// shape as the seam patterns in internal/index and internal/peers.
+// streamOpener is the subset of *bsquic.Conn that sendChunk needs; lets
+// tests inject a failing stream opener to exercise post-OpenStream wraps.
 type streamOpener interface {
 	OpenStream(ctx context.Context) (io.ReadWriteCloser, error)
 }
 
-// bsquicConnAdapter adapts *bsquic.Conn to the streamOpener interface
-// (the real OpenStream returns a *qgo.Stream, which already satisfies
-// io.ReadWriteCloser but not the exact signature).
 type bsquicConnAdapter struct{ c *bsquic.Conn }
 
 func (a bsquicConnAdapter) OpenStream(ctx context.Context) (io.ReadWriteCloser, error) {
 	return a.c.OpenStream(ctx)
 }
 
-// sendChunk opens a new bidirectional stream on conn, writes the
-// PutChunkRequest (prefixed by a MsgPutChunk byte so the server
-// dispatcher can route it), half-closes the send side, and reads the
-// PutChunkResponse. Returns the peer-reported content hash.
+// sendChunk writes a PutChunk request and reads the response, returning
+// the peer-reported content hash.
 func sendChunk(ctx context.Context, conn streamOpener, blob []byte) ([32]byte, error) {
 	s, err := conn.OpenStream(ctx)
 	if err != nil {
@@ -306,19 +263,14 @@ func sendChunk(ctx context.Context, conn streamOpener, blob []byte) ([32]byte, e
 	return hash, nil
 }
 
-// SendGetChunk opens a fresh QUIC stream on conn, fetches the blob
-// stored under hash on the peer, and returns it. Exposed for callers
-// outside this package (internal/restore) that need the owner-side
-// request shape without rebuilding the framing themselves. Returns an
-// error wrapping the peer's application message on chunk-not-found.
+// SendGetChunk fetches the blob stored under hash from conn. Wraps any
+// peer-reported application error (e.g. chunk-not-found).
 func SendGetChunk(ctx context.Context, conn *bsquic.Conn, hash [32]byte) ([]byte, error) {
 	return sendGetChunk(ctx, bsquicConnAdapter{c: conn}, hash)
 }
 
-// sendGetChunk opens a new bidirectional stream on conn, writes a
-// GetChunkRequest (prefixed by a MsgGetChunk byte), half-closes, and
-// reads the GetChunkResponse. Returns the blob on success, or an error
-// that wraps the peer-reported application message on chunk-not-found.
+// sendGetChunk writes a GetChunk request and returns the blob or a
+// wrapped peer application error.
 func sendGetChunk(ctx context.Context, conn streamOpener, hash [32]byte) ([]byte, error) {
 	s, err := conn.OpenStream(ctx)
 	if err != nil {
@@ -347,11 +299,8 @@ func sendGetChunk(ctx context.Context, conn streamOpener, hash [32]byte) ([]byte
 	return blob, nil
 }
 
-// sendDeleteChunk opens a new bidirectional stream on conn, writes a
-// DeleteChunkRequest (prefixed by a MsgDeleteChunk byte), half-closes,
-// and reads the DeleteChunkResponse. Returns nil on success, or an
-// error that wraps the peer-reported application message on owner
-// mismatch / chunk-not-found.
+// sendDeleteChunk writes a DeleteChunk request and returns nil, or a
+// wrapped peer application error (owner mismatch / chunk-not-found).
 func sendDeleteChunk(ctx context.Context, conn streamOpener, hash [32]byte) error {
 	s, err := conn.OpenStream(ctx)
 	if err != nil {
@@ -380,10 +329,8 @@ func sendDeleteChunk(ctx context.Context, conn streamOpener, hash [32]byte) erro
 	return nil
 }
 
-// Serve accepts inbound QUIC connections on l and handles PutChunk
-// streams, storing every received blob in st. Exits when ctx is
-// cancelled; a post-cancellation accept error (e.g., listener closed)
-// is treated as a clean shutdown.
+// Serve accepts inbound QUIC connections on l and dispatches streams
+// against st. Exits cleanly on ctx cancellation.
 func Serve(ctx context.Context, l *bsquic.Listener, st *store.Store) error {
 	for {
 		conn, err := l.Accept(ctx)
@@ -414,11 +361,9 @@ func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store) {
 	}
 }
 
-// dispatchStream reads the MessageType byte and routes the remainder of
-// the stream to the right handler. ownerKey is the authenticated
-// Ed25519 pubkey of the remote peer (captured once from the TLS
-// session) and is used by handlePutChunkStream to record ownership and
-// by handleDeleteChunkStream to authorize deletion.
+// dispatchStream routes each inbound stream on its leading MessageType byte.
+// ownerKey is the TLS-authenticated Ed25519 pubkey of the remote peer,
+// used by put to record ownership and by delete to authorize removal.
 func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, ownerKey []byte) error {
 	_ = ctx
 	msgType, err := protocol.ReadMessageType(rw)
@@ -437,11 +382,9 @@ func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owne
 	}
 }
 
-// handlePutChunkStream reads a single PutChunkRequest from rw, stores
-// the blob under owner, and writes the PutChunkResponse. A store.Put
-// failure is surfaced as an application-level error in the response
-// (not as a transport error), so the owner can distinguish "peer
-// rejected" from "connection dropped".
+// handlePutChunkStream stores the request blob under owner and writes
+// the response. Store errors are surfaced as application errors so the
+// owner can distinguish them from transport failures.
 func handlePutChunkStream(rw io.ReadWriter, st *store.Store, owner []byte) error {
 	blob, err := protocol.ReadPutChunkRequest(rw, maxBlobLen)
 	if err != nil {
@@ -454,11 +397,9 @@ func handlePutChunkStream(rw io.ReadWriter, st *store.Store, owner []byte) error
 	return protocol.WritePutChunkResponse(rw, hash, "")
 }
 
-// handleDeleteChunkStream reads a DeleteChunkRequest, authorizes the
-// deletion against owner (the TLS-authenticated pubkey of the peer), and
-// writes the DeleteChunkResponse. Owner-mismatch or chunk-not-found are
-// surfaced as application errors in the response; transport failures
-// are returned.
+// handleDeleteChunkStream authorizes the delete against owner (the
+// TLS-authenticated pubkey) and writes the response. Owner-mismatch and
+// chunk-not-found are surfaced as application errors.
 func handleDeleteChunkStream(rw io.ReadWriter, st *store.Store, owner []byte) error {
 	hash, err := protocol.ReadDeleteChunkRequest(rw)
 	if err != nil {
@@ -470,12 +411,9 @@ func handleDeleteChunkStream(rw io.ReadWriter, st *store.Store, owner []byte) er
 	return protocol.WriteDeleteChunkResponse(rw, "")
 }
 
-// handleGetChunkStream reads a GetChunkRequest, looks up the blob by
-// hash, and writes the GetChunkResponse. Unknown-hash is surfaced as
-// an application-level error (so the owner can distinguish "peer does
-// not have it" from "connection dropped"); transport failures are
-// returned. No owner check is performed — M1 storage peers serve any
-// stored chunk on an authenticated swarm connection.
+// handleGetChunkStream looks up the blob by hash and writes the response.
+// Unknown-hash is an application error; no owner check is performed —
+// storage peers serve any stored chunk on an authenticated connection.
 func handleGetChunkStream(rw io.ReadWriter, st *store.Store) error {
 	hash, err := protocol.ReadGetChunkRequest(rw)
 	if err != nil {

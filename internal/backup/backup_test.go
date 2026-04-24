@@ -219,7 +219,7 @@ func TestRun_MultiChunkFile(t *testing.T) {
 			t.Errorf("chunk %d: peer missing blob", i)
 		}
 	}
-	_ = data // end-to-end restore integrity is covered by M1.9; here we pin pipeline shape
+	_ = data // pipeline shape only; end-to-end restore integrity lives in restore tests
 }
 
 func TestRun_DirectoryWalk(t *testing.T) {
@@ -458,9 +458,8 @@ func TestRun_IncrementalSkipsUnchanged(t *testing.T) {
 	}
 }
 
-// TestRun_IncrementalReuploadsOnSizeChange asserts that a size change
-// (even with the same mtime) is picked up — the re-chunked file is
-// shipped and the index entry replaced.
+// TestRun_IncrementalReuploadsOnSizeChange asserts a size change (even
+// with the same mtime) re-chunks and updates the index entry.
 func TestRun_IncrementalReuploadsOnSizeChange(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
@@ -483,8 +482,7 @@ func TestRun_IncrementalReuploadsOnSizeChange(t *testing.T) {
 		t.Fatalf("Get #1: %v", err)
 	}
 
-	// Grow the file by appending a byte (new size, new mtime). Index entry
-	// should be replaced on the next Run.
+	// Append a byte (new size, new mtime) — next Run should update the entry.
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		t.Fatalf("open-append: %v", err)

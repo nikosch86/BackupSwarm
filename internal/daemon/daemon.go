@@ -1,15 +1,9 @@
-// Package daemon is the M1.9 sync-daemon runner: a single long-running
+// Package daemon is the sync-daemon runner: a single long-running
 // process that is both a backup source (keeping its own backup dir
-// synced to a storage peer) and a storage peer (serving PutChunk +
-// DeleteChunk streams for others).
-//
-// The core of the package is pure: Classify decides one of a fixed set
-// of startup Modes from the (local-populated?, index-populated?)
-// product, and helpers like BackupDirHasRegularFiles inspect the
-// local filesystem. The Run function wires the mode selection to a
-// real QUIC listener and a backup.Serve loop; integration coverage for
-// Run lives in the CLI `run` command test suite (M1.11) rather than
-// here.
+// synced to a storage peer) and a storage peer (serving PutChunk and
+// DeleteChunk streams for others). Classify selects the startup Mode
+// from (local-populated?, index-populated?); Run wires the selected
+// Mode to a QUIC listener and a backup.Serve loop.
 package daemon
 
 import (
@@ -34,56 +28,35 @@ import (
 	"backupswarm/internal/store"
 )
 
-// Mode is the startup classification produced by Classify. It drives
-// what the daemon does immediately after opening its local state:
-// either a first-ever backup, a steady-state reconcile, a restore, a
-// purge, or plain idle.
+// Mode is the startup classification produced by Classify.
 type Mode int
 
 const (
-	// ModeIdle: nothing to back up, nothing to restore. The daemon
-	// still accepts inbound chunks and deletes (it is a storage peer),
-	// it just runs no scan loop of its own.
+	// ModeIdle: nothing to back up, nothing to restore. The daemon still
+	// serves inbound chunks but runs no scan loop of its own.
 	ModeIdle Mode = iota
-	// ModeFirstBackup: the backup dir contains data, but the local
-	// index has no record of it. First-time setup — the scan will
-	// chunk and ship everything.
+	// ModeFirstBackup: backup dir populated, index empty. Chunk and ship everything.
 	ModeFirstBackup
-	// ModeReconcile: normal steady-state. Scan against the index,
-	// upload changed files, emit DeleteChunk for files gone from disk.
+	// ModeReconcile: steady state. Scan against the index, upload
+	// changed files, emit DeleteChunk for files gone from disk.
 	ModeReconcile
-	// ModeRestore: the local backup dir is empty but the index knows
-	// about files — the user asked for --restore. M1.10 implements the
-	// actual restore logic; until then this Mode lets the daemon start
-	// cleanly rather than refusing.
+	// ModeRestore: backup dir empty, index populated, user asked for --restore.
 	ModeRestore
-	// ModePurge: the local backup dir is empty but the index is
-	// populated, and the user asked for --purge. The daemon will ask
-	// storage peers to delete every blob recorded in the index, then
-	// clear the index.
+	// ModePurge: backup dir empty, index populated, user asked for --purge.
+	// Deletes every indexed blob from storage peers then clears the index.
 	ModePurge
 )
 
 // ErrRefuseStart is returned by Classify when the backup dir is empty
-// but the index is populated, and the caller did not pass --restore or
-// --purge. The daemon refuses to start rather than silently treat the
-// situation as a fresh setup (which would orphan every swarm-stored
-// blob) or a clean shutdown (which would race an in-flight backup).
+// but the index is populated without --restore or --purge. Starting
+// blindly would orphan every swarm-stored blob.
 var ErrRefuseStart = errors.New("local backup dir is empty but index is populated; pass --restore or --purge")
 
-// ErrConflictingFlags is returned by Classify when both --restore and
-// --purge are set. The daemon cannot simultaneously download files and
-// delete them; this is a caller error.
+// ErrConflictingFlags is returned by Classify when both --restore and --purge are set.
 var ErrConflictingFlags = errors.New("--restore and --purge are mutually exclusive")
 
-// Classify returns the Mode a daemon should run in given whether the
-// backup dir contains regular files (localPopulated) and whether the
-// local index has any entries (indexPopulated).
-//
-// restore and purge are reserved for the (local-empty, index-populated)
-// case. Passing either when localPopulated is true is ignored silently —
-// there is no ambiguity: the daemon either reconciles or does a first
-// backup and the flags are no-ops.
+// Classify returns the Mode the daemon should run in. restore and purge
+// are only consulted in the (local-empty, index-populated) case.
 func Classify(localPopulated, indexPopulated, restore, purge bool) (Mode, error) {
 	if restore && purge {
 		return 0, ErrConflictingFlags
@@ -125,10 +98,8 @@ type ScanOnceOptions struct {
 	Progress io.Writer
 }
 
-// ScanOnce runs one incremental backup + one prune sweep against the
-// storage peer on the other end of opts.Conn. Intended to be called
-// repeatedly by the daemon's ticker loop; each call is independent and
-// safe to re-run after a transient failure.
+// ScanOnce runs one incremental backup pass followed by one prune sweep
+// against opts.Conn. Each call is independent; safe to retry after failure.
 func ScanOnce(ctx context.Context, opts ScanOnceOptions) error {
 	if opts.Progress == nil {
 		opts.Progress = io.Discard
@@ -156,10 +127,8 @@ func ScanOnce(ctx context.Context, opts ScanOnceOptions) error {
 
 // Options is the configuration for Run.
 type Options struct {
-	// DataDir is the node's data directory (identity, recipient keys,
-	// index, store, owners db, peer store). The storage peer to dial
-	// for outbound chunks is read from `<DataDir>/peers.db`, which is
-	// populated by the `invite`/`join` handshake.
+	// DataDir holds identity, recipient keys, index, store, owners db,
+	// and peers.db; the dial target is read from peers.db.
 	DataDir string
 	// BackupDir is the user's source-of-truth directory kept in sync
 	// with the swarm.
@@ -173,9 +142,7 @@ type Options struct {
 	// sensible default (60s).
 	ScanInterval time.Duration
 	// Restore selects ModeRestore when the backup dir is empty but the
-	// index is populated. M1.9 does not yet implement restore; Run
-	// logs a warning and continues in Idle mode. M1.10 wires the
-	// actual restore logic to this flag.
+	// index is populated.
 	Restore bool
 	// Purge selects ModePurge: delete every indexed blob from the
 	// storage peer and clear the index, then continue in Idle mode.
@@ -189,9 +156,8 @@ type Options struct {
 }
 
 // ErrMultiplePeers is returned by Run when more than one peer in
-// peers.db has a non-empty address. M1 assumes a single storage peer
-// per swarm; multi-peer placement lands in M2.14.
-var ErrMultiplePeers = errors.New("multiple dialable peers in peers.db; M1.9 supports exactly one — remove extras with a future `peers` CLI or wait for M2.14")
+// peers.db has a non-empty address. Only single-peer mode is supported.
+var ErrMultiplePeers = errors.New("multiple dialable peers in peers.db; single-peer mode only")
 
 const (
 	defaultScanInterval = 60 * time.Second
@@ -201,12 +167,10 @@ const (
 	storeDirName  = "chunks"
 )
 
-// Run is the M1.9 sync-daemon entrypoint. It opens local state, applies
-// the startup-mode classification from Classify, and then either runs a
-// scan loop against a storage peer, performs a one-shot purge, or sits
-// idle as a storage peer waiting for inbound requests. The function
-// blocks until ctx is cancelled and returns the first unrecoverable
-// error encountered.
+// Run is the sync-daemon entrypoint. It opens local state, applies the
+// Classify decision, and then either runs a scan loop, performs a one-shot
+// purge, or sits idle serving inbound requests. Blocks until ctx is
+// cancelled; returns the first unrecoverable error.
 func Run(ctx context.Context, opts Options) error {
 	if opts.Progress == nil {
 		opts.Progress = io.Discard
@@ -250,10 +214,8 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 
-	// Classify upfront so flag-validation errors (ErrConflictingFlags,
-	// ErrRefuseStart) are surfaced before the listener binds a port.
-	// In storage-only mode (no BackupDir) classification is skipped —
-	// there is no scan to gate.
+	// Classify before binding so flag-validation errors surface cleanly.
+	// Storage-only mode (no BackupDir) has no scan to gate.
 	var mode Mode
 	if opts.BackupDir != "" {
 		localPop, err := BackupDirHasRegularFiles(opts.BackupDir)
@@ -279,10 +241,7 @@ func Run(ctx context.Context, opts Options) error {
 	serveErrCh := make(chan error, 1)
 	go func() { serveErrCh <- backup.Serve(ctx, listener, st) }()
 
-	// Pure storage-peer role: no --backup-dir means this node only serves
-	// chunks for others; no scan loop, no classification. Logged with a
-	// distinct message so an operator can tell this from the
-	// "have a backup dir but no peer yet" idle case below.
+	// Pure storage-peer role: serve inbound chunks only, no scan loop.
 	if opts.BackupDir == "" {
 		slog.InfoContext(ctx, "daemon starting (storage-only)",
 			"node_id", id.ShortID(),
@@ -325,24 +284,18 @@ func Run(ctx context.Context, opts Options) error {
 
 	switch mode {
 	case ModePurge:
-		// For purge we clear the whole tree under BackupDir. Since the
-		// backup dir is empty (definition of the Purge mode), a Prune
-		// with Root == BackupDir would leave nothing to do; we instead
-		// iterate the index wholesale and delete every entry. Because
-		// Prune already scopes by Root, we walk entries manually here.
+		// Purge: iterate the index and send DeleteChunk per entry.
+		// (Prune scopes by Root and the empty backup dir has nothing
+		// under Root to iterate.)
 		if err := purgeAll(ctx, idx, peerConn, opts.Progress); err != nil {
 			return fmt.Errorf("purge: %w", err)
 		}
 		fmt.Fprintln(opts.Progress, "purge complete; daemon continuing in idle mode")
 	case ModeRestore:
-		// Entries in the index are absolute paths under opts.BackupDir;
-		// Dest == "/" restores each file to its original location. The
-		// backupDir itself is known to be empty by definition of
-		// ModeRestore (the refuse-to-start guard otherwise fires), so
-		// every restored path lands inside it without colliding with
-		// existing user data. restore.Run preserves each entry's
-		// ModTime so the subsequent scan loop incremental-skips them
-		// rather than re-shipping every byte.
+		// Dest "/" puts each indexed file back at its absolute path. The
+		// backup dir is empty by definition of ModeRestore, so no
+		// collision with existing user data. Preserving ModTime lets the
+		// next scan incremental-skip each restored file.
 		if err := restore.Run(ctx, restore.Options{
 			Dest:          "/",
 			Conn:          peerConn,
@@ -379,17 +332,9 @@ func waitForServe(ctx context.Context, serveErrCh <-chan error) error {
 	}
 }
 
-// pickStoragePeer selects the single storage peer the daemon should
-// dial, using peers.db as the source of truth. Returns:
-//   - (nil, nil) if no peer has a non-empty address (storage-peer-only
-//     role; daemon serves inbound chunks but does not back up anywhere).
-//   - (peer, nil) when exactly one peer has a non-empty address.
-//   - (nil, ErrMultiplePeers) if more than one peer is dialable. M1.9
-//     assumes a single storage peer per swarm; M2.14 introduces the
-//     weighted-random placement that makes multi-peer meaningful.
-//
-// Peers with empty addresses (recorded by `join` when the joiner had
-// no --listen of its own) are ignored — the daemon cannot dial them.
+// pickStoragePeer picks the single dialable peer from peers.db. Returns
+// (nil, nil) if none have an address (storage-peer-only role),
+// (peer, nil) if exactly one does, or (nil, ErrMultiplePeers) otherwise.
 func pickStoragePeer(ps *peers.Store) (*peers.Peer, error) {
 	all, err := ps.List()
 	if err != nil {
@@ -450,10 +395,9 @@ func purgeAll(ctx context.Context, idx *index.Index, conn *bsquic.Conn, progress
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		// Point Prune's root at the entry's directory so its rooted
-		// check accepts the path. Stat will fail-with-ErrNotExist (we
-		// are in Purge mode precisely because the dir is empty), so
-		// Prune will delete + remove the entry.
+		// Root at the entry's dir so Prune's rooted check accepts it;
+		// Stat fails ErrNotExist (empty dir in Purge mode), so Prune
+		// deletes and removes the entry.
 		if err := backup.Prune(ctx, backup.PruneOptions{
 			Root:     filepath.Dir(e.Path),
 			Conn:     conn,
@@ -484,9 +428,7 @@ func modeName(m Mode) string {
 }
 
 // BackupDirHasRegularFiles walks dir and returns true as soon as one
-// regular file is found. Symlinks, sockets, and device files don't
-// count (matching backup.Run's selection rules). An error is returned
-// if dir does not exist or cannot be walked.
+// regular file is found (symlinks, sockets, and device files don't count).
 func BackupDirHasRegularFiles(dir string) (bool, error) {
 	info, err := os.Stat(dir)
 	if err != nil {

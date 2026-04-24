@@ -1,18 +1,7 @@
-// Package restore is the M1.10 restore pipeline: given a local bbolt
-// index describing what was backed up and a live QUIC connection to a
-// storage peer, fetch each chunk, decrypt it, verify its plaintext
-// hash, and reassemble the original files under a user-supplied Dest
-// root.
-//
-// Layout: each file's original absolute path is rewritten under Dest
-// via filepath.Join(Dest, entry.Path), so /home/alice/docs/foo.txt
-// restored into /tmp/dest lands at /tmp/dest/home/alice/docs/foo.txt.
-// Dest must be absolute so the rewrite is unambiguous. The original
-// directory tree is created at 0700; restored files are 0600.
-//
-// Integrity: each chunk's post-decrypt plaintext hash is compared
-// against ChunkRef.PlaintextHash from the index; a mismatch aborts the
-// restore before writing any further bytes for that file.
+// Package restore fetches each indexed chunk from a storage peer, decrypts
+// it, verifies its plaintext hash against the index, and reassembles the
+// file at filepath.Join(Dest, entry.Path). Dirs are 0700, files 0600; a
+// hash mismatch aborts before any further writes for that file.
 package restore
 
 import (
@@ -40,20 +29,13 @@ const (
 // aborts rather than write garbage to Dest.
 var ErrPlaintextHashMismatch = errors.New("plaintext hash mismatch")
 
-// writableFile is the subset of *os.File that restoreFile uses after
-// the initial OpenFile. Abstracting as an interface lets internal tests
-// substitute a fake that fails Write or Close — the post-Open syscall
-// error paths are otherwise unreachable without fault injection. Same
-// pattern as the tempFile interface in internal/store.
+// writableFile lets tests substitute a fake that fails Write or Close.
 type writableFile interface {
 	Write(p []byte) (int, error)
 	Close() error
 }
 
-// Package-level seams so internal tests can exercise post-OpenFile
-// error branches (write, close) and the Chtimes error wrap. Production
-// code never reassigns these — same pattern as the createTempFunc /
-// renameFunc seams in internal/store.
+// Test-only seams; production never reassigns these.
 var (
 	openFileFunc = func(name string, flag int, perm os.FileMode) (writableFile, error) {
 		return os.OpenFile(name, flag, perm)
@@ -64,25 +46,20 @@ var (
 // Options configures a restore invocation.
 type Options struct {
 	// Dest is the absolute directory under which every indexed path is
-	// recreated. An entry with Path == "/home/alice/docs/a.txt" lands at
-	// Dest + "/home/alice/docs/a.txt".
+	// recreated (path "/home/alice/x" → Dest + "/home/alice/x").
 	Dest string
-	// Conn is the live QUIC connection to the storage peer that holds
-	// the chunks (M1 assumes a single peer per swarm; M2.14+ generalizes).
+	// Conn is the live QUIC connection to the storage peer.
 	Conn *bsquic.Conn
 	// Index is the local bbolt index describing what to restore.
 	Index *index.Index
-	// RecipientPub and RecipientPriv are the X25519 keypair under which
-	// the chunks were encrypted at backup time.
+	// RecipientPub and RecipientPriv are the X25519 keypair used at backup.
 	RecipientPub, RecipientPriv *[crypto.RecipientKeySize]byte
 	// Progress receives per-file progress lines. nil is treated as io.Discard.
 	Progress io.Writer
 }
 
-// Run restores every file recorded in opts.Index under opts.Dest. On
-// first error (transport, decrypt, or hash-mismatch) Run stops and
-// returns the wrapped error; the partial-output file, if any, is left
-// behind so the user can inspect it.
+// Run restores every indexed file under opts.Dest. Stops at the first
+// error; any partial output is left for inspection.
 func Run(ctx context.Context, opts Options) error {
 	if opts.Progress == nil {
 		opts.Progress = io.Discard
@@ -142,11 +119,8 @@ func restoreFile(ctx context.Context, opts Options, entry index.FileEntry) error
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close: %w", err)
 	}
-	// Preserve the original mtime so a subsequent daemon scan sees the
-	// restored file as up-to-date (matching Size + ModTime in the index)
-	// and incremental-skips it. Without this the scan would re-chunk and
-	// re-ship every restored file, orphaning the old ciphertext blobs on
-	// the peer.
+	// Preserve mtime so the next scan's stat-match incremental-skips
+	// this file rather than re-chunking and orphaning old ciphertext.
 	if err := chtimesFunc(outPath, entry.ModTime, entry.ModTime); err != nil {
 		return fmt.Errorf("chtimes: %w", err)
 	}

@@ -1,17 +1,8 @@
-// Package crypto implements the chunk-level hybrid encryption scheme used
-// throughout BackupSwarm.
-//
-// Each chunk is sealed with a fresh, random XChaCha20-Poly1305 symmetric key.
-// That per-chunk key is then wrapped (encrypted) for a recipient's X25519
-// public key using NaCl anonymous box, so storage peers see only opaque
-// ciphertext + opaque wrapped key — they cannot derive the plaintext or
-// learn anything about the sender. Only a holder of the matching X25519
-// private key can unwrap the symmetric key and decrypt the chunk.
-//
-// The package is deliberately self-contained: the recipient X25519 keys are
-// distinct from the node's Ed25519 signing identity (internal/node).
-// Identity-bound encryption keys will be wired in alongside the protocol
-// layer in M1.5+.
+// Package crypto implements chunk-level hybrid encryption: each chunk is
+// sealed with a fresh XChaCha20-Poly1305 symmetric key, which is then
+// wrapped for a recipient X25519 public key using NaCl anonymous box.
+// Storage peers see only opaque ciphertext and opaque wrapped key.
+// Recipient X25519 keys are distinct from the node's Ed25519 identity.
 package crypto
 
 import (

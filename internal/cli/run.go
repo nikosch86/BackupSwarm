@@ -53,7 +53,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().IntVar(&chunkSize, "chunk-size", 1<<20, "Target chunk size in bytes (default 1 MiB)")
 	cmd.Flags().DurationVar(&scanInterval, "scan-interval", 60*time.Second, "Period between incremental scan passes")
 	cmd.Flags().DurationVar(&dialTimeout, "dial-timeout", 30*time.Second, "Timeout for the initial dial to the storage peer")
-	cmd.Flags().BoolVar(&restore, "restore", false, "Start in restore mode (required if backup-dir empty but index populated). M1.10 implements the actual restore.")
+	cmd.Flags().BoolVar(&restore, "restore", false, "Start in restore mode (required if backup-dir empty but index populated)")
 	cmd.Flags().BoolVar(&purge, "purge", false, "Clear all indexed chunks from the swarm and reset the index (required alternative to --restore when backup-dir empty)")
 	return cmd
 }

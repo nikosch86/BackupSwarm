@@ -1,12 +1,7 @@
-// Package token serializes and deserializes the shareable "invite" tokens
-// that bootstrap a new node into an existing swarm.
-//
-// For M1 a token carries only the minimum needed to dial and pin the
-// introducer: the introducer's listen address and its Ed25519 public key.
-// The M2.1 token will add a swarm ID, single-use secret, and optional swarm
-// CA certificate — all additive. The leading version byte is present from
-// day one so an M1 node can reject M2 tokens (and vice versa) with a clear
-// ErrUnknownVersion instead of misparsing unfamiliar bytes.
+// Package token serializes and deserializes shareable invite tokens
+// carrying an introducer's listen address and Ed25519 public key. A
+// leading version byte lets a node reject tokens in a format it does
+// not understand with ErrUnknownVersion instead of misparsing them.
 package token
 
 import (

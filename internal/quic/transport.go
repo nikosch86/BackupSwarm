@@ -1,11 +1,7 @@
-// Package quic implements the BackupSwarm peer transport over QUIC with
-// mutual TLS authentication keyed by per-node Ed25519 identities.
-//
-// Each node presents a self-signed X.509 certificate whose public key is its
-// Ed25519 identity; peer authentication consists of extracting that public
-// key from the presented cert and (for outbound dials) comparing it to the
-// expected pin. There is no certificate authority — the public key is the
-// identity, and trust is established via the join-token flow (M2).
+// Package quic implements the peer transport over QUIC with mutual TLS
+// keyed by per-node Ed25519 identities. Each node presents a self-signed
+// cert whose public key is its identity; outbound dials pin the expected
+// pubkey. No CA — the pubkey is the identity.
 package quic
 
 import (

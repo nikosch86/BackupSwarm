@@ -1,11 +1,7 @@
 // Package chunk splits byte streams into fixed-size, content-addressed
-// chunks and reassembles them back into the original stream.
-//
-// Each chunk carries a monotonically increasing index starting at 0, a
-// SHA-256 hash of its plaintext bytes (the content address used by the
-// on-disk store in M1.6), and the raw bytes themselves. Split returns
-// chunks in order; Join tolerates any ordering of its input and validates
-// that the index sequence is dense from 0.
+// chunks (index, SHA-256, bytes) and reassembles them. Split returns
+// chunks in order; Join tolerates any input order but requires a dense
+// index sequence starting at 0.
 package chunk
 
 import (
@@ -16,8 +12,8 @@ import (
 	"sort"
 )
 
-// Fixed-size chunks are bounded at 1–4 MiB per the M1 design in plan.md.
-// Values outside this range are rejected by Split.
+// Chunk size is bounded at 1–4 MiB. Values outside this range are
+// rejected by Split.
 const (
 	MinChunkSize = 1 << 20 // 1 MiB
 	MaxChunkSize = 4 << 20 // 4 MiB

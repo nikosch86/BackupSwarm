@@ -1,12 +1,6 @@
-// Package peers is the local persistent registry of known storage peers:
-// the set of nodes this node has been told about (today: via `join`;
-// in M2 also via forwarded peer announcements).
-//
-// Each peer is keyed by its Ed25519 public key and carries its last-known
-// listen address. Upserts overwrite by pubkey, so a peer whose address
-// changes is updated in place rather than duplicated. The store is
-// bbolt-backed, matching internal/index, so the persistence discipline
-// (file lock, transactional writes) is shared.
+// Package peers is the local persistent registry of known storage peers,
+// keyed by Ed25519 pubkey with the last-known listen address. Upserts
+// overwrite by pubkey; bbolt-backed, matching internal/index.
 package peers
 
 import (
@@ -32,9 +26,7 @@ const (
 	openLockTimeout = 2 * time.Second
 
 	// DefaultFilename is the conventional basename for the peer-store
-	// bbolt file inside a node's data directory. CLI commands and the
-	// daemon both join it onto the resolved data dir; keeping it here
-	// avoids re-declaring the literal at every call site.
+	// bbolt file inside a node's data directory.
 	DefaultFilename = "peers.db"
 )
 
@@ -42,20 +34,9 @@ const (
 // under the given public key.
 var ErrPeerNotFound = errors.New("peer not found")
 
-// Package-level seams so internal tests can exercise otherwise-defensive
-// branches (post-Open chmod, bucket-create Update on a healthy db).
-// Production code never reassigns these — same pattern as the
-// chmodFunc / dbUpdateFunc seams in internal/index.
+// Test-only seams; production never reassigns these.
 var (
-	// chmodFunc seams the post-Open os.Chmod call. A real chmod on a
-	// file the current process just successfully opened is a
-	// stdlib-invariant success; fault injection is the only way to
-	// exercise the error wrap.
-	chmodFunc = os.Chmod
-	// dbUpdateFunc seams the bucket-creation Update on a freshly-opened
-	// db. Bolt's Update never fails on a healthy db that CreateBucketIfNotExists
-	// was just called on with a non-empty name, so the error wrap is only
-	// reachable via the seam.
+	chmodFunc    = os.Chmod
 	dbUpdateFunc = func(db *bbolt.DB, fn func(*bbolt.Tx) error) error {
 		return db.Update(fn)
 	}

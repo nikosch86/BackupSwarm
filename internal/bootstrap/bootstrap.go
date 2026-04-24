@@ -1,15 +1,6 @@
-// Package bootstrap implements the M1.8 one-shot invite/join handshake:
-// an introducer accepts a single incoming QUIC connection and records
-// the joiner's (verified) pubkey plus advertised listen address; the
-// joiner dials the introducer, pins the introducer's pubkey from the
-// token, and records the introducer reciprocally.
-//
-// The handshake is deliberately minimal — one bidirectional QUIC stream,
-// a single `JoinHello{listen_addr}` from joiner, a single `JoinAck{}`
-// from introducer — and is reused from both the standalone `invite` /
-// `join` CLI commands and (in M1.9) the long-running sync daemon's
-// `--invite` / `--join` startup modes. No swarm ID, no CA, no single-use
-// secret enforcement yet; those arrive in M2.
+// Package bootstrap implements the invite/join handshake: one QUIC stream
+// carrying a single JoinHello{listen_addr} from joiner and a JoinAck from
+// introducer. Each side records the other in its peer store.
 package bootstrap
 
 import (
@@ -24,52 +15,27 @@ import (
 	"backupswarm/pkg/token"
 )
 
-// Package-level seams so internal tests can exercise otherwise-defensive
-// branches. Production code never reassigns these — same pattern as the
-// gobEncodeFunc / chmodFunc seams in internal/index and internal/peers.
+// Test-only seams for fault-injection on transport-died error wraps.
 var (
-	// writeJoinAckFunc seams the success-path protocol.WriteJoinAck call
-	// in AcceptJoin. The ack is written to a stream we just successfully
-	// received a hello on; the error path is a defensive wrap for a
-	// transport-dies-mid-ack edge case that fault injection is the only
-	// reliable way to exercise.
-	writeJoinAckFunc = protocol.WriteJoinAck
-	// writeJoinHelloFunc seams protocol.WriteJoinHello in DoJoin. The
-	// stream was opened successfully one line earlier, so a write failure
-	// is a stdlib-invariant transport-died branch.
+	writeJoinAckFunc   = protocol.WriteJoinAck
 	writeJoinHelloFunc = protocol.WriteJoinHello
-	// streamCloseFunc seams the post-hello half-close call in DoJoin.
-	streamCloseFunc = func(s io.Closer) error { return s.Close() }
+	streamCloseFunc    = func(s io.Closer) error { return s.Close() }
 )
 
-// maxAdvertisedAddrLen caps the bytes an incoming JoinHello may advertise.
-// Addresses are host:port strings; 1 KiB is a generous ceiling that rules
-// out allocation abuse without rejecting legitimate DNS names or IPv6
-// zone identifiers.
+// maxAdvertisedAddrLen caps an incoming JoinHello address at 1 KiB —
+// well above any legitimate host:port, safely below allocation-abuse territory.
 const maxAdvertisedAddrLen = 1 << 10
 
-// AcceptJoin blocks until a single incoming join handshake completes, or
-// ctx is cancelled. On success the joining peer is persisted in the
-// supplied peer store (keyed by pubkey, addr from the peer's JoinHello)
-// and returned. On any failure before persistence, the peer store is
-// not mutated.
-//
-// Teardown discipline: the joiner owns the connection close, not us.
-// After writing the ack we half-close our send side and wait for the
-// joiner's subsequent close (observed as an AcceptStream error). Calling
-// conn.Close() ourselves mid-ack-flush would trigger an application
-// error on the joiner's read side before the ack bytes arrived — the
-// same QUIC footgun we hit in M1.5's echo test.
+// AcceptJoin blocks for one inbound join, persists the joiner, and returns
+// it. Teardown: the joiner owns the connection close — we half-close and
+// wait, so the ack's FIN reaches them before the connection tears down.
 func AcceptJoin(ctx context.Context, l *bsquic.Listener, store *peers.Store) (peers.Peer, error) {
 	conn, err := l.Accept(ctx)
 	if err != nil {
 		return peers.Peer{}, fmt.Errorf("accept: %w", err)
 	}
 
-	// Defensive wrap for a QUIC transport death between Accept() and the
-	// joiner opening their first stream. Deliberately uncovered: the QUIC
-	// stack doesn't give us a clean seam to force AcceptStream to fail
-	// after a successful Accept without reimplementing the connection.
+	// Defensive wrap: transport dying between Accept and first stream.
 	stream, err := conn.AcceptStream(ctx)
 	if err != nil {
 		return peers.Peer{}, fmt.Errorf("accept stream: %w", err)
@@ -94,19 +60,15 @@ func AcceptJoin(ctx context.Context, l *bsquic.Listener, store *peers.Store) (pe
 	if err := writeJoinAckFunc(stream, ""); err != nil {
 		return peers.Peer{}, fmt.Errorf("write ack: %w", err)
 	}
-	// Half-close send so the ack's FIN reaches the joiner, then block
-	// until the joiner closes the connection. AcceptStream returning
-	// any error here means "peer went away" — that's our signal to exit.
+	// Half-close so the ack FIN reaches the joiner, then wait for close.
 	_ = stream.Close()
 	_, _ = conn.AcceptStream(ctx)
 	return peer, nil
 }
 
-// DoJoin decodes tokenStr, dials the introducer with a TLS pubkey pin
-// derived from the token, sends the joiner's advertised listen address
-// (may be empty), reads the ack, and persists the introducer. Returns
-// the persisted introducer peer on success; peer store is untouched on
-// any failure.
+// DoJoin dials the introducer named by tokenStr (TLS pinned to the token's
+// pubkey), advertises myListenAddr, reads the ack, and persists the
+// introducer. Peer store is untouched on any failure.
 func DoJoin(ctx context.Context, tokenStr string, myPriv ed25519.PrivateKey, myListenAddr string, store *peers.Store) (peers.Peer, error) {
 	addr, pub, err := token.Decode(tokenStr)
 	if err != nil {
@@ -118,9 +80,7 @@ func DoJoin(ctx context.Context, tokenStr string, myPriv ed25519.PrivateKey, myL
 	}
 	defer func() { _ = conn.Close() }()
 
-	// Defensive wrap for a QUIC transport death between Dial success and
-	// the first stream open. Deliberately uncovered: OpenStreamSync on a
-	// freshly-dialed conn doesn't have a clean fault-injection seam.
+	// Defensive wrap: transport dying between Dial and first stream.
 	stream, err := conn.OpenStream(ctx)
 	if err != nil {
 		return peers.Peer{}, fmt.Errorf("open stream: %w", err)
@@ -147,10 +107,8 @@ func DoJoin(ctx context.Context, tokenStr string, myPriv ed25519.PrivateKey, myL
 	return peer, nil
 }
 
-// ed25519PubCopy returns a defensively-owned copy of pub. Callers in
-// this package hold the returned slice past the TLS connection's
-// lifetime, so aliasing the cert's buffer would be a use-after-free
-// waiting to happen.
+// ed25519PubCopy returns a copy of pub. Callers hold the result past the
+// TLS connection's lifetime, so aliasing the cert buffer would be unsafe.
 func ed25519PubCopy(pub ed25519.PublicKey) ed25519.PublicKey {
 	if pub == nil {
 		return nil

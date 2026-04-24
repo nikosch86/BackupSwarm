@@ -150,9 +150,8 @@ func TestRun_PreservesModTime(t *testing.T) {
 	}
 }
 
-// TestRun_RestoresSingleFile asserts that a previously-backed-up file can
-// be reconstructed under a fresh dest root using only the index + the
-// peer's chunk store. Byte-exact equality with the original is required.
+// TestRun_RestoresSingleFile reconstructs a backed-up file under a fresh
+// Dest using only the index and the peer's chunk store (byte-exact).
 func TestRun_RestoresSingleFile(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
