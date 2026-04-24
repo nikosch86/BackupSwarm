@@ -30,6 +30,12 @@ const (
 	// openLockTimeout bounds how long Open will wait for bbolt's file
 	// lock. A second Open on the same file is a caller bug; fail fast.
 	openLockTimeout = 2 * time.Second
+
+	// DefaultFilename is the conventional basename for the peer-store
+	// bbolt file inside a node's data directory. CLI commands and the
+	// daemon both join it onto the resolved data dir; keeping it here
+	// avoids re-declaring the literal at every call site.
+	DefaultFilename = "peers.db"
 )
 
 // ErrPeerNotFound is returned by Get and Remove when no peer is stored

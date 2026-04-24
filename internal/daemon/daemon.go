@@ -14,7 +14,6 @@ package daemon
 
 import (
 	"context"
-	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -199,7 +198,6 @@ const (
 
 	indexFileName = "index.db"
 	storeDirName  = "chunks"
-	peersFileName = "peers.db"
 )
 
 // Run is the M1.9 sync-daemon entrypoint. It opens local state, applies
@@ -240,7 +238,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer func() { _ = st.Close() }()
 
-	peerStore, err := peers.Open(filepath.Join(opts.DataDir, peersFileName))
+	peerStore, err := peers.Open(filepath.Join(opts.DataDir, peers.DefaultFilename))
 	if err != nil {
 		return fmt.Errorf("open peer store: %w", err)
 	}
@@ -251,29 +249,48 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 
-	// Pure storage-peer role: no --backup-dir means this node only
-	// serves chunks for others; no scan loop, no classification.
+	// Classify upfront so flag-validation errors (ErrConflictingFlags,
+	// ErrRefuseStart) are surfaced before the listener binds a port.
+	// In storage-only mode (no BackupDir) classification is skipped —
+	// there is no scan to gate.
+	var mode Mode
+	if opts.BackupDir != "" {
+		localPop, err := BackupDirHasRegularFiles(opts.BackupDir)
+		if err != nil {
+			return fmt.Errorf("inspect backup dir: %w", err)
+		}
+		indexEntries, err := idx.List()
+		if err != nil {
+			return fmt.Errorf("list index: %w", err)
+		}
+		mode, err = Classify(localPop, len(indexEntries) > 0, opts.Restore, opts.Purge)
+		if err != nil {
+			return fmt.Errorf("classify startup mode: %w", err)
+		}
+	}
+
+	listener, err := bsquic.Listen(opts.ListenAddr, id.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("listen on %q: %w", opts.ListenAddr, err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	serveErrCh := make(chan error, 1)
+	go func() { serveErrCh <- backup.Serve(ctx, listener, st) }()
+
+	// Pure storage-peer role: no --backup-dir means this node only serves
+	// chunks for others; no scan loop, no classification. Logged with a
+	// distinct message so an operator can tell this from the
+	// "have a backup dir but no peer yet" idle case below.
 	if opts.BackupDir == "" {
 		slog.InfoContext(ctx, "daemon starting (storage-only)",
 			"node_id", id.ShortID(),
 			"listen", opts.ListenAddr,
 		)
 		fmt.Fprintf(opts.Progress, "daemon starting: role=storage-peer listen=%s\n", opts.ListenAddr)
-		return runStorageOnly(ctx, opts.ListenAddr, id.PrivateKey, st)
+		return waitForServe(ctx, serveErrCh)
 	}
 
-	localPop, err := BackupDirHasRegularFiles(opts.BackupDir)
-	if err != nil {
-		return fmt.Errorf("inspect backup dir: %w", err)
-	}
-	indexEntries, err := idx.List()
-	if err != nil {
-		return fmt.Errorf("list index: %w", err)
-	}
-	mode, err := Classify(localPop, len(indexEntries) > 0, opts.Restore, opts.Purge)
-	if err != nil {
-		return fmt.Errorf("classify startup mode: %w", err)
-	}
 	peerAddr := ""
 	if storagePeer != nil {
 		peerAddr = storagePeer.Addr
@@ -286,25 +303,11 @@ func Run(ctx context.Context, opts Options) error {
 	)
 	fmt.Fprintf(opts.Progress, "daemon starting: mode=%s listen=%s\n", modeName(mode), opts.ListenAddr)
 
-	listener, err := bsquic.Listen(opts.ListenAddr, id.PrivateKey)
-	if err != nil {
-		return fmt.Errorf("listen on %q: %w", opts.ListenAddr, err)
-	}
-	defer func() { _ = listener.Close() }()
-
-	serveErrCh := make(chan error, 1)
-	go func() { serveErrCh <- backup.Serve(ctx, listener, st) }()
-
 	// Backup dir present but no peer to dial — behave as storage-peer.
 	// (Someone may be using the node as a shared data sink; their own
 	// backups wait until peers.db is populated.)
 	if storagePeer == nil {
-		select {
-		case <-ctx.Done():
-			return nil
-		case err := <-serveErrCh:
-			return err
-		}
+		return waitForServe(ctx, serveErrCh)
 	}
 
 	dialCtx, dialCancel := context.WithTimeout(ctx, opts.DialTimeout)
@@ -348,19 +351,10 @@ func Run(ctx context.Context, opts Options) error {
 	return runScanLoop(ctx, scanOpts, opts.ScanInterval, serveErrCh)
 }
 
-// runStorageOnly binds a listener and serves inbound chunks until ctx
-// is cancelled. Used when --backup-dir is unset (node participates in
-// the swarm purely as a storage peer, no backup source of its own).
-func runStorageOnly(ctx context.Context, listenAddr string, priv ed25519.PrivateKey, st *store.Store) error {
-	listener, err := bsquic.Listen(listenAddr, priv)
-	if err != nil {
-		return fmt.Errorf("listen on %q: %w", listenAddr, err)
-	}
-	defer func() { _ = listener.Close() }()
-
-	serveErrCh := make(chan error, 1)
-	go func() { serveErrCh <- backup.Serve(ctx, listener, st) }()
-
+// waitForServe blocks until ctx is cancelled (clean shutdown) or the
+// Serve goroutine surfaces an error. Used by the two idle paths in Run:
+// pure storage-only mode and backup-dir-with-no-peer mode.
+func waitForServe(ctx context.Context, serveErrCh <-chan error) error {
 	select {
 	case <-ctx.Done():
 		return nil

@@ -711,10 +711,10 @@ func TestRun_IgnoresPeersWithEmptyAddr(t *testing.T) {
 }
 
 // TestRun_StorageOnly_BadListenAddr covers the bsquic.Listen error
-// wrap in runStorageOnly (daemon.go line 357). A syntactically invalid
-// UDP address makes quic-go's ListenAddr fail before any bind attempt.
-// The error must surface as 'listen "..."': the daemon should not
-// silently fall through to an idle state.
+// wrap in Run on the BackupDir == "" path. A syntactically invalid UDP
+// address makes quic-go's ListenAddr fail before any bind attempt. The
+// error must surface as 'listen "..."': the daemon should not silently
+// fall through to an idle state.
 func TestRun_StorageOnly_BadListenAddr(t *testing.T) {
 	dataDir := t.TempDir()
 	err := daemon.Run(context.Background(), daemon.Options{
@@ -732,7 +732,7 @@ func TestRun_StorageOnly_BadListenAddr(t *testing.T) {
 }
 
 // TestRun_WithBackupDir_BadListenAddr covers the bsquic.Listen error
-// wrap in Run proper (daemon.go line 291). Identical shape to the
+// wrap in Run on the BackupDir != "" path. Identical shape to the
 // storage-only variant but goes through the Classify path first.
 func TestRun_WithBackupDir_BadListenAddr(t *testing.T) {
 	dataDir := t.TempDir()

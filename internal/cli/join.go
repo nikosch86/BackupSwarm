@@ -1,21 +1,15 @@
 package cli
 
 import (
-	"context"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"backupswarm/internal/bootstrap"
-	"backupswarm/internal/node"
-	"backupswarm/internal/peers"
 )
-
-const peerStoreFile = "peers.db"
 
 func newJoinCmd(dataDir *string) *cobra.Command {
 	var advertisedAddr string
@@ -25,27 +19,15 @@ func newJoinCmd(dataDir *string) *cobra.Command {
 		Short: "Accept an invite token, verify the peer over TLS, and persist",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir, err := resolveDataDir(*dataDir)
+			sess, err := openPeerSession(*dataDir)
 			if err != nil {
 				return err
 			}
-			id, _, err := node.Ensure(dir)
-			if err != nil {
-				return fmt.Errorf("ensure identity: %w", err)
-			}
-			peerStore, err := peers.Open(filepath.Join(dir, peerStoreFile))
-			if err != nil {
-				return fmt.Errorf("open peer store: %w", err)
-			}
-			defer func() { _ = peerStore.Close() }()
+			defer func() { _ = sess.Close() }()
 
-			ctx := cmd.Context()
-			if timeout > 0 {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, timeout)
-				defer cancel()
-			}
-			peer, err := bootstrap.DoJoin(ctx, args[0], id.PrivateKey, advertisedAddr, peerStore)
+			ctx, cancel := withTimeout(cmd.Context(), timeout)
+			defer cancel()
+			peer, err := bootstrap.DoJoin(ctx, args[0], sess.id.PrivateKey, advertisedAddr, sess.peerStore)
 			if err != nil {
 				return fmt.Errorf("join: %w", err)
 			}

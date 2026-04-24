@@ -1,18 +1,14 @@
 package cli
 
 import (
-	"context"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"backupswarm/internal/bootstrap"
-	"backupswarm/internal/node"
-	"backupswarm/internal/peers"
 	bsquic "backupswarm/internal/quic"
 	"backupswarm/pkg/token"
 )
@@ -27,15 +23,13 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 			if listenAddr == "" {
 				return fmt.Errorf("--listen is required (the address peers will dial)")
 			}
-			dir, err := resolveDataDir(*dataDir)
+			sess, err := openPeerSession(*dataDir)
 			if err != nil {
 				return err
 			}
-			id, _, err := node.Ensure(dir)
-			if err != nil {
-				return fmt.Errorf("ensure identity: %w", err)
-			}
-			listener, err := bsquic.Listen(listenAddr, id.PrivateKey)
+			defer func() { _ = sess.Close() }()
+
+			listener, err := bsquic.Listen(listenAddr, sess.id.PrivateKey)
 			if err != nil {
 				return fmt.Errorf("listen on %q: %w", listenAddr, err)
 			}
@@ -43,25 +37,15 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 
 			// Use the listener's actual bound addr so ":0" (ephemeral
 			// port) still produces a usable token.
-			tokStr, err := token.Encode(listener.Addr().String(), id.PublicKey)
+			tokStr, err := token.Encode(listener.Addr().String(), sess.id.PublicKey)
 			if err != nil {
 				return fmt.Errorf("encode token: %w", err)
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), tokStr)
 
-			peerStore, err := peers.Open(filepath.Join(dir, peerStoreFile))
-			if err != nil {
-				return fmt.Errorf("open peer store: %w", err)
-			}
-			defer func() { _ = peerStore.Close() }()
-
-			ctx := cmd.Context()
-			if timeout > 0 {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, timeout)
-				defer cancel()
-			}
-			peer, err := bootstrap.AcceptJoin(ctx, listener, peerStore)
+			ctx, cancel := withTimeout(cmd.Context(), timeout)
+			defer cancel()
+			peer, err := bootstrap.AcceptJoin(ctx, listener, sess.peerStore)
 			if err != nil {
 				return fmt.Errorf("accept join: %w", err)
 			}
