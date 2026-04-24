@@ -430,6 +430,106 @@ func TestRun_WithPeer_FirstBackupShipsChunks(t *testing.T) {
 	}
 }
 
+// TestRun_RestoreMode: after a backup, empty the backup dir and restart
+// the daemon with --restore. Every file previously backed up must be
+// rewritten to disk under backupDir with original content and mtime.
+// Paths in the index are absolute (under backupDir), so Dest = "/"
+// puts them back where they originally were.
+func TestRun_RestoreMode(t *testing.T) {
+	peer := newPeerRig(t)
+	dataDir := t.TempDir()
+	backupDir := t.TempDir()
+	filePath := filepath.Join(backupDir, "restored.bin")
+	writeFile(t, filePath, 1<<20)
+	originalBytes, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("read original: %v", err)
+	}
+	originalInfo, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("stat original: %v", err)
+	}
+	seedPeer(t, dataDir, peer.addr, peer.pub)
+
+	// Stage 1: run a normal daemon long enough to ship the file.
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	done1 := make(chan error, 1)
+	go func() {
+		done1 <- daemon.Run(ctx1, daemon.Options{
+			DataDir:      dataDir,
+			BackupDir:    backupDir,
+			ListenAddr:   "127.0.0.1:0",
+			ChunkSize:    1 << 20,
+			ScanInterval: 50 * time.Millisecond,
+			Progress:     io.Discard,
+		})
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := os.ReadDir(peer.storeRoot)
+		if err == nil && hasShardDir(entries) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel1()
+	<-done1
+
+	// Remove the local file so backupDir is empty for the restore run.
+	if err := os.Remove(filePath); err != nil {
+		t.Fatalf("rm original: %v", err)
+	}
+
+	// Stage 2: run with --restore. The file should reappear at its original path.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := make(chan error, 1)
+	go func() {
+		done2 <- daemon.Run(ctx2, daemon.Options{
+			DataDir:      dataDir,
+			BackupDir:    backupDir,
+			ListenAddr:   "127.0.0.1:0",
+			ChunkSize:    1 << 20,
+			ScanInterval: 50 * time.Millisecond,
+			Restore:      true,
+			Progress:     io.Discard,
+		})
+	}()
+	// Poll for the file reappearing (bounded).
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(filePath); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel2()
+
+	select {
+	case err := <-done2:
+		if err != nil {
+			t.Errorf("Run restore err = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run restore did not exit within 5s of cancel")
+	}
+
+	// File must be back, with original bytes and mtime.
+	restored, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("read restored: %v", err)
+	}
+	if !bytes.Equal(restored, originalBytes) {
+		t.Error("restored bytes differ from original")
+	}
+	restoredInfo, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("stat restored: %v", err)
+	}
+	if !restoredInfo.ModTime().Equal(originalInfo.ModTime()) {
+		t.Errorf("restored mtime = %v, want original %v", restoredInfo.ModTime(), originalInfo.ModTime())
+	}
+}
+
 // TestRun_PurgeMode clears the index and sends deletes for every entry.
 func TestRun_PurgeMode(t *testing.T) {
 	peer := newPeerRig(t)

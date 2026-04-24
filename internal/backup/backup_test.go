@@ -847,6 +847,29 @@ func containsAny(s string, subs ...string) bool {
 // ensure compile-time that the package-level errors we care about are usable.
 var _ = errors.Is
 
+// TestSendGetChunk_RoundTrip exercises the exported SendGetChunk wrapper
+// end-to-end against a real QUIC peer + store. Cross-package tests (from
+// internal/restore) don't count toward this package's per-function
+// coverage, so we drive the wrapper directly here. Happy path only: the
+// inner sendGetChunk already has exhaustive white-box coverage in
+// backup_internal_test.go.
+func TestSendGetChunk_RoundTrip(t *testing.T) {
+	rig := newTestRig(t)
+	blob := []byte("peer-stored ciphertext bytes")
+	hash, err := rig.peerStore.Put(blob)
+	if err != nil {
+		t.Fatalf("peerStore.Put: %v", err)
+	}
+
+	got, err := backup.SendGetChunk(context.Background(), rig.ownerConn, hash)
+	if err != nil {
+		t.Fatalf("SendGetChunk: %v", err)
+	}
+	if !bytes.Equal(got, blob) {
+		t.Errorf("blob mismatch: got %q, want %q", got, blob)
+	}
+}
+
 // TestRun_DefaultsNilProgress covers the `if opts.Progress == nil`
 // short-circuit: leaving Progress unset must not panic — Run silently
 // falls back to io.Discard.

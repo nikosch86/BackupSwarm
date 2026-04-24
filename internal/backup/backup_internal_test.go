@@ -581,3 +581,224 @@ func TestSendChunk_SuccessPath(t *testing.T) {
 		t.Errorf("hash mismatch: got %x, want %x", got, want)
 	}
 }
+
+// getOKFrame returns a GetChunk success frame for the given blob.
+func getOKFrame(t *testing.T, blob []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := protocol.WriteGetChunkResponse(&buf, blob, ""); err != nil {
+		t.Fatalf("build get-chunk ok frame: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// getErrFrame returns a GetChunk application-error frame.
+func getErrFrame(t *testing.T, msg string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := protocol.WriteGetChunkResponse(&buf, nil, msg); err != nil {
+		t.Fatalf("build get-chunk err frame: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestHandleGetChunkStream_Success asserts that a stored blob is returned
+// over a GetChunk stream with an empty appErr.
+func TestHandleGetChunkStream_Success(t *testing.T) {
+	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	blob := []byte("ciphertext blob")
+	hash, err := st.Put(blob)
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	var reqBuf bytes.Buffer
+	if err := protocol.WriteGetChunkRequest(&reqBuf, hash); err != nil {
+		t.Fatalf("WriteGetChunkRequest: %v", err)
+	}
+	rw := &fakeStream{writeErrAt: -1, rd: &reqBuf}
+	if err := handleGetChunkStream(rw, st); err != nil {
+		t.Fatalf("handleGetChunkStream: %v", err)
+	}
+	got, appErr, err := protocol.ReadGetChunkResponse(&rw.wbuf, 1<<20)
+	if err != nil {
+		t.Fatalf("ReadGetChunkResponse: %v", err)
+	}
+	if appErr != "" {
+		t.Errorf("appErr = %q, want empty", appErr)
+	}
+	if !bytes.Equal(got, blob) {
+		t.Errorf("blob mismatch: got %q, want %q", got, blob)
+	}
+}
+
+// TestHandleGetChunkStream_UnknownHash asserts that an unknown hash
+// surfaces as an application-level error (not a transport error).
+func TestHandleGetChunkStream_UnknownHash(t *testing.T) {
+	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	var unknown [32]byte
+	var reqBuf bytes.Buffer
+	if err := protocol.WriteGetChunkRequest(&reqBuf, unknown); err != nil {
+		t.Fatalf("WriteGetChunkRequest: %v", err)
+	}
+	rw := &fakeStream{writeErrAt: -1, rd: &reqBuf}
+	if err := handleGetChunkStream(rw, st); err != nil {
+		t.Fatalf("handleGetChunkStream: %v", err)
+	}
+	_, appErr, err := protocol.ReadGetChunkResponse(&rw.wbuf, 1<<20)
+	if err != nil {
+		t.Fatalf("ReadGetChunkResponse: %v", err)
+	}
+	if appErr == "" {
+		t.Error("expected chunk-not-found app error, got empty")
+	}
+}
+
+func TestHandleGetChunkStream_ReadRequestError(t *testing.T) {
+	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(nil)}
+	err := handleGetChunkStream(rw, nil)
+	if err == nil {
+		t.Fatal("handleGetChunkStream returned nil on empty request")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("read request")) {
+		t.Errorf("err = %q, want 'read request' prefix", err)
+	}
+}
+
+// TestDispatchStream_RoutesGetChunk asserts the get-chunk path reaches
+// handleGetChunkStream through the dispatcher.
+func TestDispatchStream_RoutesGetChunk(t *testing.T) {
+	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	blob := []byte("bytes for get")
+	hash, err := st.Put(blob)
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	var reqBuf bytes.Buffer
+	if err := protocol.WriteMessageType(&reqBuf, protocol.MsgGetChunk); err != nil {
+		t.Fatalf("WriteMessageType: %v", err)
+	}
+	if err := protocol.WriteGetChunkRequest(&reqBuf, hash); err != nil {
+		t.Fatalf("WriteGetChunkRequest: %v", err)
+	}
+	rw := &fakeStream{writeErrAt: -1, rd: &reqBuf}
+	if err := dispatchStream(context.Background(), rw, st, []byte("anyone")); err != nil {
+		t.Fatalf("dispatchStream: %v", err)
+	}
+	got, appErr, err := protocol.ReadGetChunkResponse(&rw.wbuf, 1<<20)
+	if err != nil {
+		t.Fatalf("ReadGetChunkResponse: %v", err)
+	}
+	if appErr != "" {
+		t.Errorf("appErr = %q, want empty", appErr)
+	}
+	if !bytes.Equal(got, blob) {
+		t.Errorf("blob mismatch: got %q, want %q", got, blob)
+	}
+}
+
+func TestSendGetChunk_SuccessPath(t *testing.T) {
+	want := []byte("peer-side blob")
+	stream := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(getOKFrame(t, want))}
+	opener := &fakeOpener{stream: stream}
+
+	got, err := sendGetChunk(context.Background(), opener, [32]byte{0xaa})
+	if err != nil {
+		t.Fatalf("sendGetChunk: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("blob mismatch: got %q, want %q", got, want)
+	}
+	if !stream.closed {
+		t.Error("sendGetChunk did not half-close stream")
+	}
+}
+
+func TestSendGetChunk_AppErrorPropagation(t *testing.T) {
+	stream := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(getErrFrame(t, "chunk not found"))}
+	opener := &fakeOpener{stream: stream}
+
+	_, err := sendGetChunk(context.Background(), opener, [32]byte{0xaa})
+	if err == nil {
+		t.Fatal("sendGetChunk returned nil despite app-error frame")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("peer rejected get")) {
+		t.Errorf("err = %q, want 'peer rejected get' prefix", err)
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("chunk not found")) {
+		t.Errorf("err = %q, want peer message", err)
+	}
+}
+
+func TestSendGetChunk_OpenStreamError(t *testing.T) {
+	sentinel := errors.New("open boom")
+	opener := &fakeOpener{openErr: sentinel}
+	_, err := sendGetChunk(context.Background(), opener, [32]byte{})
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+}
+
+func TestSendGetChunk_WriteMessageTypeError(t *testing.T) {
+	sentinel := errors.New("type boom")
+	stream := &fakeStream{writeErrAt: 0, writeErr: sentinel}
+	opener := &fakeOpener{stream: stream}
+	_, err := sendGetChunk(context.Background(), opener, [32]byte{})
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+	if !stream.closed {
+		t.Error("sendGetChunk did not close stream after type-write error")
+	}
+}
+
+func TestSendGetChunk_WriteRequestError(t *testing.T) {
+	sentinel := errors.New("hash write boom")
+	stream := &fakeStream{writeErrAt: 1, writeErr: sentinel}
+	opener := &fakeOpener{stream: stream}
+	_, err := sendGetChunk(context.Background(), opener, [32]byte{})
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+	if !stream.closed {
+		t.Error("sendGetChunk did not close stream after request-write error")
+	}
+}
+
+func TestSendGetChunk_CloseError(t *testing.T) {
+	sentinel := errors.New("close boom")
+	stream := &fakeStream{writeErrAt: -1, closeErr: sentinel}
+	opener := &fakeOpener{stream: stream}
+	_, err := sendGetChunk(context.Background(), opener, [32]byte{})
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+}
+
+func TestSendGetChunk_ReadResponseError(t *testing.T) {
+	stream := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(nil)}
+	opener := &fakeOpener{stream: stream}
+	_, err := sendGetChunk(context.Background(), opener, [32]byte{})
+	if err == nil {
+		t.Fatal("sendGetChunk returned nil on empty response stream")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("read response")) {
+		t.Errorf("err = %q, want 'read response' prefix", err)
+	}
+}

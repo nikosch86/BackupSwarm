@@ -37,11 +37,9 @@ Status: **early development**.
 # Build the binary
 make build
 
-# Initialize a new node (generates an Ed25519 identity on first run).
+# Identity is auto-generated on first use by invite/join/run.
 # Default data dir: $XDG_DATA_HOME/backupswarm or ~/.local/share/backupswarm.
 # Override with --data-dir or $BACKUPSWARM_DATA_DIR.
-./bin/backupswarm init
-./bin/backupswarm --data-dir /custom/path init
 
 # Run the full test suite
 make test
@@ -49,6 +47,53 @@ make test
 # Lint + test (the pre-PR gate)
 make check
 ```
+
+## Two-node swarm (local smoke test)
+
+```bash
+# Node A (introducer): print an invite token and wait for one joiner.
+./bin/backupswarm --data-dir /tmp/bs-a invite --listen 127.0.0.1:7777
+
+# Copy the printed token. In a second terminal:
+
+# Node B (joiner): verify the token over TLS and persist A as a peer.
+./bin/backupswarm --data-dir /tmp/bs-b join <token>
+
+# Start A as a storage peer (serves chunks for B; no backup of its own).
+./bin/backupswarm --data-dir /tmp/bs-a run --listen 127.0.0.1:7777
+
+# Start B as a backup source targeting A.
+mkdir -p /tmp/bs-b-src && echo hello > /tmp/bs-b-src/test
+./bin/backupswarm --data-dir /tmp/bs-b run \
+    --backup-dir /tmp/bs-b-src \
+    --listen 127.0.0.1:7778
+```
+
+The daemon reads the storage peer from `<data-dir>/peers.db` (populated by
+`join`). Omitting `--backup-dir` runs the daemon in pure storage-peer mode.
+
+## Restore
+
+Two ways to restore, assuming the storage peer (`node A` above) is up:
+
+```bash
+# Standalone one-shot: reassemble every indexed file under <dest>.
+# Paths are rewritten as Dest + original-absolute-path.
+./bin/backupswarm --data-dir /tmp/bs-b restore /tmp/rescue
+
+# Or via the daemon: empty backup dir + --restore restores to the
+# original locations before the scan loop starts.
+rm -rf /tmp/bs-b-src/*
+./bin/backupswarm --data-dir /tmp/bs-b run \
+    --backup-dir /tmp/bs-b-src \
+    --listen 127.0.0.1:7778 \
+    --restore
+```
+
+Each chunk's post-decrypt plaintext hash is verified against the
+index's `PlaintextHash`; a mismatch aborts the restore. Restored
+files keep their original mtime so the daemon's incremental scan
+does not re-upload them.
 
 ## Makefile Targets
 

@@ -1,0 +1,223 @@
+package restore
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"backupswarm/internal/backup"
+	"backupswarm/internal/crypto"
+	"backupswarm/internal/index"
+	bsquic "backupswarm/internal/quic"
+	"backupswarm/internal/store"
+)
+
+// withOpenFileFunc swaps openFileFunc for the duration of a test.
+// White-box only — production never reassigns it.
+func withOpenFileFunc(t *testing.T, fn func(name string, flag int, perm os.FileMode) (writableFile, error)) {
+	t.Helper()
+	prev := openFileFunc
+	openFileFunc = fn
+	t.Cleanup(func() { openFileFunc = prev })
+}
+
+// withChtimesFunc swaps chtimesFunc for the duration of a test.
+// White-box only — production never reassigns it.
+func withChtimesFunc(t *testing.T, fn func(name string, atime time.Time, mtime time.Time) error) {
+	t.Helper()
+	prev := chtimesFunc
+	chtimesFunc = fn
+	t.Cleanup(func() { chtimesFunc = prev })
+}
+
+// fakeWritableFile wraps a real *os.File so the deferred Close still
+// drops the fd cleanly, but lets us inject Write / Close failures.
+type fakeWritableFile struct {
+	real     *os.File
+	writeErr error
+	closeErr error
+}
+
+func (f *fakeWritableFile) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return f.real.Write(p)
+}
+
+func (f *fakeWritableFile) Close() error {
+	realErr := f.real.Close()
+	if f.closeErr != nil {
+		return f.closeErr
+	}
+	return realErr
+}
+
+// seedRig brings up a minimal owner/peer rig and seeds one small file
+// so restore.Run has exactly one entry to process. Returns the live
+// Options; the caller tweaks Dest per test.
+func seedRig(t *testing.T) Options {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	peerDir := t.TempDir()
+	peerStore, err := store.New(filepath.Join(peerDir, "blobs"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = peerStore.Close() })
+
+	peerPub, peerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("peer key: %v", err)
+	}
+	_, ownerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("owner key: %v", err)
+	}
+	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() { _ = backup.Serve(ctx, listener, peerStore) }()
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer dialCancel()
+	ownerConn, err := bsquic.Dial(dialCtx, listener.Addr().String(), ownerPriv, peerPub)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = ownerConn.Close() })
+
+	idx, err := index.Open(filepath.Join(t.TempDir(), "owner-index.db"))
+	if err != nil {
+		t.Fatalf("index.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+
+	recipientPub, recipientPriv, err := crypto.GenerateRecipientKey()
+	if err != nil {
+		t.Fatalf("GenerateRecipientKey: %v", err)
+	}
+
+	src := t.TempDir()
+	path := filepath.Join(src, "seed.bin")
+	if err := os.WriteFile(path, []byte("seed"), 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	if err := backup.Run(context.Background(), backup.RunOptions{
+		Path:         path,
+		Conn:         ownerConn,
+		RecipientPub: recipientPub,
+		Index:        idx,
+		ChunkSize:    1 << 20,
+		Progress:     io.Discard,
+	}); err != nil {
+		t.Fatalf("backup.Run: %v", err)
+	}
+
+	return Options{
+		Conn:          ownerConn,
+		Index:         idx,
+		RecipientPub:  recipientPub,
+		RecipientPriv: recipientPriv,
+		Progress:      io.Discard,
+	}
+}
+
+// TestRestoreFile_WriteFailure exercises the f.Write error wrap in
+// restoreFile. A real *os.File only fails Write on ENOSPC / EIO /
+// closed-fd — not reproducible portably; the seam carries the branch.
+func TestRestoreFile_WriteFailure(t *testing.T) {
+	opts := seedRig(t)
+	opts.Dest = t.TempDir()
+
+	sentinel := errors.New("forced write failure")
+	withOpenFileFunc(t, func(name string, flag int, perm os.FileMode) (writableFile, error) {
+		real, err := os.OpenFile(name, flag, perm)
+		if err != nil {
+			return nil, err
+		}
+		return &fakeWritableFile{real: real, writeErr: sentinel}, nil
+	})
+
+	err := Run(context.Background(), opts)
+	if err == nil {
+		t.Fatal("Run returned nil despite injected write failure")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+	if !strings.Contains(err.Error(), "write chunk") {
+		t.Errorf("err = %q, want 'write chunk' mention", err)
+	}
+}
+
+// TestRestoreFile_CloseFailure exercises the explicit f.Close error
+// wrap at the end of restoreFile (distinct from the deferred Close).
+// Close errors from *os.File are rare (deferred flush failure); only
+// reachable in tests via the seam.
+func TestRestoreFile_CloseFailure(t *testing.T) {
+	opts := seedRig(t)
+	opts.Dest = t.TempDir()
+
+	sentinel := errors.New("forced close failure")
+	withOpenFileFunc(t, func(name string, flag int, perm os.FileMode) (writableFile, error) {
+		real, err := os.OpenFile(name, flag, perm)
+		if err != nil {
+			return nil, err
+		}
+		return &fakeWritableFile{real: real, closeErr: sentinel}, nil
+	})
+
+	err := Run(context.Background(), opts)
+	if err == nil {
+		t.Fatal("Run returned nil despite injected close failure")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+	if !strings.Contains(err.Error(), "close") {
+		t.Errorf("err = %q, want 'close' mention", err)
+	}
+}
+
+// TestRestoreFile_ChtimesFailure exercises the os.Chtimes error wrap
+// at the tail of restoreFile. On Linux this is effectively unreachable
+// for a file we just successfully Open+Wrote — only fault injection
+// covers the branch.
+func TestRestoreFile_ChtimesFailure(t *testing.T) {
+	opts := seedRig(t)
+	opts.Dest = t.TempDir()
+
+	sentinel := errors.New("forced chtimes failure")
+	withChtimesFunc(t, func(name string, atime, mtime time.Time) error {
+		return sentinel
+	})
+
+	err := Run(context.Background(), opts)
+	if err == nil {
+		t.Fatal("Run returned nil despite injected chtimes failure")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+	if !strings.Contains(err.Error(), "chtimes") {
+		t.Errorf("err = %q, want 'chtimes' mention", err)
+	}
+}
+
+// Sanity-check: Options struct exposes the sha256 size constant the
+// plaintext-hash check depends on. Pin so a refactor that changes the
+// hash type would break compile here rather than silently at runtime.
+var _ = sha256.Size

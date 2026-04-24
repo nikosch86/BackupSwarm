@@ -306,6 +306,47 @@ func sendChunk(ctx context.Context, conn streamOpener, blob []byte) ([32]byte, e
 	return hash, nil
 }
 
+// SendGetChunk opens a fresh QUIC stream on conn, fetches the blob
+// stored under hash on the peer, and returns it. Exposed for callers
+// outside this package (internal/restore) that need the owner-side
+// request shape without rebuilding the framing themselves. Returns an
+// error wrapping the peer's application message on chunk-not-found.
+func SendGetChunk(ctx context.Context, conn *bsquic.Conn, hash [32]byte) ([]byte, error) {
+	return sendGetChunk(ctx, bsquicConnAdapter{c: conn}, hash)
+}
+
+// sendGetChunk opens a new bidirectional stream on conn, writes a
+// GetChunkRequest (prefixed by a MsgGetChunk byte), half-closes, and
+// reads the GetChunkResponse. Returns the blob on success, or an error
+// that wraps the peer-reported application message on chunk-not-found.
+func sendGetChunk(ctx context.Context, conn streamOpener, hash [32]byte) ([]byte, error) {
+	s, err := conn.OpenStream(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("open stream: %w", err)
+	}
+
+	if err := protocol.WriteMessageType(s, protocol.MsgGetChunk); err != nil {
+		_ = s.Close()
+		return nil, err
+	}
+	if err := protocol.WriteGetChunkRequest(s, hash); err != nil {
+		_ = s.Close()
+		return nil, err
+	}
+	if err := s.Close(); err != nil {
+		return nil, fmt.Errorf("close send side: %w", err)
+	}
+
+	blob, appErr, err := protocol.ReadGetChunkResponse(s, maxBlobLen)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if appErr != "" {
+		return nil, fmt.Errorf("peer rejected get: %s", appErr)
+	}
+	return blob, nil
+}
+
 // sendDeleteChunk opens a new bidirectional stream on conn, writes a
 // DeleteChunkRequest (prefixed by a MsgDeleteChunk byte), half-closes,
 // and reads the DeleteChunkResponse. Returns nil on success, or an
@@ -389,6 +430,8 @@ func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owne
 		return handlePutChunkStream(rw, st, ownerKey)
 	case protocol.MsgDeleteChunk:
 		return handleDeleteChunkStream(rw, st, ownerKey)
+	case protocol.MsgGetChunk:
+		return handleGetChunkStream(rw, st)
 	default:
 		return fmt.Errorf("unknown message type %d", msgType)
 	}
@@ -425,4 +468,22 @@ func handleDeleteChunkStream(rw io.ReadWriter, st *store.Store, owner []byte) er
 		return protocol.WriteDeleteChunkResponse(rw, delErr.Error())
 	}
 	return protocol.WriteDeleteChunkResponse(rw, "")
+}
+
+// handleGetChunkStream reads a GetChunkRequest, looks up the blob by
+// hash, and writes the GetChunkResponse. Unknown-hash is surfaced as
+// an application-level error (so the owner can distinguish "peer does
+// not have it" from "connection dropped"); transport failures are
+// returned. No owner check is performed — M1 storage peers serve any
+// stored chunk on an authenticated swarm connection.
+func handleGetChunkStream(rw io.ReadWriter, st *store.Store) error {
+	hash, err := protocol.ReadGetChunkRequest(rw)
+	if err != nil {
+		return fmt.Errorf("read request: %w", err)
+	}
+	blob, getErr := st.Get(hash)
+	if getErr != nil {
+		return protocol.WriteGetChunkResponse(rw, nil, getErr.Error())
+	}
+	return protocol.WriteGetChunkResponse(rw, blob, "")
 }

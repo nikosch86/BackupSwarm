@@ -30,6 +30,7 @@ import (
 	"backupswarm/internal/node"
 	"backupswarm/internal/peers"
 	bsquic "backupswarm/internal/quic"
+	"backupswarm/internal/restore"
 	"backupswarm/internal/store"
 )
 
@@ -334,10 +335,25 @@ func Run(ctx context.Context, opts Options) error {
 		}
 		fmt.Fprintln(opts.Progress, "purge complete; daemon continuing in idle mode")
 	case ModeRestore:
-		// M1.10 replaces this with real restore; for M1.9 we accept
-		// --restore as a no-op that lets the daemon start without the
-		// refuse-to-start guard firing.
-		fmt.Fprintln(opts.Progress, "restore flag set; restore will be implemented in M1.10")
+		// Entries in the index are absolute paths under opts.BackupDir;
+		// Dest == "/" restores each file to its original location. The
+		// backupDir itself is known to be empty by definition of
+		// ModeRestore (the refuse-to-start guard otherwise fires), so
+		// every restored path lands inside it without colliding with
+		// existing user data. restore.Run preserves each entry's
+		// ModTime so the subsequent scan loop incremental-skips them
+		// rather than re-shipping every byte.
+		if err := restore.Run(ctx, restore.Options{
+			Dest:          "/",
+			Conn:          peerConn,
+			Index:         idx,
+			RecipientPub:  rk.PublicKey,
+			RecipientPriv: rk.PrivateKey,
+			Progress:      opts.Progress,
+		}); err != nil {
+			return fmt.Errorf("restore: %w", err)
+		}
+		fmt.Fprintln(opts.Progress, "restore complete; daemon continuing in reconcile mode")
 	}
 
 	scanOpts := ScanOnceOptions{
