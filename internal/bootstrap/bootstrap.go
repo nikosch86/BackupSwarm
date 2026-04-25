@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 
+	"backupswarm/internal/invites"
 	"backupswarm/internal/peers"
 	"backupswarm/internal/protocol"
 	bsquic "backupswarm/internal/quic"
@@ -35,6 +36,7 @@ const maxPeerListEntries = 1 << 10
 const (
 	wireErrSwarmMismatch = "swarm_mismatch"
 	wireErrBadSecret     = "bad_secret"
+	wireErrTokenUsed     = "already_used"
 	wireErrInternal      = "internal"
 )
 
@@ -42,20 +44,22 @@ const (
 // the request because the swarm IDs disagreed.
 var ErrSwarmMismatch = errors.New("introducer reports swarm ID mismatch")
 
-// ErrBadSecret is returned by DoJoin when the introducer rejected the
-// single-use secret in the token.
+// ErrBadSecret is returned by DoJoin when the introducer did not
+// recognize the single-use secret in the token.
 var ErrBadSecret = errors.New("introducer rejected join secret")
+
+// ErrTokenUsed is returned by DoJoin when the secret was previously
+// consumed by an earlier successful join.
+var ErrTokenUsed = errors.New("introducer reports token already used")
 
 // ErrIntroducerInternal is returned by DoJoin for an opaque introducer-
 // side failure.
 var ErrIntroducerInternal = errors.New("introducer reported internal error")
 
-// Expected is the introducer-side per-invite session state: the values
-// AcceptJoin compares the joiner's request against.
-type Expected struct {
-	SwarmID [token.SwarmIDSize]byte
-	Secret  [token.SecretSize]byte
-}
+// SecretValidator atomically verifies a join secret and returns the
+// swarm ID it was issued for. Implementations may consult an on-disk
+// log; the validation must be a same-transaction read+mark-consumed.
+type SecretValidator func(secret [token.SecretSize]byte) ([token.SwarmIDSize]byte, error)
 
 // JoinResult is what DoJoin gives back: the introducer record persisted
 // locally and the peer list the introducer reported. Persistence of the
@@ -65,10 +69,10 @@ type JoinResult struct {
 	Peers      []peers.Peer
 }
 
-// AcceptJoin blocks for one inbound join, validates it against expected,
-// sends the introducer's peer list, and persists the joiner. The stream
-// is closed on every return path so the joiner surfaces EOF.
-func AcceptJoin(ctx context.Context, l *bsquic.Listener, store *peers.Store, expected Expected) (peers.Peer, error) {
+// AcceptJoin blocks for one inbound join, validates the request via
+// validate, sends the introducer's peer list, and persists the joiner.
+// The stream is closed on every return path so the joiner surfaces EOF.
+func AcceptJoin(ctx context.Context, l *bsquic.Listener, store *peers.Store, validate SecretValidator) (peers.Peer, error) {
 	conn, err := l.Accept(ctx)
 	if err != nil {
 		return peers.Peer{}, fmt.Errorf("accept: %w", err)
@@ -90,13 +94,14 @@ func AcceptJoin(ctx context.Context, l *bsquic.Listener, store *peers.Store, exp
 		_ = writeJoinResponseFunc(stream, "malformed request")
 		return peers.Peer{}, fmt.Errorf("read join request: %w", err)
 	}
-	if subtle.ConstantTimeCompare(gotSwarm[:], expected.SwarmID[:]) != 1 {
+	expectedSwarm, err := validate(gotSecret)
+	if err != nil {
+		_ = writeJoinResponseFunc(stream, validatorWireCode(err))
+		return peers.Peer{}, fmt.Errorf("validate secret: %w", err)
+	}
+	if subtle.ConstantTimeCompare(gotSwarm[:], expectedSwarm[:]) != 1 {
 		_ = writeJoinResponseFunc(stream, wireErrSwarmMismatch)
 		return peers.Peer{}, fmt.Errorf("swarm id mismatch")
-	}
-	if subtle.ConstantTimeCompare(gotSecret[:], expected.Secret[:]) != 1 {
-		_ = writeJoinResponseFunc(stream, wireErrBadSecret)
-		return peers.Peer{}, fmt.Errorf("join secret mismatch")
 	}
 
 	snapshot, err := store.List()
@@ -222,10 +227,24 @@ func joinResponseError(code string) error {
 		return ErrSwarmMismatch
 	case wireErrBadSecret:
 		return ErrBadSecret
+	case wireErrTokenUsed:
+		return ErrTokenUsed
 	case wireErrInternal:
 		return ErrIntroducerInternal
 	default:
 		return fmt.Errorf("introducer rejected join: %s", code)
+	}
+}
+
+// validatorWireCode picks the wire error code for a validator error.
+func validatorWireCode(err error) string {
+	switch {
+	case errors.Is(err, invites.ErrUnknown):
+		return wireErrBadSecret
+	case errors.Is(err, invites.ErrAlreadyUsed):
+		return wireErrTokenUsed
+	default:
+		return wireErrInternal
 	}
 }
 

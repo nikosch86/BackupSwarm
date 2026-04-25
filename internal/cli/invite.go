@@ -13,6 +13,7 @@ import (
 
 	"backupswarm/internal/bootstrap"
 	"backupswarm/internal/daemon"
+	"backupswarm/internal/invites"
 	bsquic "backupswarm/internal/quic"
 	"backupswarm/pkg/token"
 )
@@ -67,17 +68,26 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 				}
 			}()
 
-			expected, err := newExpected()
+			invitesStore, err := invites.Open(filepath.Join(sess.dir, invites.DefaultFilename))
+			if err != nil {
+				return fmt.Errorf("open invites store: %w", err)
+			}
+			defer func() { _ = invitesStore.Close() }()
+
+			swarmID, secret, err := newSessionIDs()
 			if err != nil {
 				return fmt.Errorf("generate session secret: %w", err)
+			}
+			if err := invitesStore.Issue(secret, swarmID); err != nil {
+				return fmt.Errorf("issue invite: %w", err)
 			}
 			// Use the listener's actual bound addr so ":0" (ephemeral
 			// port) still produces a usable token.
 			tokStr, err := token.Encode(token.Token{
 				Addr:    listener.Addr().String(),
 				Pub:     sess.id.PublicKey,
-				SwarmID: expected.SwarmID,
-				Secret:  expected.Secret,
+				SwarmID: swarmID,
+				Secret:  secret,
 			})
 			if err != nil {
 				return fmt.Errorf("encode token: %w", err)
@@ -91,7 +101,7 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 
 			ctx, cancel := withTimeout(cmd.Context(), timeout)
 			defer cancel()
-			peer, err := bootstrap.AcceptJoin(ctx, listener, sess.peerStore, expected)
+			peer, err := bootstrap.AcceptJoin(ctx, listener, sess.peerStore, invitesStore.Consume)
 			if err != nil {
 				return fmt.Errorf("accept join: %w", err)
 			}
@@ -123,17 +133,15 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 	return cmd
 }
 
-// newExpected generates the per-invite swarm ID and single-use secret
-// the introducer will compare an inbound JoinRequest against.
-func newExpected() (bootstrap.Expected, error) {
-	var e bootstrap.Expected
-	if _, err := rand.Read(e.SwarmID[:]); err != nil {
-		return bootstrap.Expected{}, fmt.Errorf("read swarm id: %w", err)
+// newSessionIDs generates the per-invite swarm ID and single-use secret.
+func newSessionIDs() (swarmID, secret [32]byte, err error) {
+	if _, err = rand.Read(swarmID[:]); err != nil {
+		return swarmID, secret, fmt.Errorf("read swarm id: %w", err)
 	}
-	if _, err := rand.Read(e.Secret[:]); err != nil {
-		return bootstrap.Expected{}, fmt.Errorf("read secret: %w", err)
+	if _, err = rand.Read(secret[:]); err != nil {
+		return swarmID, secret, fmt.Errorf("read secret: %w", err)
 	}
-	return e, nil
+	return swarmID, secret, nil
 }
 
 // tokenTempFile narrows the surface writeTokenFile needs from a

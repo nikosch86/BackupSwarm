@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/subtle"
 	"errors"
 	"io"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"backupswarm/internal/invites"
 	"backupswarm/internal/peers"
 	"backupswarm/internal/protocol"
 	bsquic "backupswarm/internal/quic"
@@ -80,7 +82,6 @@ type internalRig struct {
 	listener              *bsquic.Listener
 	introStore            *peers.Store
 	joinerStore           *peers.Store
-	expected              Expected
 	swarmID               [token.SwarmIDSize]byte
 	secret                [token.SecretSize]byte
 }
@@ -126,9 +127,24 @@ func newInternalRig(t *testing.T) *internalRig {
 		listener:    l,
 		introStore:  is,
 		joinerStore: js,
-		expected:    Expected{SwarmID: swarmID, Secret: secret},
 		swarmID:     swarmID,
 		secret:      secret,
+	}
+}
+
+// validator returns a one-shot SecretValidator backed by the rig's
+// known secret/swarmID; the second matching call returns ErrAlreadyUsed.
+func (r *internalRig) validator() SecretValidator {
+	used := false
+	return func(got [token.SecretSize]byte) ([token.SwarmIDSize]byte, error) {
+		if subtle.ConstantTimeCompare(got[:], r.secret[:]) != 1 {
+			return [token.SwarmIDSize]byte{}, invites.ErrUnknown
+		}
+		if used {
+			return [token.SwarmIDSize]byte{}, invites.ErrAlreadyUsed
+		}
+		used = true
+		return r.swarmID, nil
 	}
 }
 
@@ -170,7 +186,7 @@ func TestAcceptJoin_WriteResponseFailure(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, acceptErr = AcceptJoin(ctx, rig.listener, rig.introStore, rig.expected)
+		_, acceptErr = AcceptJoin(ctx, rig.listener, rig.introStore, rig.validator())
 	}()
 
 	_, _ = DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerStore)
@@ -202,7 +218,7 @@ func TestAcceptJoin_WritePeerListFailure(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, acceptErr = AcceptJoin(ctx, rig.listener, rig.introStore, rig.expected)
+		_, acceptErr = AcceptJoin(ctx, rig.listener, rig.introStore, rig.validator())
 	}()
 
 	_, _ = DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerStore)
@@ -233,7 +249,7 @@ func TestDoJoin_WriteRequestFailure(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = AcceptJoin(ctx, rig.listener, rig.introStore, rig.expected)
+		_, _ = AcceptJoin(ctx, rig.listener, rig.introStore, rig.validator())
 	}()
 
 	_, err := DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerStore)
@@ -266,7 +282,7 @@ func TestDoJoin_StreamCloseFailure(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = AcceptJoin(acceptCtx, rig.listener, rig.introStore, rig.expected)
+		_, _ = AcceptJoin(acceptCtx, rig.listener, rig.introStore, rig.validator())
 	}()
 
 	_, err := DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerStore)
