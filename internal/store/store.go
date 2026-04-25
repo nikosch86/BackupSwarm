@@ -105,14 +105,14 @@ func (s *Store) Put(data []byte) ([sha256.Size]byte, error) {
 }
 
 // PutOwned is Put plus an owner record. Same-owner + same-content is a
-// no-op; different owner for existing content returns ErrOwnerMismatch
-// without overwriting.
+// no-op; different owner returns ErrOwnerMismatch. An on-disk blob with
+// no recorded owner is treated as quarantined and also returns ErrOwnerMismatch.
 func (s *Store) PutOwned(data, owner []byte) ([sha256.Size]byte, error) {
-	hash, err := s.putBytes(data)
-	if err != nil {
+	hash := sha256.Sum256(data)
+	if err := s.claimOwner(hash, owner); err != nil {
 		return hash, err
 	}
-	if err := s.recordOwner(hash, owner); err != nil {
+	if _, err := s.putBytes(data); err != nil {
 		return hash, err
 	}
 	return hash, nil
@@ -265,9 +265,10 @@ func (s *Store) DeleteForOwner(hash [sha256.Size]byte, owner []byte) error {
 	})
 }
 
-// recordOwner writes owner as the owner of hash. If an owner is already
-// recorded and differs, returns ErrOwnerMismatch without overwriting.
-func (s *Store) recordOwner(hash [sha256.Size]byte, owner []byte) error {
+// claimOwner asserts owner for hash. Matches an existing record, rejects a
+// differing one, and refuses to claim an unowned blob already on disk.
+// Writes the owner row only when no prior record exists and no orphan blob.
+func (s *Store) claimOwner(hash [sha256.Size]byte, owner []byte) error {
 	db, err := s.ensureOwnersDB()
 	if err != nil {
 		return err
@@ -280,8 +281,27 @@ func (s *Store) recordOwner(hash [sha256.Size]byte, owner []byte) error {
 			}
 			return fmt.Errorf("%w: %x", ErrOwnerMismatch, hash)
 		}
+		blobPresent, err := s.blobOnDisk(hash)
+		if err != nil {
+			return err
+		}
+		if blobPresent {
+			return fmt.Errorf("%w: %x", ErrOwnerMismatch, hash)
+		}
 		return b.Put(hash[:], append([]byte(nil), owner...))
 	})
+}
+
+// blobOnDisk reports whether a blob file for hash is currently stored.
+func (s *Store) blobOnDisk(hash [sha256.Size]byte) (bool, error) {
+	_, err := os.Stat(s.pathFor(hash))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("stat %q: %w", s.pathFor(hash), err)
 }
 
 // ensureOwnersDB lazily opens the owners bbolt db. Safe for concurrent

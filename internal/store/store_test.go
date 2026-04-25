@@ -490,6 +490,44 @@ func TestDelete_RemoveNonEnoentPropagates(t *testing.T) {
 	}
 }
 
+// TestPutOwned_ClaimOwnerBlobOnDiskStatError asserts that a non-ENOENT
+// stat error from blobOnDisk aborts claimOwner without writing an owner
+// row.
+func TestPutOwned_ClaimOwnerBlobOnDiskStatError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("perm-based error injection requires POSIX")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses POSIX file-permission checks")
+	}
+	root := t.TempDir()
+	s, err := store.New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	data := []byte("claim-stat-error")
+	hash, err := s.Put(data)
+	if err != nil {
+		t.Fatalf("Put seed: %v", err)
+	}
+
+	shardDir := filepath.Join(root, hex.EncodeToString(hash[:1]))
+	if err := os.Chmod(shardDir, 0); err != nil {
+		t.Fatalf("chmod shard: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(shardDir, 0o700) })
+
+	if _, err := s.PutOwned(data, []byte("alice")); err == nil {
+		t.Fatal("PutOwned succeeded despite unreadable shard dir")
+	}
+
+	if _, err := s.Owner(hash); !errors.Is(err, store.ErrNoOwnerRecorded) {
+		t.Errorf("Owner err = %v, want wraps ErrNoOwnerRecorded (no owner row should have been written)", err)
+	}
+}
+
 func newStore(t *testing.T) *store.Store {
 	t.Helper()
 	s, err := store.New(t.TempDir())

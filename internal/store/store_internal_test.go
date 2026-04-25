@@ -294,6 +294,49 @@ func containsSubstr(s, sub string) bool {
 	return false
 }
 
+// TestPutOwned_PutBytesFailureAfterClaim asserts that when putBytes
+// fails after claimOwner succeeds, the owner row persists and no blob
+// lands on disk.
+func TestPutOwned_PutBytesFailureAfterClaim(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	owner := []byte("alice")
+	data := []byte("owned-rename-fail")
+
+	sentinel := errors.New("forced rename failure")
+	withRenameFunc(t, func(oldpath, newpath string) error {
+		return sentinel
+	})
+
+	hash, err := s.PutOwned(data, owner)
+	if err == nil {
+		t.Fatal("PutOwned succeeded despite injected rename failure")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("PutOwned err = %v, want wraps sentinel", err)
+	}
+
+	got, ownerErr := s.Owner(hash)
+	if ownerErr != nil {
+		t.Fatalf("Owner after failed PutOwned: %v", ownerErr)
+	}
+	if string(got) != string(owner) {
+		t.Errorf("Owner = %q, want %q", got, owner)
+	}
+
+	present, hasErr := s.Has(hash)
+	if hasErr != nil {
+		t.Fatalf("Has after failed PutOwned: %v", hasErr)
+	}
+	if present {
+		t.Error("Has = true, want false (blob must not be on disk after rename failure)")
+	}
+}
+
 // Sanity check: the sharded path helper is what determines where a
 // committed blob lands on disk. Keeps the internal helper from quietly
 // drifting away from the Put/Get invariants.
