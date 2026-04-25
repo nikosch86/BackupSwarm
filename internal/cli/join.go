@@ -122,7 +122,7 @@ func waitForTokenFile(ctx context.Context, path string) (string, error) {
 		data, err := os.ReadFile(path)
 		if err == nil {
 			tokStr := strings.TrimSpace(string(data))
-			if _, _, decodeErr := token.Decode(tokStr); decodeErr == nil {
+			if _, decodeErr := token.Decode(tokStr); decodeErr == nil {
 				return tokStr, nil
 			}
 			// File exists but not yet a valid token (partial write or

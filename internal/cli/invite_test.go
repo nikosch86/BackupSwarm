@@ -75,7 +75,7 @@ func TestInviteCmd_TimesOutWhenNoJoinerArrives(t *testing.T) {
 	if tokStr == "" {
 		t.Error("invite did not print a token before the timeout")
 	}
-	if _, _, err := token.Decode(tokStr); err != nil {
+	if _, err := token.Decode(tokStr); err != nil {
 		t.Errorf("printed token did not decode: %v", err)
 	}
 
@@ -160,7 +160,7 @@ func TestInviteCmd_TokenOut_WritesFile(t *testing.T) {
 		t.Fatalf("read token file: %v", err)
 	}
 	tokStr := strings.TrimSpace(string(data))
-	if _, _, err := token.Decode(tokStr); err != nil {
+	if _, err := token.Decode(tokStr); err != nil {
 		t.Errorf("--token-out content did not decode: %v (contents=%q)", err, tokStr)
 	}
 	stdoutTok := strings.TrimSpace(stdout.String())
@@ -215,7 +215,7 @@ func waitForToken(t *testing.T, buf *syncBuffer, deadline time.Duration) string 
 		snap := buf.Snapshot()
 		if idx := bytes.IndexByte(snap, '\n'); idx >= 0 {
 			candidate := strings.TrimSpace(string(snap[:idx]))
-			if _, _, err := token.Decode(candidate); err == nil {
+			if _, err := token.Decode(candidate); err == nil {
 				return candidate
 			}
 		}

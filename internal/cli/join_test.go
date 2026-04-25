@@ -44,7 +44,7 @@ func TestJoinCmd_WrongPubkeyDoesNotPersist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
 	}
-	tokStr, err := token.Encode("127.0.0.1:1", wrongPub)
+	tokStr, err := token.Encode(token.Token{Addr: "127.0.0.1:1", Pub: wrongPub})
 	if err != nil {
 		t.Fatalf("token.Encode: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestJoinCmd_TokenFileLateArrival(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
 	}
-	goodTok, err := token.Encode("127.0.0.1:1", pub)
+	goodTok, err := token.Encode(token.Token{Addr: "127.0.0.1:1", Pub: pub})
 	if err != nil {
 		t.Fatalf("encode token: %v", err)
 	}

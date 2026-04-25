@@ -68,7 +68,10 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 
 			// Use the listener's actual bound addr so ":0" (ephemeral
 			// port) still produces a usable token.
-			tokStr, err := token.Encode(listener.Addr().String(), sess.id.PublicKey)
+			tokStr, err := token.Encode(token.Token{
+				Addr: listener.Addr().String(),
+				Pub:  sess.id.PublicKey,
+			})
 			if err != nil {
 				return fmt.Errorf("encode token: %w", err)
 			}

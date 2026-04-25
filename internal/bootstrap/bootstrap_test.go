@@ -75,7 +75,7 @@ func TestBootstrap_EndToEnd(t *testing.T) {
 	const joinerListen = "192.0.2.1:9000"
 	const inviteTimeout = 5 * time.Second
 
-	tok, err := token.Encode(rig.listener.Addr().String(), rig.introducerPub)
+	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: rig.introducerPub})
 	if err != nil {
 		t.Fatalf("token.Encode: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestBootstrap_WrongPubkeyTokenFailsTLSPin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("other key: %v", err)
 	}
-	tok, err := token.Encode(rig.listener.Addr().String(), otherPub)
+	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: otherPub})
 	if err != nil {
 		t.Fatalf("token.Encode: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestBootstrap_MalformedTokenRejected(t *testing.T) {
 
 func TestBootstrap_DeadAddrFailsDial(t *testing.T) {
 	rig := setupTwoSides(t)
-	tok, err := token.Encode("127.0.0.1:1", rig.introducerPub)
+	tok, err := token.Encode(token.Token{Addr: "127.0.0.1:1", Pub: rig.introducerPub})
 	if err != nil {
 		t.Fatalf("token.Encode: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestBootstrap_AcceptJoin_CtxCancelReturns(t *testing.T) {
 
 func TestBootstrap_JoinerWithEmptyListenAddr(t *testing.T) {
 	rig := setupTwoSides(t)
-	tok, err := token.Encode(rig.listener.Addr().String(), rig.introducerPub)
+	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: rig.introducerPub})
 	if err != nil {
 		t.Fatalf("token.Encode: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestBootstrap_IntroducerStoreError_PropagatesAppErr(t *testing.T) {
 	rig := setupTwoSides(t)
 	_ = rig.introducerPeerList.Close()
 
-	tok, err := token.Encode(rig.listener.Addr().String(), rig.introducerPub)
+	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: rig.introducerPub})
 	if err != nil {
 		t.Fatalf("token.Encode: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestAcceptJoin_MalformedHello(t *testing.T) {
 // TestDoJoin_IntroducerDropsBeforeAck asserts DoJoin wraps the ReadJoinAck error when the introducer hangs up before the ack.
 func TestDoJoin_IntroducerDropsBeforeAck(t *testing.T) {
 	rig := setupTwoSides(t)
-	tok, err := token.Encode(rig.listener.Addr().String(), rig.introducerPub)
+	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: rig.introducerPub})
 	if err != nil {
 		t.Fatalf("token.Encode: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestDoJoin_IntroducerDropsBeforeAck(t *testing.T) {
 // TestDoJoin_JoinerStoreClosed_PropagatesErr asserts DoJoin surfaces a joiner-side store.Add error after a successful ack.
 func TestDoJoin_JoinerStoreClosed_PropagatesErr(t *testing.T) {
 	rig := setupTwoSides(t)
-	tok, err := token.Encode(rig.listener.Addr().String(), rig.introducerPub)
+	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: rig.introducerPub})
 	if err != nil {
 		t.Fatalf("token.Encode: %v", err)
 	}

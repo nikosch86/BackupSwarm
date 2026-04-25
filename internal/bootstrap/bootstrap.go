@@ -71,11 +71,11 @@ func AcceptJoin(ctx context.Context, l *bsquic.Listener, store *peers.Store) (pe
 // pubkey), advertises myListenAddr, reads the ack, and persists the
 // introducer. Peer store is untouched on any failure.
 func DoJoin(ctx context.Context, tokenStr string, myPriv ed25519.PrivateKey, myListenAddr string, store *peers.Store) (peers.Peer, error) {
-	addr, pub, err := token.Decode(tokenStr)
+	tok, err := token.Decode(tokenStr)
 	if err != nil {
 		return peers.Peer{}, fmt.Errorf("decode token: %w", err)
 	}
-	conn, err := bsquic.Dial(ctx, addr, myPriv, pub)
+	conn, err := bsquic.Dial(ctx, tok.Addr, myPriv, tok.Pub)
 	if err != nil {
 		return peers.Peer{}, fmt.Errorf("dial introducer: %w", err)
 	}
@@ -101,7 +101,7 @@ func DoJoin(ctx context.Context, tokenStr string, myPriv ed25519.PrivateKey, myL
 		return peers.Peer{}, fmt.Errorf("introducer rejected join: %s", appErr)
 	}
 
-	peer := peers.Peer{Addr: addr, PubKey: ed25519PubCopy(pub), Role: peers.RoleIntroducer}
+	peer := peers.Peer{Addr: tok.Addr, PubKey: ed25519PubCopy(tok.Pub), Role: peers.RoleIntroducer}
 	if err := store.Add(peer); err != nil {
 		return peers.Peer{}, fmt.Errorf("persist peer: %w", err)
 	}

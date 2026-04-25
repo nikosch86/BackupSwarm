@@ -104,7 +104,7 @@ func TestAcceptJoin_WriteJoinAckFailure(t *testing.T) {
 		return protocol.WriteJoinAck(w, appErr)
 	})
 
-	tok, err := token.Encode(rig.listener.Addr().String(), rig.introPub)
+	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: rig.introPub})
 	if err != nil {
 		t.Fatalf("token.Encode: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestDoJoin_WriteJoinHelloFailure(t *testing.T) {
 		return sentinel
 	})
 
-	tok, err := token.Encode(rig.listener.Addr().String(), rig.introPub)
+	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: rig.introPub})
 	if err != nil {
 		t.Fatalf("token.Encode: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestDoJoin_StreamCloseFailure(t *testing.T) {
 		return sentinel
 	})
 
-	tok, err := token.Encode(rig.listener.Addr().String(), rig.introPub)
+	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: rig.introPub})
 	if err != nil {
 		t.Fatalf("token.Encode: %v", err)
 	}
