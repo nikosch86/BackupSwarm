@@ -188,99 +188,6 @@ func TestReadPutChunkResponse_RejectsOversizedErrorMessage(t *testing.T) {
 	}
 }
 
-func TestWriteReadJoinHello_RoundTrip(t *testing.T) {
-	var buf bytes.Buffer
-	if err := protocol.WriteJoinHello(&buf, "node-a.internal:7777"); err != nil {
-		t.Fatalf("WriteJoinHello: %v", err)
-	}
-	got, err := protocol.ReadJoinHello(&buf, 1<<10)
-	if err != nil {
-		t.Fatalf("ReadJoinHello: %v", err)
-	}
-	if got != "node-a.internal:7777" {
-		t.Errorf("addr round-trip = %q", got)
-	}
-}
-
-func TestWriteJoinHello_AcceptsEmpty(t *testing.T) {
-	var buf bytes.Buffer
-	if err := protocol.WriteJoinHello(&buf, ""); err != nil {
-		t.Errorf("WriteJoinHello empty: %v", err)
-	}
-	got, err := protocol.ReadJoinHello(&buf, 1<<10)
-	if err != nil {
-		t.Fatalf("ReadJoinHello: %v", err)
-	}
-	if got != "" {
-		t.Errorf("empty roundtrip got %q", got)
-	}
-}
-
-func TestReadJoinHello_RejectsOversized(t *testing.T) {
-	var buf bytes.Buffer
-	if err := protocol.WriteJoinHello(&buf, "this-is-a-long-address-string"); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	_, err := protocol.ReadJoinHello(&buf, 5)
-	if err == nil {
-		t.Error("ReadJoinHello accepted oversized addr")
-	}
-}
-
-func TestReadJoinHello_RejectsTruncated(t *testing.T) {
-	if _, err := protocol.ReadJoinHello(bytes.NewReader([]byte{0x00}), 1<<10); err == nil {
-		t.Error("ReadJoinHello accepted truncated header")
-	}
-	frame := []byte{0x00, 0x00, 0x00, 0x0a, 'a', 'b', 'c'}
-	if _, err := protocol.ReadJoinHello(bytes.NewReader(frame), 1<<10); err == nil {
-		t.Error("ReadJoinHello accepted truncated body")
-	}
-}
-
-func TestWriteReadJoinAck_Success(t *testing.T) {
-	var buf bytes.Buffer
-	if err := protocol.WriteJoinAck(&buf, ""); err != nil {
-		t.Fatalf("WriteJoinAck: %v", err)
-	}
-	appErr, err := protocol.ReadJoinAck(&buf)
-	if err != nil {
-		t.Fatalf("ReadJoinAck: %v", err)
-	}
-	if appErr != "" {
-		t.Errorf("appErr = %q, want empty", appErr)
-	}
-}
-
-func TestWriteReadJoinAck_ErrorPath(t *testing.T) {
-	var buf bytes.Buffer
-	if err := protocol.WriteJoinAck(&buf, "quota exceeded"); err != nil {
-		t.Fatalf("WriteJoinAck: %v", err)
-	}
-	appErr, err := protocol.ReadJoinAck(&buf)
-	if err != nil {
-		t.Fatalf("ReadJoinAck: %v", err)
-	}
-	if appErr != "quota exceeded" {
-		t.Errorf("appErr = %q, want %q", appErr, "quota exceeded")
-	}
-}
-
-func TestReadJoinAck_RejectsUnknownStatus(t *testing.T) {
-	if _, err := protocol.ReadJoinAck(bytes.NewReader([]byte{0xff})); err == nil {
-		t.Error("ReadJoinAck accepted unknown status byte")
-	}
-}
-
-func TestReadJoinAck_RejectsTruncated(t *testing.T) {
-	if _, err := protocol.ReadJoinAck(bytes.NewReader(nil)); err == nil {
-		t.Error("ReadJoinAck accepted empty stream")
-	}
-	errFrame := []byte{1, 0x00, 0x00, 0x00, 0x05, 'a', 'b'}
-	if _, err := protocol.ReadJoinAck(bytes.NewReader(errFrame)); err == nil {
-		t.Error("ReadJoinAck accepted truncated error body")
-	}
-}
-
 func TestWritePutChunkRequest_RejectsEmptyBlob(t *testing.T) {
 	var buf bytes.Buffer
 	if err := protocol.WritePutChunkRequest(&buf, nil); err == nil {
@@ -291,68 +198,278 @@ func TestWritePutChunkRequest_RejectsEmptyBlob(t *testing.T) {
 	}
 }
 
-// TestWriteJoinHello_PropagatesHeaderWriteError asserts a header-write failure surfaces from WriteJoinHello.
-func TestWriteJoinHello_PropagatesHeaderWriteError(t *testing.T) {
-	sentinel := errors.New("hello header boom")
+// TestWriteJoinResponse_PropagatesSuccessWriteError covers the status-write
+// failure on the success path.
+func TestWriteJoinResponse_PropagatesSuccessWriteError(t *testing.T) {
+	sentinel := errors.New("response status boom")
 	w := &errWriter{failAt: 0, err: sentinel}
-	err := protocol.WriteJoinHello(w, "node-a:1")
-	if !errors.Is(err, sentinel) {
-		t.Errorf("WriteJoinHello err = %v, want wraps sentinel", err)
+	if err := protocol.WriteJoinResponse(w, ""); !errors.Is(err, sentinel) {
+		t.Errorf("WriteJoinResponse success err = %v, want wraps sentinel", err)
 	}
 }
 
-// TestWriteJoinHello_PropagatesBodyWriteError asserts a body-write failure surfaces from WriteJoinHello.
-func TestWriteJoinHello_PropagatesBodyWriteError(t *testing.T) {
-	sentinel := errors.New("hello body boom")
-	w := &errWriter{failAt: 1, err: sentinel}
-	err := protocol.WriteJoinHello(w, "node-a:1")
-	if !errors.Is(err, sentinel) {
-		t.Errorf("WriteJoinHello err = %v, want wraps sentinel", err)
-	}
-}
-
-// TestWriteJoinHello_EmptyAddr_NoBodyWrite asserts an empty addr causes only the header write.
-func TestWriteJoinHello_EmptyAddr_NoBodyWrite(t *testing.T) {
-	sentinel := errors.New("body should not be written")
-	w := &errWriter{failAt: 1, err: sentinel}
-	if err := protocol.WriteJoinHello(w, ""); err != nil {
-		t.Errorf("WriteJoinHello empty addr err = %v, want nil", err)
-	}
-}
-
-// TestWriteJoinAck_PropagatesSuccessWriteError asserts the status-write error surfaces from WriteJoinAck on the success path.
-func TestWriteJoinAck_PropagatesSuccessWriteError(t *testing.T) {
-	sentinel := errors.New("ack status boom")
-	w := &errWriter{failAt: 0, err: sentinel}
-	if err := protocol.WriteJoinAck(w, ""); !errors.Is(err, sentinel) {
-		t.Errorf("WriteJoinAck success err = %v, want wraps sentinel", err)
-	}
-}
-
-// TestWriteJoinAck_PropagatesErrorFrameWriteErrors asserts a write failure at every error-frame stage surfaces from WriteJoinAck.
-func TestWriteJoinAck_PropagatesErrorFrameWriteErrors(t *testing.T) {
+// TestWriteJoinResponse_PropagatesErrorFrameWriteErrors covers a write
+// failure at every error-frame stage.
+func TestWriteJoinResponse_PropagatesErrorFrameWriteErrors(t *testing.T) {
 	for i, name := range []string{"status", "length", "body"} {
-		sentinel := errors.New(name + " ack err boom")
+		sentinel := errors.New(name + " response err boom")
 		w := &errWriter{failAt: i, err: sentinel}
-		err := protocol.WriteJoinAck(w, "quota exceeded")
+		err := protocol.WriteJoinResponse(w, "swarm_mismatch")
 		if !errors.Is(err, sentinel) {
 			t.Errorf("%s-stage err = %v, want wraps sentinel", name, err)
 		}
 	}
 }
 
-// TestReadJoinAck_RejectsTruncatedErrorLength asserts a truncated error-length prefix is rejected by ReadJoinAck.
-func TestReadJoinAck_RejectsTruncatedErrorLength(t *testing.T) {
+func TestReadJoinResponse_RejectsTruncatedErrorLength(t *testing.T) {
 	frame := []byte{1, 0x00, 0x00}
-	if _, err := protocol.ReadJoinAck(bytes.NewReader(frame)); err == nil {
-		t.Error("ReadJoinAck accepted truncated error length prefix")
+	if _, err := protocol.ReadJoinResponse(bytes.NewReader(frame)); err == nil {
+		t.Error("ReadJoinResponse accepted truncated error length prefix")
 	}
 }
 
-// TestReadJoinAck_RejectsOversizedErrorMessage asserts an oversized error length is rejected by ReadJoinAck.
-func TestReadJoinAck_RejectsOversizedErrorMessage(t *testing.T) {
+func TestReadJoinResponse_RejectsOversizedErrorMessage(t *testing.T) {
 	frame := []byte{1, 0x00, 0x10, 0x00, 0x01}
-	if _, err := protocol.ReadJoinAck(bytes.NewReader(frame)); err == nil {
-		t.Error("ReadJoinAck accepted oversized error length")
+	if _, err := protocol.ReadJoinResponse(bytes.NewReader(frame)); err == nil {
+		t.Error("ReadJoinResponse accepted oversized error length")
+	}
+}
+
+// TestWriteJoinRequest_PropagatesWriteErrors covers a write failure at
+// every stage of the join request frame.
+func TestWriteJoinRequest_PropagatesWriteErrors(t *testing.T) {
+	for i, name := range []string{"swarm", "secret", "addrLen", "addrBody"} {
+		sentinel := errors.New(name + " request boom")
+		w := &errWriter{failAt: i, err: sentinel}
+		err := protocol.WriteJoinRequest(w, [32]byte{}, [32]byte{}, "x")
+		if !errors.Is(err, sentinel) {
+			t.Errorf("%s-stage err = %v, want wraps sentinel", name, err)
+		}
+	}
+}
+
+// TestWritePeerListMessage_PropagatesEntryWriteError covers a failure
+// on each entry-stage write.
+func TestWritePeerListMessage_PropagatesEntryWriteError(t *testing.T) {
+	in := []protocol.PeerEntry{{PubKey: filledArray(0x11), Role: 1, Addr: "x"}}
+	for i, name := range []string{"count", "pubkey", "role", "addrLen", "addr"} {
+		sentinel := errors.New(name + " peer entry boom")
+		w := &errWriter{failAt: i, err: sentinel}
+		err := protocol.WritePeerListMessage(w, in)
+		if !errors.Is(err, sentinel) {
+			t.Errorf("%s-stage err = %v, want wraps sentinel", name, err)
+		}
+	}
+}
+
+func filledArray(b byte) [32]byte {
+	var a [32]byte
+	for i := range a {
+		a[i] = b
+	}
+	return a
+}
+
+func TestWriteReadJoinRequest_RoundTrip(t *testing.T) {
+	swarmID := filledArray(0xAA)
+	secret := filledArray(0xBB)
+
+	var buf bytes.Buffer
+	if err := protocol.WriteJoinRequest(&buf, swarmID, secret, "node-a.internal:7777"); err != nil {
+		t.Fatalf("WriteJoinRequest: %v", err)
+	}
+	gotSwarm, gotSecret, gotAddr, err := protocol.ReadJoinRequest(&buf, 1<<10)
+	if err != nil {
+		t.Fatalf("ReadJoinRequest: %v", err)
+	}
+	if gotSwarm != swarmID {
+		t.Error("swarm round-trip mismatch")
+	}
+	if gotSecret != secret {
+		t.Error("secret round-trip mismatch")
+	}
+	if gotAddr != "node-a.internal:7777" {
+		t.Errorf("addr = %q", gotAddr)
+	}
+}
+
+func TestWriteReadJoinRequest_AcceptsEmptyAddr(t *testing.T) {
+	var buf bytes.Buffer
+	if err := protocol.WriteJoinRequest(&buf, [32]byte{}, [32]byte{}, ""); err != nil {
+		t.Fatalf("WriteJoinRequest: %v", err)
+	}
+	_, _, addr, err := protocol.ReadJoinRequest(&buf, 1<<10)
+	if err != nil {
+		t.Fatalf("ReadJoinRequest: %v", err)
+	}
+	if addr != "" {
+		t.Errorf("addr = %q, want empty", addr)
+	}
+}
+
+func TestReadJoinRequest_RejectsTruncated(t *testing.T) {
+	if _, _, _, err := protocol.ReadJoinRequest(bytes.NewReader([]byte{0x00}), 1<<10); err == nil {
+		t.Error("ReadJoinRequest accepted truncated swarmID")
+	}
+	tooShort := append(bytes.Repeat([]byte{0x11}, 32), bytes.Repeat([]byte{0x22}, 30)...)
+	if _, _, _, err := protocol.ReadJoinRequest(bytes.NewReader(tooShort), 1<<10); err == nil {
+		t.Error("ReadJoinRequest accepted truncated secret")
+	}
+	missingAddrLen := append(bytes.Repeat([]byte{0x11}, 32), bytes.Repeat([]byte{0x22}, 32)...)
+	if _, _, _, err := protocol.ReadJoinRequest(bytes.NewReader(missingAddrLen), 1<<10); err == nil {
+		t.Error("ReadJoinRequest accepted missing addr length")
+	}
+	bodyShort := append(missingAddrLen, 0x00, 0x00, 0x00, 0x05, 'a', 'b')
+	if _, _, _, err := protocol.ReadJoinRequest(bytes.NewReader(bodyShort), 1<<10); err == nil {
+		t.Error("ReadJoinRequest accepted truncated addr body")
+	}
+}
+
+func TestReadJoinRequest_RejectsOversizedAddr(t *testing.T) {
+	var buf bytes.Buffer
+	if err := protocol.WriteJoinRequest(&buf, [32]byte{}, [32]byte{}, "this-addr-is-too-long"); err != nil {
+		t.Fatalf("WriteJoinRequest: %v", err)
+	}
+	if _, _, _, err := protocol.ReadJoinRequest(&buf, 5); err == nil {
+		t.Error("ReadJoinRequest accepted oversized addr")
+	}
+}
+
+func TestWriteReadJoinResponse_Success(t *testing.T) {
+	var buf bytes.Buffer
+	if err := protocol.WriteJoinResponse(&buf, ""); err != nil {
+		t.Fatalf("WriteJoinResponse: %v", err)
+	}
+	appErr, err := protocol.ReadJoinResponse(&buf)
+	if err != nil {
+		t.Fatalf("ReadJoinResponse: %v", err)
+	}
+	if appErr != "" {
+		t.Errorf("appErr = %q, want empty", appErr)
+	}
+}
+
+func TestWriteReadJoinResponse_ErrorPath(t *testing.T) {
+	var buf bytes.Buffer
+	if err := protocol.WriteJoinResponse(&buf, "swarm_mismatch"); err != nil {
+		t.Fatalf("WriteJoinResponse: %v", err)
+	}
+	appErr, err := protocol.ReadJoinResponse(&buf)
+	if err != nil {
+		t.Fatalf("ReadJoinResponse: %v", err)
+	}
+	if appErr != "swarm_mismatch" {
+		t.Errorf("appErr = %q", appErr)
+	}
+}
+
+func TestReadJoinResponse_RejectsUnknownStatus(t *testing.T) {
+	if _, err := protocol.ReadJoinResponse(bytes.NewReader([]byte{0xff})); err == nil {
+		t.Error("ReadJoinResponse accepted unknown status byte")
+	}
+}
+
+func TestReadJoinResponse_RejectsTruncated(t *testing.T) {
+	if _, err := protocol.ReadJoinResponse(bytes.NewReader(nil)); err == nil {
+		t.Error("ReadJoinResponse accepted empty stream")
+	}
+	frame := []byte{1, 0x00, 0x00, 0x00, 0x05, 'a', 'b'}
+	if _, err := protocol.ReadJoinResponse(bytes.NewReader(frame)); err == nil {
+		t.Error("ReadJoinResponse accepted truncated error body")
+	}
+}
+
+func samplePeerEntries() []protocol.PeerEntry {
+	return []protocol.PeerEntry{
+		{PubKey: filledArray(0x11), Role: 1, Addr: "10.0.0.1:7777"},
+		{PubKey: filledArray(0x22), Role: 2, Addr: "10.0.0.2:7777"},
+		{PubKey: filledArray(0x33), Role: 3, Addr: ""},
+	}
+}
+
+func TestWriteReadPeerListMessage_RoundTrip(t *testing.T) {
+	in := samplePeerEntries()
+
+	var buf bytes.Buffer
+	if err := protocol.WritePeerListMessage(&buf, in); err != nil {
+		t.Fatalf("WritePeerListMessage: %v", err)
+	}
+	out, err := protocol.ReadPeerListMessage(&buf, 1<<10, 1<<10)
+	if err != nil {
+		t.Fatalf("ReadPeerListMessage: %v", err)
+	}
+	if len(out) != len(in) {
+		t.Fatalf("entry count = %d, want %d", len(out), len(in))
+	}
+	for i := range in {
+		if out[i].PubKey != in[i].PubKey {
+			t.Errorf("entry %d pubkey mismatch", i)
+		}
+		if out[i].Role != in[i].Role {
+			t.Errorf("entry %d role = %d, want %d", i, out[i].Role, in[i].Role)
+		}
+		if out[i].Addr != in[i].Addr {
+			t.Errorf("entry %d addr = %q, want %q", i, out[i].Addr, in[i].Addr)
+		}
+	}
+}
+
+func TestWriteReadPeerListMessage_EmptyList(t *testing.T) {
+	var buf bytes.Buffer
+	if err := protocol.WritePeerListMessage(&buf, nil); err != nil {
+		t.Fatalf("WritePeerListMessage: %v", err)
+	}
+	out, err := protocol.ReadPeerListMessage(&buf, 1<<10, 1<<10)
+	if err != nil {
+		t.Fatalf("ReadPeerListMessage: %v", err)
+	}
+	if len(out) != 0 {
+		t.Errorf("len(out) = %d, want 0", len(out))
+	}
+}
+
+func TestWritePeerListMessage_RejectsZeroRole(t *testing.T) {
+	bad := []protocol.PeerEntry{{PubKey: filledArray(0x11), Role: 0, Addr: "x"}}
+	if err := protocol.WritePeerListMessage(&bytes.Buffer{}, bad); err == nil {
+		t.Error("WritePeerListMessage accepted zero role")
+	}
+}
+
+func TestReadPeerListMessage_RejectsZeroRole(t *testing.T) {
+	frame := []byte{0, 0, 0, 1}
+	frame = append(frame, bytes.Repeat([]byte{0x11}, 32)...)
+	frame = append(frame, 0x00)
+	frame = append(frame, 0, 0, 0, 0)
+	if _, err := protocol.ReadPeerListMessage(bytes.NewReader(frame), 1<<10, 1<<10); err == nil {
+		t.Error("ReadPeerListMessage accepted zero role")
+	}
+}
+
+func TestReadPeerListMessage_RejectsOversizedCount(t *testing.T) {
+	frame := []byte{0, 0, 0, 5}
+	if _, err := protocol.ReadPeerListMessage(bytes.NewReader(frame), 4, 1<<10); err == nil {
+		t.Error("ReadPeerListMessage accepted oversized count")
+	}
+}
+
+func TestReadPeerListMessage_RejectsOversizedAddr(t *testing.T) {
+	in := []protocol.PeerEntry{{PubKey: filledArray(0x11), Role: 1, Addr: "way-too-long-to-fit"}}
+	var buf bytes.Buffer
+	if err := protocol.WritePeerListMessage(&buf, in); err != nil {
+		t.Fatalf("WritePeerListMessage: %v", err)
+	}
+	if _, err := protocol.ReadPeerListMessage(&buf, 1<<10, 5); err == nil {
+		t.Error("ReadPeerListMessage accepted oversized addr")
+	}
+}
+
+func TestReadPeerListMessage_RejectsTruncated(t *testing.T) {
+	if _, err := protocol.ReadPeerListMessage(bytes.NewReader([]byte{0, 0}), 1<<10, 1<<10); err == nil {
+		t.Error("ReadPeerListMessage accepted truncated count header")
+	}
+	frame := []byte{0, 0, 0, 1}
+	frame = append(frame, bytes.Repeat([]byte{0x11}, 31)...)
+	if _, err := protocol.ReadPeerListMessage(bytes.NewReader(frame), 1<<10, 1<<10); err == nil {
+		t.Error("ReadPeerListMessage accepted truncated pubkey")
 	}
 }

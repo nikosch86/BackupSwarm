@@ -29,6 +29,9 @@ type twoSides struct {
 	listener           *bsquic.Listener
 	introducerPeerList *peers.Store
 	joinerPeerList     *peers.Store
+	expected           bootstrap.Expected
+	swarmID            [token.SwarmIDSize]byte
+	secret             [token.SecretSize]byte
 }
 
 func setupTwoSides(t *testing.T) *twoSides {
@@ -59,6 +62,15 @@ func setupTwoSides(t *testing.T) *twoSides {
 	}
 	t.Cleanup(func() { _ = joinStore.Close() })
 
+	var swarmID [token.SwarmIDSize]byte
+	if _, err := rand.Read(swarmID[:]); err != nil {
+		t.Fatalf("rand swarm: %v", err)
+	}
+	var secret [token.SecretSize]byte
+	if _, err := rand.Read(secret[:]); err != nil {
+		t.Fatalf("rand secret: %v", err)
+	}
+
 	return &twoSides{
 		introducerPub:      introPub,
 		introducerPriv:     introPriv,
@@ -67,7 +79,24 @@ func setupTwoSides(t *testing.T) *twoSides {
 		listener:           l,
 		introducerPeerList: introStore,
 		joinerPeerList:     joinStore,
+		expected:           bootstrap.Expected{SwarmID: swarmID, Secret: secret},
+		swarmID:            swarmID,
+		secret:             secret,
 	}
+}
+
+func (r *twoSides) tokenStr(t *testing.T, addr string, pub ed25519.PublicKey) string {
+	t.Helper()
+	tok, err := token.Encode(token.Token{
+		Addr:    addr,
+		Pub:     pub,
+		SwarmID: r.swarmID,
+		Secret:  r.secret,
+	})
+	if err != nil {
+		t.Fatalf("token.Encode: %v", err)
+	}
+	return tok
 }
 
 func TestBootstrap_EndToEnd(t *testing.T) {
@@ -75,10 +104,7 @@ func TestBootstrap_EndToEnd(t *testing.T) {
 	const joinerListen = "192.0.2.1:9000"
 	const inviteTimeout = 5 * time.Second
 
-	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: rig.introducerPub})
-	if err != nil {
-		t.Fatalf("token.Encode: %v", err)
-	}
+	tok := rig.tokenStr(t, rig.listener.Addr().String(), rig.introducerPub)
 
 	var wg sync.WaitGroup
 	var acceptedPeer peers.Peer
@@ -90,12 +116,12 @@ func TestBootstrap_EndToEnd(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		acceptedPeer, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList)
+		acceptedPeer, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.expected)
 	}()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()
-	introducerPeer, err := bootstrap.DoJoin(dialCtx, tok, rig.joinerPriv, joinerListen, rig.joinerPeerList)
+	result, err := bootstrap.DoJoin(dialCtx, tok, rig.joinerPriv, joinerListen, rig.joinerPeerList)
 	if err != nil {
 		t.Fatalf("DoJoin: %v", err)
 	}
@@ -125,14 +151,14 @@ func TestBootstrap_EndToEnd(t *testing.T) {
 		t.Errorf("introducer's stored joiner role = %v, want RolePeer", got.Role)
 	}
 
-	if !bytes.Equal(introducerPeer.PubKey, rig.introducerPub) {
+	if !bytes.Equal(result.Introducer.PubKey, rig.introducerPub) {
 		t.Error("DoJoin returned wrong pubkey")
 	}
-	if introducerPeer.Addr != rig.listener.Addr().String() {
-		t.Errorf("DoJoin addr = %q, want %q", introducerPeer.Addr, rig.listener.Addr().String())
+	if result.Introducer.Addr != rig.listener.Addr().String() {
+		t.Errorf("DoJoin addr = %q, want %q", result.Introducer.Addr, rig.listener.Addr().String())
 	}
-	if introducerPeer.Role != peers.RoleIntroducer {
-		t.Errorf("DoJoin role = %v, want RoleIntroducer", introducerPeer.Role)
+	if result.Introducer.Role != peers.RoleIntroducer {
+		t.Errorf("DoJoin role = %v, want RoleIntroducer", result.Introducer.Role)
 	}
 	got, err = rig.joinerPeerList.Get(rig.introducerPub)
 	if err != nil {
@@ -144,6 +170,137 @@ func TestBootstrap_EndToEnd(t *testing.T) {
 	if got.Role != peers.RoleIntroducer {
 		t.Errorf("joiner's stored introducer role = %v, want RoleIntroducer", got.Role)
 	}
+
+	if len(result.Peers) != 0 {
+		t.Errorf("empty introducer peer store should yield 0 entries, got %d", len(result.Peers))
+	}
+}
+
+// TestBootstrap_SendsExistingPeers seeds the introducer's peer store
+// with a third-party entry and verifies DoJoin returns it verbatim.
+func TestBootstrap_SendsExistingPeers(t *testing.T) {
+	rig := setupTwoSides(t)
+	thirdPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("third key: %v", err)
+	}
+	seeded := peers.Peer{Addr: "10.20.30.40:7777", PubKey: thirdPub, Role: peers.RoleStorage}
+	if err := rig.introducerPeerList.Add(seeded); err != nil {
+		t.Fatalf("seed peer: %v", err)
+	}
+
+	tok := rig.tokenStr(t, rig.listener.Addr().String(), rig.introducerPub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	var acceptErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.expected)
+	}()
+
+	result, err := bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerPeerList)
+	if err != nil {
+		t.Fatalf("DoJoin: %v", err)
+	}
+	wg.Wait()
+	if acceptErr != nil {
+		t.Fatalf("AcceptJoin: %v", acceptErr)
+	}
+
+	if len(result.Peers) != 1 {
+		t.Fatalf("len(Peers) = %d, want 1", len(result.Peers))
+	}
+	got := result.Peers[0]
+	if !bytes.Equal(got.PubKey, thirdPub) {
+		t.Error("third-party pubkey mismatch")
+	}
+	if got.Addr != seeded.Addr {
+		t.Errorf("third-party addr = %q, want %q", got.Addr, seeded.Addr)
+	}
+	if got.Role != peers.RoleStorage {
+		t.Errorf("third-party role = %v, want RoleStorage", got.Role)
+	}
+}
+
+func TestBootstrap_SwarmIDMismatch_RejectedByIntroducer(t *testing.T) {
+	rig := setupTwoSides(t)
+
+	bad := rig.expected
+	bad.SwarmID[0] ^= 0xFF
+
+	wrongTokenSwarm := rig.swarmID
+	wrongTokenSwarm[0] ^= 0xFF
+	tok, err := token.Encode(token.Token{
+		Addr:    rig.listener.Addr().String(),
+		Pub:     rig.introducerPub,
+		SwarmID: wrongTokenSwarm,
+		Secret:  rig.secret,
+	})
+	if err != nil {
+		t.Fatalf("token.Encode: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.expected)
+	}()
+
+	_, err = bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerPeerList)
+	wg.Wait()
+	if err == nil {
+		t.Fatal("DoJoin succeeded despite swarm mismatch")
+	}
+	if !errors.Is(err, bootstrap.ErrSwarmMismatch) {
+		t.Errorf("err = %v, want ErrSwarmMismatch", err)
+	}
+	list, _ := rig.joinerPeerList.List()
+	if len(list) != 0 {
+		t.Errorf("joiner peer store mutated on swarm mismatch: %d entries", len(list))
+	}
+}
+
+func TestBootstrap_SecretMismatch_RejectedByIntroducer(t *testing.T) {
+	rig := setupTwoSides(t)
+
+	wrongSecret := rig.secret
+	wrongSecret[0] ^= 0xFF
+	tok, err := token.Encode(token.Token{
+		Addr:    rig.listener.Addr().String(),
+		Pub:     rig.introducerPub,
+		SwarmID: rig.swarmID,
+		Secret:  wrongSecret,
+	})
+	if err != nil {
+		t.Fatalf("token.Encode: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.expected)
+	}()
+
+	_, err = bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerPeerList)
+	wg.Wait()
+	if err == nil {
+		t.Fatal("DoJoin succeeded despite secret mismatch")
+	}
+	if !errors.Is(err, bootstrap.ErrBadSecret) {
+		t.Errorf("err = %v, want ErrBadSecret", err)
+	}
 }
 
 func TestBootstrap_WrongPubkeyTokenFailsTLSPin(t *testing.T) {
@@ -153,10 +310,7 @@ func TestBootstrap_WrongPubkeyTokenFailsTLSPin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("other key: %v", err)
 	}
-	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: otherPub})
-	if err != nil {
-		t.Fatalf("token.Encode: %v", err)
-	}
+	tok := rig.tokenStr(t, rig.listener.Addr().String(), otherPub)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -164,7 +318,7 @@ func TestBootstrap_WrongPubkeyTokenFailsTLSPin(t *testing.T) {
 	acceptCtx, acceptCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer acceptCancel()
 	go func() {
-		_, _ = bootstrap.AcceptJoin(acceptCtx, rig.listener, rig.introducerPeerList)
+		_, _ = bootstrap.AcceptJoin(acceptCtx, rig.listener, rig.introducerPeerList, rig.expected)
 	}()
 
 	_, err = bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "127.0.0.1:1", rig.joinerPeerList)
@@ -189,13 +343,10 @@ func TestBootstrap_MalformedTokenRejected(t *testing.T) {
 
 func TestBootstrap_DeadAddrFailsDial(t *testing.T) {
 	rig := setupTwoSides(t)
-	tok, err := token.Encode(token.Token{Addr: "127.0.0.1:1", Pub: rig.introducerPub})
-	if err != nil {
-		t.Fatalf("token.Encode: %v", err)
-	}
+	tok := rig.tokenStr(t, "127.0.0.1:1", rig.introducerPub)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, err = bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "x:1", rig.joinerPeerList)
+	_, err := bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "x:1", rig.joinerPeerList)
 	if err == nil {
 		t.Error("DoJoin succeeded against dead address")
 	}
@@ -206,7 +357,7 @@ func TestBootstrap_AcceptJoin_CtxCancelReturns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList)
+		_, err := bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.expected)
 		done <- err
 	}()
 	time.Sleep(100 * time.Millisecond)
@@ -223,10 +374,7 @@ func TestBootstrap_AcceptJoin_CtxCancelReturns(t *testing.T) {
 
 func TestBootstrap_JoinerWithEmptyListenAddr(t *testing.T) {
 	rig := setupTwoSides(t)
-	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: rig.introducerPub})
-	if err != nil {
-		t.Fatalf("token.Encode: %v", err)
-	}
+	tok := rig.tokenStr(t, rig.listener.Addr().String(), rig.introducerPub)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -237,10 +385,10 @@ func TestBootstrap_JoinerWithEmptyListenAddr(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		acceptedPeer, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList)
+		acceptedPeer, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.expected)
 	}()
 
-	_, err = bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "", rig.joinerPeerList)
+	_, err := bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "", rig.joinerPeerList)
 	if err != nil {
 		t.Fatalf("DoJoin with empty listen: %v", err)
 	}
@@ -260,15 +408,13 @@ func TestBootstrap_JoinerWithEmptyListenAddr(t *testing.T) {
 	}
 }
 
-// TestBootstrap_IntroducerStoreError_PropagatesAppErr asserts a peer-store Add failure surfaces as an app error to DoJoin.
+// TestBootstrap_IntroducerStoreError_PropagatesAppErr exercises a peer-
+// store List failure surfaces as an internal app error to DoJoin.
 func TestBootstrap_IntroducerStoreError_PropagatesAppErr(t *testing.T) {
 	rig := setupTwoSides(t)
 	_ = rig.introducerPeerList.Close()
 
-	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: rig.introducerPub})
-	if err != nil {
-		t.Fatalf("token.Encode: %v", err)
-	}
+	tok := rig.tokenStr(t, rig.listener.Addr().String(), rig.introducerPub)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -278,10 +424,10 @@ func TestBootstrap_IntroducerStoreError_PropagatesAppErr(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList)
+		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.expected)
 	}()
 
-	_, err = bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "", rig.joinerPeerList)
+	_, err := bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "", rig.joinerPeerList)
 	wg.Wait()
 
 	if err == nil {
@@ -289,6 +435,9 @@ func TestBootstrap_IntroducerStoreError_PropagatesAppErr(t *testing.T) {
 	}
 	if acceptErr == nil {
 		t.Error("AcceptJoin returned nil despite store failure")
+	}
+	if !errors.Is(err, bootstrap.ErrIntroducerInternal) {
+		t.Errorf("DoJoin err = %v, want ErrIntroducerInternal", err)
 	}
 	list, _ := rig.joinerPeerList.List()
 	if len(list) != 0 {
@@ -311,7 +460,7 @@ func TestAcceptJoin_ClientClosesWithoutStream(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList)
+		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.expected)
 	}()
 
 	conn, err := bsquic.Dial(dialCtx, rig.listener.Addr().String(), rig.joinerPriv, rig.introducerPub)
@@ -336,14 +485,15 @@ func TestAcceptJoin_ListenerClosed(t *testing.T) {
 	_ = rig.listener.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, err := bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList)
+	_, err := bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.expected)
 	if err == nil {
 		t.Fatal("AcceptJoin returned nil on closed listener")
 	}
 }
 
-// TestAcceptJoin_MalformedHello asserts AcceptJoin surfaces a ReadJoinHello error when the joiner sends no hello bytes.
-func TestAcceptJoin_MalformedHello(t *testing.T) {
+// TestAcceptJoin_MalformedRequest covers a joiner that opens a stream
+// then closes it without writing the request frame.
+func TestAcceptJoin_MalformedRequest(t *testing.T) {
 	rig := setupTwoSides(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -353,7 +503,7 @@ func TestAcceptJoin_MalformedHello(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList)
+		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.expected)
 	}()
 
 	conn, err := bsquic.Dial(ctx, rig.listener.Addr().String(), rig.joinerPriv, rig.introducerPub)
@@ -369,21 +519,19 @@ func TestAcceptJoin_MalformedHello(t *testing.T) {
 
 	wg.Wait()
 	if acceptErr == nil {
-		t.Fatal("AcceptJoin returned nil on malformed hello")
+		t.Fatal("AcceptJoin returned nil on malformed request")
 	}
 	list, _ := rig.introducerPeerList.List()
 	if len(list) != 0 {
-		t.Errorf("introducer peer list mutated on malformed hello: %d entries", len(list))
+		t.Errorf("introducer peer list mutated on malformed request: %d entries", len(list))
 	}
 }
 
-// TestDoJoin_IntroducerDropsBeforeAck asserts DoJoin wraps the ReadJoinAck error when the introducer hangs up before the ack.
-func TestDoJoin_IntroducerDropsBeforeAck(t *testing.T) {
+// TestDoJoin_IntroducerDropsBeforeResponse asserts DoJoin wraps the
+// ReadJoinResponse error when the introducer hangs up before responding.
+func TestDoJoin_IntroducerDropsBeforeResponse(t *testing.T) {
 	rig := setupTwoSides(t)
-	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: rig.introducerPub})
-	if err != nil {
-		t.Fatalf("token.Encode: %v", err)
-	}
+	tok := rig.tokenStr(t, rig.listener.Addr().String(), rig.introducerPub)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -401,28 +549,25 @@ func TestDoJoin_IntroducerDropsBeforeAck(t *testing.T) {
 			_ = conn.Close()
 			return
 		}
-		_, _ = protocol.ReadJoinHello(stream, maxAdvertisedAddrLenForTest)
+		_, _, _, _ = protocol.ReadJoinRequest(stream, maxAdvertisedAddrLenForTest)
 		_ = conn.Close()
 	}()
 
-	_, err = bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerPeerList)
+	_, err := bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerPeerList)
 	if err == nil {
-		t.Fatal("DoJoin returned nil when introducer dropped before ack")
+		t.Fatal("DoJoin returned nil when introducer dropped before response")
 	}
 	wg.Wait()
 	list, _ := rig.joinerPeerList.List()
 	if len(list) != 0 {
-		t.Errorf("joiner peer list has %d entries after failed ack read; want 0", len(list))
+		t.Errorf("joiner peer list has %d entries after failed response read; want 0", len(list))
 	}
 }
 
-// TestDoJoin_JoinerStoreClosed_PropagatesErr asserts DoJoin surfaces a joiner-side store.Add error after a successful ack.
+// TestDoJoin_JoinerStoreClosed_PropagatesErr asserts DoJoin surfaces a joiner-side store.Add error after a successful response.
 func TestDoJoin_JoinerStoreClosed_PropagatesErr(t *testing.T) {
 	rig := setupTwoSides(t)
-	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: rig.introducerPub})
-	if err != nil {
-		t.Fatalf("token.Encode: %v", err)
-	}
+	tok := rig.tokenStr(t, rig.listener.Addr().String(), rig.introducerPub)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -431,12 +576,12 @@ func TestDoJoin_JoinerStoreClosed_PropagatesErr(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList)
+		_, _ = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.expected)
 	}()
 
 	_ = rig.joinerPeerList.Close()
 
-	_, err = bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerPeerList)
+	_, err := bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerPeerList)
 	if err == nil {
 		t.Fatal("DoJoin returned nil when joiner store.Add should fail")
 	}

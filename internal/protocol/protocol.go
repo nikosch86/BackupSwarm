@@ -163,80 +163,86 @@ func ReadPutChunkResponse(r io.Reader) (hash [32]byte, appErr string, err error)
 	}
 }
 
-// WriteJoinHello frames the joiner-advertised listen address on w.
-// The frame layout is [4 bytes BE length][addr bytes]. An empty address
-// is permitted — it signals "I have no daemon addr yet; record only my
-// pubkey." The caller's TLS session already carries the joiner's
-// authenticated pubkey, so this message carries only the addr.
-func WriteJoinHello(w io.Writer, listenAddr string) error {
+// WriteJoinRequest frames a join request on w as
+// [32B swarmID][32B secret][4B BE addr_len][addr bytes].
+func WriteJoinRequest(w io.Writer, swarmID, secret [32]byte, listenAddr string) error {
+	if _, err := w.Write(swarmID[:]); err != nil {
+		return fmt.Errorf("write join request swarm: %w", err)
+	}
+	if _, err := w.Write(secret[:]); err != nil {
+		return fmt.Errorf("write join request secret: %w", err)
+	}
 	var hdr [4]byte
 	binary.BigEndian.PutUint32(hdr[:], uint32(len(listenAddr)))
 	if _, err := w.Write(hdr[:]); err != nil {
-		return fmt.Errorf("write hello header: %w", err)
+		return fmt.Errorf("write join request addr length: %w", err)
 	}
 	if len(listenAddr) == 0 {
 		return nil
 	}
 	if _, err := w.Write([]byte(listenAddr)); err != nil {
-		return fmt.Errorf("write hello body: %w", err)
+		return fmt.Errorf("write join request addr: %w", err)
 	}
 	return nil
 }
 
-// ReadJoinHello reads a single JoinHello frame from r, returning the
-// advertised address string. maxAddrLen caps the advertised length so a
-// misbehaving joiner cannot drive a huge allocation.
-func ReadJoinHello(r io.Reader, maxAddrLen int) (string, error) {
+// ReadJoinRequest reads a single join request frame from r. maxAddrLen
+// caps the advertised listen address length.
+func ReadJoinRequest(r io.Reader, maxAddrLen int) (swarmID, secret [32]byte, listenAddr string, err error) {
+	if _, err = io.ReadFull(r, swarmID[:]); err != nil {
+		return swarmID, secret, "", fmt.Errorf("read join request swarm: %w", err)
+	}
+	if _, err = io.ReadFull(r, secret[:]); err != nil {
+		return swarmID, secret, "", fmt.Errorf("read join request secret: %w", err)
+	}
 	var hdr [4]byte
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return "", fmt.Errorf("read hello header: %w", err)
+	if _, err = io.ReadFull(r, hdr[:]); err != nil {
+		return swarmID, secret, "", fmt.Errorf("read join request addr length: %w", err)
 	}
 	n := binary.BigEndian.Uint32(hdr[:])
 	if maxAddrLen > 0 && int64(n) > int64(maxAddrLen) {
-		return "", fmt.Errorf("%w: got %d, max %d", ErrAddrTooLarge, n, maxAddrLen)
+		return swarmID, secret, "", fmt.Errorf("%w: got %d, max %d", ErrAddrTooLarge, n, maxAddrLen)
 	}
 	if n == 0 {
-		return "", nil
+		return swarmID, secret, "", nil
 	}
 	buf := make([]byte, n)
-	if _, err := io.ReadFull(r, buf); err != nil {
-		return "", fmt.Errorf("read hello body: %w", err)
+	if _, err = io.ReadFull(r, buf); err != nil {
+		return swarmID, secret, "", fmt.Errorf("read join request addr: %w", err)
 	}
-	return string(buf), nil
+	return swarmID, secret, string(buf), nil
 }
 
-// WriteJoinAck writes an acknowledgement frame. On success (appErr == ""),
-// the frame is [statusOK]. On an application-level failure the frame is
-// [statusErr][4 bytes BE err_len][err bytes], identical to the error path
-// in WritePutChunkResponse.
-func WriteJoinAck(w io.Writer, appErr string) error {
+// WriteJoinResponse writes an acknowledgement frame. On success
+// (appErr == "") the frame is [statusOK]; otherwise
+// [statusErr][4B BE err_len][err bytes].
+func WriteJoinResponse(w io.Writer, appErr string) error {
 	if appErr == "" {
 		if _, err := w.Write([]byte{statusOK}); err != nil {
-			return fmt.Errorf("write ack status: %w", err)
+			return fmt.Errorf("write join response status: %w", err)
 		}
 		return nil
 	}
 	if _, err := w.Write([]byte{statusErr}); err != nil {
-		return fmt.Errorf("write ack status: %w", err)
+		return fmt.Errorf("write join response status: %w", err)
 	}
 	var lenBuf [4]byte
 	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(appErr)))
 	if _, err := w.Write(lenBuf[:]); err != nil {
-		return fmt.Errorf("write ack error length: %w", err)
+		return fmt.Errorf("write join response error length: %w", err)
 	}
 	if _, err := w.Write([]byte(appErr)); err != nil {
-		return fmt.Errorf("write ack error body: %w", err)
+		return fmt.Errorf("write join response error body: %w", err)
 	}
 	return nil
 }
 
-// ReadJoinAck reads a single ack frame from r. Returns the peer-supplied
-// error string on application failure (empty on success) or a transport
-// error on malformed input.
-func ReadJoinAck(r io.Reader) (string, error) {
+// ReadJoinResponse reads a single response frame from r. Returns the
+// peer-supplied error string (empty on success) or a transport error.
+func ReadJoinResponse(r io.Reader) (string, error) {
 	var status [1]byte
 	if _, err := io.ReadFull(r, status[:]); err != nil {
-		return "", fmt.Errorf("read ack status: %w", err)
+		return "", fmt.Errorf("read join response status: %w", err)
 	}
 	switch status[0] {
 	case statusOK:
@@ -244,20 +250,107 @@ func ReadJoinAck(r io.Reader) (string, error) {
 	case statusErr:
 		var lenBuf [4]byte
 		if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
-			return "", fmt.Errorf("read ack error length: %w", err)
+			return "", fmt.Errorf("read join response error length: %w", err)
 		}
 		n := binary.BigEndian.Uint32(lenBuf[:])
 		if n > MaxErrorMessageLen {
-			return "", fmt.Errorf("ack error length %d exceeds max %d", n, MaxErrorMessageLen)
+			return "", fmt.Errorf("join response error length %d exceeds max %d", n, MaxErrorMessageLen)
 		}
 		body := make([]byte, n)
 		if _, err := io.ReadFull(r, body); err != nil {
-			return "", fmt.Errorf("read ack error body: %w", err)
+			return "", fmt.Errorf("read join response error body: %w", err)
 		}
 		return string(body), nil
 	default:
-		return "", fmt.Errorf("unknown ack status byte %d", status[0])
+		return "", fmt.Errorf("unknown join response status byte %d", status[0])
 	}
+}
+
+// PeerEntry is one element of a PeerListMessage. Role is opaque to this
+// package; consumers map the byte to their own enum.
+type PeerEntry struct {
+	PubKey [32]byte
+	Role   byte
+	Addr   string
+}
+
+// WritePeerListMessage frames entries as [4B BE count][entry...] where
+// each entry is [32B pubkey][1B role][4B BE addr_len][addr bytes]. A
+// zero role is rejected.
+func WritePeerListMessage(w io.Writer, entries []PeerEntry) error {
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(entries)))
+	if _, err := w.Write(hdr[:]); err != nil {
+		return fmt.Errorf("write peer list count: %w", err)
+	}
+	for i, e := range entries {
+		if e.Role == 0 {
+			return fmt.Errorf("write peer list entry %d: role is zero", i)
+		}
+		if _, err := w.Write(e.PubKey[:]); err != nil {
+			return fmt.Errorf("write peer list entry %d pubkey: %w", i, err)
+		}
+		if _, err := w.Write([]byte{e.Role}); err != nil {
+			return fmt.Errorf("write peer list entry %d role: %w", i, err)
+		}
+		var lenBuf [4]byte
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(e.Addr)))
+		if _, err := w.Write(lenBuf[:]); err != nil {
+			return fmt.Errorf("write peer list entry %d addr length: %w", i, err)
+		}
+		if len(e.Addr) > 0 {
+			if _, err := w.Write([]byte(e.Addr)); err != nil {
+				return fmt.Errorf("write peer list entry %d addr: %w", i, err)
+			}
+		}
+	}
+	return nil
+}
+
+// ReadPeerListMessage reads a peer list frame from r. maxEntries caps the
+// declared count; maxAddrLen caps each entry's addr. A zero role is
+// rejected.
+func ReadPeerListMessage(r io.Reader, maxEntries, maxAddrLen int) ([]PeerEntry, error) {
+	var hdr [4]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return nil, fmt.Errorf("read peer list count: %w", err)
+	}
+	count := binary.BigEndian.Uint32(hdr[:])
+	if maxEntries > 0 && int64(count) > int64(maxEntries) {
+		return nil, fmt.Errorf("peer list count %d exceeds max %d", count, maxEntries)
+	}
+	out := make([]PeerEntry, 0, count)
+	for i := uint32(0); i < count; i++ {
+		var e PeerEntry
+		if _, err := io.ReadFull(r, e.PubKey[:]); err != nil {
+			return nil, fmt.Errorf("read peer list entry %d pubkey: %w", i, err)
+		}
+		var roleBuf [1]byte
+		if _, err := io.ReadFull(r, roleBuf[:]); err != nil {
+			return nil, fmt.Errorf("read peer list entry %d role: %w", i, err)
+		}
+		if roleBuf[0] == 0 {
+			return nil, fmt.Errorf("read peer list entry %d: role is zero", i)
+		}
+		e.Role = roleBuf[0]
+		var lenBuf [4]byte
+		if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+			return nil, fmt.Errorf("read peer list entry %d addr length: %w", i, err)
+		}
+		n := binary.BigEndian.Uint32(lenBuf[:])
+		if maxAddrLen > 0 && int64(n) > int64(maxAddrLen) {
+			return nil, fmt.Errorf("%w: entry %d got %d, max %d", ErrAddrTooLarge, i, n, maxAddrLen)
+		}
+		if n > 0 {
+			body := make([]byte, n)
+			if _, err := io.ReadFull(r, body); err != nil {
+				return nil, fmt.Errorf("read peer list entry %d addr: %w", i, err)
+			}
+			e.Addr = string(body)
+		}
+		out = append(out, e)
+	}
+	return out, nil
 }
 
 // WriteDeleteChunkRequest frames the content hash on w. The body is a

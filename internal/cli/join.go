@@ -73,14 +73,15 @@ func newJoinCmd(dataDir *string) *cobra.Command {
 			}()
 
 			ctx, cancel := withTimeout(cmd.Context(), timeout)
-			peer, err := bootstrap.DoJoin(ctx, tokStr, sess.id.PrivateKey, advertisedAddr, sess.peerStore)
+			result, err := bootstrap.DoJoin(ctx, tokStr, sess.id.PrivateKey, advertisedAddr, sess.peerStore)
 			cancel()
 			if err != nil {
 				return fmt.Errorf("join: %w", err)
 			}
 			slog.InfoContext(cmd.Context(), "joined peer",
-				"peer_pub", hex.EncodeToString(peer.PubKey),
-				"peer_addr", peer.Addr,
+				"peer_pub", hex.EncodeToString(result.Introducer.PubKey),
+				"peer_addr", result.Introducer.Addr,
+				"peer_list_size", len(result.Peers),
 			)
 
 			if !thenRun {

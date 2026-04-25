@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -66,11 +67,17 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 				}
 			}()
 
+			expected, err := newExpected()
+			if err != nil {
+				return fmt.Errorf("generate session secret: %w", err)
+			}
 			// Use the listener's actual bound addr so ":0" (ephemeral
 			// port) still produces a usable token.
 			tokStr, err := token.Encode(token.Token{
-				Addr: listener.Addr().String(),
-				Pub:  sess.id.PublicKey,
+				Addr:    listener.Addr().String(),
+				Pub:     sess.id.PublicKey,
+				SwarmID: expected.SwarmID,
+				Secret:  expected.Secret,
 			})
 			if err != nil {
 				return fmt.Errorf("encode token: %w", err)
@@ -84,7 +91,7 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 
 			ctx, cancel := withTimeout(cmd.Context(), timeout)
 			defer cancel()
-			peer, err := bootstrap.AcceptJoin(ctx, listener, sess.peerStore)
+			peer, err := bootstrap.AcceptJoin(ctx, listener, sess.peerStore, expected)
 			if err != nil {
 				return fmt.Errorf("accept join: %w", err)
 			}
@@ -114,6 +121,19 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&tokenOut, "token-out", "", "Write the printed token to this file (atomic)")
 	cmd.Flags().BoolVar(&thenRun, "then-run", false, "After the handshake, transition into the sync daemon (storage-peer role)")
 	return cmd
+}
+
+// newExpected generates the per-invite swarm ID and single-use secret
+// the introducer will compare an inbound JoinRequest against.
+func newExpected() (bootstrap.Expected, error) {
+	var e bootstrap.Expected
+	if _, err := rand.Read(e.SwarmID[:]); err != nil {
+		return bootstrap.Expected{}, fmt.Errorf("read swarm id: %w", err)
+	}
+	if _, err := rand.Read(e.Secret[:]); err != nil {
+		return bootstrap.Expected{}, fmt.Errorf("read secret: %w", err)
+	}
+	return e, nil
 }
 
 // tokenTempFile narrows the surface writeTokenFile needs from a

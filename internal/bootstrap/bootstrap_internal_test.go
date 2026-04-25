@@ -24,23 +24,49 @@ func TestEd25519PubCopy_Nil(t *testing.T) {
 	}
 }
 
-// withWriteJoinAckFunc swaps writeJoinAckFunc for the duration of a test.
-func withWriteJoinAckFunc(t *testing.T, fn func(w io.Writer, appErr string) error) {
-	t.Helper()
-	prev := writeJoinAckFunc
-	writeJoinAckFunc = fn
-	t.Cleanup(func() { writeJoinAckFunc = prev })
+// TestEntriesToPeers_RejectsUnknownRole feeds entriesToPeers a non-zero
+// out-of-range role byte and asserts a non-nil error.
+func TestEntriesToPeers_RejectsUnknownRole(t *testing.T) {
+	in := []protocol.PeerEntry{{PubKey: [32]byte{0x11}, Role: 99, Addr: "x:1"}}
+	out, err := entriesToPeers(in)
+	if err == nil {
+		t.Fatalf("entriesToPeers accepted unknown role; out=%v", out)
+	}
 }
 
-// withWriteJoinHelloFunc swaps writeJoinHelloFunc for the duration of a test.
-func withWriteJoinHelloFunc(t *testing.T, fn func(w io.Writer, listenAddr string) error) {
-	t.Helper()
-	prev := writeJoinHelloFunc
-	writeJoinHelloFunc = fn
-	t.Cleanup(func() { writeJoinHelloFunc = prev })
+// TestJoinResponseError_UnknownCode asserts an unrecognized wire code
+// produces an error that is none of the typed sentinels.
+func TestJoinResponseError_UnknownCode(t *testing.T) {
+	err := joinResponseError("future_code_42")
+	if err == nil {
+		t.Fatal("joinResponseError returned nil for unknown code")
+	}
+	if errors.Is(err, ErrSwarmMismatch) || errors.Is(err, ErrBadSecret) || errors.Is(err, ErrIntroducerInternal) {
+		t.Errorf("unknown code matched a typed sentinel: %v", err)
+	}
 }
 
-// withStreamCloseFunc swaps streamCloseFunc for the duration of a test.
+func withWriteJoinResponseFunc(t *testing.T, fn func(w io.Writer, appErr string) error) {
+	t.Helper()
+	prev := writeJoinResponseFunc
+	writeJoinResponseFunc = fn
+	t.Cleanup(func() { writeJoinResponseFunc = prev })
+}
+
+func withWriteJoinRequestFunc(t *testing.T, fn func(w io.Writer, swarmID, secret [32]byte, addr string) error) {
+	t.Helper()
+	prev := writeJoinRequestFunc
+	writeJoinRequestFunc = fn
+	t.Cleanup(func() { writeJoinRequestFunc = prev })
+}
+
+func withWritePeerListFunc(t *testing.T, fn func(w io.Writer, entries []protocol.PeerEntry) error) {
+	t.Helper()
+	prev := writePeerListFunc
+	writePeerListFunc = fn
+	t.Cleanup(func() { writePeerListFunc = prev })
+}
+
 func withStreamCloseFunc(t *testing.T, fn func(s io.Closer) error) {
 	t.Helper()
 	prev := streamCloseFunc
@@ -54,6 +80,9 @@ type internalRig struct {
 	listener              *bsquic.Listener
 	introStore            *peers.Store
 	joinerStore           *peers.Store
+	expected              Expected
+	swarmID               [token.SwarmIDSize]byte
+	secret                [token.SecretSize]byte
 }
 
 func newInternalRig(t *testing.T) *internalRig {
@@ -81,33 +110,58 @@ func newInternalRig(t *testing.T) *internalRig {
 		t.Fatalf("join store: %v", err)
 	}
 	t.Cleanup(func() { _ = js.Close() })
+
+	var swarmID [token.SwarmIDSize]byte
+	if _, err := rand.Read(swarmID[:]); err != nil {
+		t.Fatalf("rand swarm: %v", err)
+	}
+	var secret [token.SecretSize]byte
+	if _, err := rand.Read(secret[:]); err != nil {
+		t.Fatalf("rand secret: %v", err)
+	}
+
 	return &internalRig{
 		introPub: ip, introPriv: iPriv,
 		joinerPub: jp, joinerPriv: jPriv,
 		listener:    l,
 		introStore:  is,
 		joinerStore: js,
+		expected:    Expected{SwarmID: swarmID, Secret: secret},
+		swarmID:     swarmID,
+		secret:      secret,
 	}
 }
 
-// TestAcceptJoin_WriteJoinAckFailure asserts AcceptJoin wraps a WriteJoinAck failure as "write ack".
-func TestAcceptJoin_WriteJoinAckFailure(t *testing.T) {
+func (r *internalRig) tokenStr(t *testing.T) string {
+	t.Helper()
+	tok, err := token.Encode(token.Token{
+		Addr:    r.listener.Addr().String(),
+		Pub:     r.introPub,
+		SwarmID: r.swarmID,
+		Secret:  r.secret,
+	})
+	if err != nil {
+		t.Fatalf("token.Encode: %v", err)
+	}
+	return tok
+}
+
+// TestAcceptJoin_WriteResponseFailure asserts AcceptJoin wraps a
+// WriteJoinResponse failure as "write response".
+func TestAcceptJoin_WriteResponseFailure(t *testing.T) {
 	rig := newInternalRig(t)
-	sentinel := errors.New("forced ack write failure")
-	withWriteJoinAckFunc(t, func(w io.Writer, appErr string) error {
+	sentinel := errors.New("forced response write failure")
+	withWriteJoinResponseFunc(t, func(w io.Writer, appErr string) error {
 		if appErr == "" {
 			if c, ok := w.(io.Closer); ok {
 				_ = c.Close()
 			}
 			return sentinel
 		}
-		return protocol.WriteJoinAck(w, appErr)
+		return protocol.WriteJoinResponse(w, appErr)
 	})
 
-	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: rig.introPub})
-	if err != nil {
-		t.Fatalf("token.Encode: %v", err)
-	}
+	tok := rig.tokenStr(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -116,32 +170,62 @@ func TestAcceptJoin_WriteJoinAckFailure(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, acceptErr = AcceptJoin(ctx, rig.listener, rig.introStore)
+		_, acceptErr = AcceptJoin(ctx, rig.listener, rig.introStore, rig.expected)
 	}()
 
 	_, _ = DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerStore)
 
 	wg.Wait()
 	if acceptErr == nil {
-		t.Fatal("AcceptJoin returned nil despite injected ack-write failure")
+		t.Fatal("AcceptJoin returned nil despite injected response-write failure")
 	}
 	if !errors.Is(acceptErr, sentinel) {
 		t.Errorf("AcceptJoin err = %v, want wraps sentinel", acceptErr)
 	}
 }
 
-// TestDoJoin_WriteJoinHelloFailure asserts DoJoin wraps a WriteJoinHello failure as "write hello".
-func TestDoJoin_WriteJoinHelloFailure(t *testing.T) {
+// TestAcceptJoin_WritePeerListFailure covers a failure on the trailing
+// peer-list write after the success response.
+func TestAcceptJoin_WritePeerListFailure(t *testing.T) {
 	rig := newInternalRig(t)
-	sentinel := errors.New("forced hello write failure")
-	withWriteJoinHelloFunc(t, func(w io.Writer, addr string) error {
+	sentinel := errors.New("forced peer list write failure")
+	withWritePeerListFunc(t, func(w io.Writer, entries []protocol.PeerEntry) error {
 		return sentinel
 	})
 
-	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: rig.introPub})
-	if err != nil {
-		t.Fatalf("token.Encode: %v", err)
+	tok := rig.tokenStr(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	var acceptErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, acceptErr = AcceptJoin(ctx, rig.listener, rig.introStore, rig.expected)
+	}()
+
+	_, _ = DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerStore)
+
+	wg.Wait()
+	if acceptErr == nil {
+		t.Fatal("AcceptJoin returned nil despite injected peer-list write failure")
 	}
+	if !errors.Is(acceptErr, sentinel) {
+		t.Errorf("AcceptJoin err = %v, want wraps sentinel", acceptErr)
+	}
+}
+
+// TestDoJoin_WriteRequestFailure asserts DoJoin wraps a WriteJoinRequest
+// failure as "write request".
+func TestDoJoin_WriteRequestFailure(t *testing.T) {
+	rig := newInternalRig(t)
+	sentinel := errors.New("forced request write failure")
+	withWriteJoinRequestFunc(t, func(w io.Writer, swarmID, secret [32]byte, addr string) error {
+		return sentinel
+	})
+
+	tok := rig.tokenStr(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -149,12 +233,12 @@ func TestDoJoin_WriteJoinHelloFailure(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = AcceptJoin(ctx, rig.listener, rig.introStore)
+		_, _ = AcceptJoin(ctx, rig.listener, rig.introStore, rig.expected)
 	}()
 
-	_, err = DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerStore)
+	_, err := DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerStore)
 	if err == nil {
-		t.Fatal("DoJoin returned nil despite injected hello-write failure")
+		t.Fatal("DoJoin returned nil despite injected request-write failure")
 	}
 	if !errors.Is(err, sentinel) {
 		t.Errorf("DoJoin err = %v, want wraps sentinel", err)
@@ -163,7 +247,8 @@ func TestDoJoin_WriteJoinHelloFailure(t *testing.T) {
 	wg.Wait()
 }
 
-// TestDoJoin_StreamCloseFailure asserts DoJoin wraps a half-close failure as "close hello send".
+// TestDoJoin_StreamCloseFailure asserts DoJoin wraps a half-close failure
+// as "close request send".
 func TestDoJoin_StreamCloseFailure(t *testing.T) {
 	rig := newInternalRig(t)
 	sentinel := errors.New("forced stream close failure")
@@ -171,10 +256,7 @@ func TestDoJoin_StreamCloseFailure(t *testing.T) {
 		return sentinel
 	})
 
-	tok, err := token.Encode(token.Token{Addr: rig.listener.Addr().String(), Pub: rig.introPub})
-	if err != nil {
-		t.Fatalf("token.Encode: %v", err)
-	}
+	tok := rig.tokenStr(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -184,10 +266,10 @@ func TestDoJoin_StreamCloseFailure(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = AcceptJoin(acceptCtx, rig.listener, rig.introStore)
+		_, _ = AcceptJoin(acceptCtx, rig.listener, rig.introStore, rig.expected)
 	}()
 
-	_, err = DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerStore)
+	_, err := DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerStore)
 	if err == nil {
 		t.Fatal("DoJoin returned nil despite injected stream-close failure")
 	}
