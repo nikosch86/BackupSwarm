@@ -33,8 +33,6 @@ func TestReadPutChunkRequest_RejectsOversizedBlob(t *testing.T) {
 	if err := protocol.WritePutChunkRequest(&buf, blob); err != nil {
 		t.Fatalf("WritePutChunkRequest: %v", err)
 	}
-	// maxBlobLen is one byte less than the payload size: the reader must
-	// refuse rather than allocate a buffer larger than the agreed cap.
 	_, err := protocol.ReadPutChunkRequest(&buf, len(blob)-1)
 	if err == nil {
 		t.Fatal("ReadPutChunkRequest accepted an oversized blob")
@@ -52,7 +50,6 @@ func TestReadPutChunkRequest_RejectsTruncatedHeader(t *testing.T) {
 }
 
 func TestReadPutChunkRequest_RejectsTruncatedBody(t *testing.T) {
-	// Header claims 10 bytes; supply only 3.
 	frame := []byte{0x00, 0x00, 0x00, 0x0a, 0xaa, 0xbb, 0xcc}
 	_, err := protocol.ReadPutChunkRequest(bytes.NewReader(frame), 1<<20)
 	if err == nil {
@@ -99,17 +96,13 @@ func TestReadPutChunkResponse_RejectsTruncated(t *testing.T) {
 		t.Error("ReadPutChunkResponse accepted empty stream")
 	}
 	if errors.Is(err, io.EOF) {
-		// EOF is fine so long as it's surfaced as an error, not treated
-		// as a valid empty response. Just assert err != nil above.
 	}
 
-	// Truncated success body: status byte 0 (success), only 5 of the 32 bytes.
 	partial := append([]byte{0}, bytes.Repeat([]byte{0xaa}, 5)...)
 	if _, _, err := protocol.ReadPutChunkResponse(bytes.NewReader(partial)); err == nil {
 		t.Error("ReadPutChunkResponse accepted truncated success body")
 	}
 
-	// Truncated error body: status byte 1, claimed length 10, only 3 bytes.
 	errFrame := []byte{1, 0x00, 0x00, 0x00, 0x0a, 'a', 'b', 'c'}
 	if _, _, err := protocol.ReadPutChunkResponse(bytes.NewReader(errFrame)); err == nil {
 		t.Error("ReadPutChunkResponse accepted truncated error body")
@@ -124,10 +117,7 @@ func TestReadPutChunkResponse_RejectsUnknownStatus(t *testing.T) {
 	}
 }
 
-// errWriter returns err on its N-th Write call (0-indexed), and succeeds
-// on every other call. Used to exercise the writer-error wraps in the
-// framing code without faking the whole io.Writer interface at each call
-// site.
+// errWriter returns err on its N-th Write call (0-indexed) and succeeds on every other call.
 type errWriter struct {
 	failAt int
 	err    error
@@ -191,8 +181,7 @@ func TestWritePutChunkResponse_PropagatesErrorFrameWriteErrors(t *testing.T) {
 }
 
 func TestReadPutChunkResponse_RejectsOversizedErrorMessage(t *testing.T) {
-	// Error status, advertised length greater than MaxErrorMessageLen.
-	frame := []byte{1, 0x00, 0x10, 0x00, 0x01} // length = 0x100001 (~1 MiB) > 4 KiB cap
+	frame := []byte{1, 0x00, 0x10, 0x00, 0x01}
 	_, _, err := protocol.ReadPutChunkResponse(bytes.NewReader(frame))
 	if err == nil {
 		t.Error("ReadPutChunkResponse accepted oversized error message length")
@@ -214,8 +203,6 @@ func TestWriteReadJoinHello_RoundTrip(t *testing.T) {
 }
 
 func TestWriteJoinHello_AcceptsEmpty(t *testing.T) {
-	// Joiner without a listen addr yet still needs to send *some* hello;
-	// empty is permitted so introducer records the pubkey alone.
 	var buf bytes.Buffer
 	if err := protocol.WriteJoinHello(&buf, ""); err != nil {
 		t.Errorf("WriteJoinHello empty: %v", err)
@@ -234,7 +221,7 @@ func TestReadJoinHello_RejectsOversized(t *testing.T) {
 	if err := protocol.WriteJoinHello(&buf, "this-is-a-long-address-string"); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	_, err := protocol.ReadJoinHello(&buf, 5) // cap below payload
+	_, err := protocol.ReadJoinHello(&buf, 5)
 	if err == nil {
 		t.Error("ReadJoinHello accepted oversized addr")
 	}
@@ -244,7 +231,6 @@ func TestReadJoinHello_RejectsTruncated(t *testing.T) {
 	if _, err := protocol.ReadJoinHello(bytes.NewReader([]byte{0x00}), 1<<10); err == nil {
 		t.Error("ReadJoinHello accepted truncated header")
 	}
-	// Header says 10 bytes, supply 3.
 	frame := []byte{0x00, 0x00, 0x00, 0x0a, 'a', 'b', 'c'}
 	if _, err := protocol.ReadJoinHello(bytes.NewReader(frame), 1<<10); err == nil {
 		t.Error("ReadJoinHello accepted truncated body")
@@ -305,8 +291,7 @@ func TestWritePutChunkRequest_RejectsEmptyBlob(t *testing.T) {
 	}
 }
 
-// TestWriteJoinHello_PropagatesHeaderWriteError exercises the header-write
-// error wrap in WriteJoinHello (failAt: 0 — the length prefix write).
+// TestWriteJoinHello_PropagatesHeaderWriteError asserts a header-write failure surfaces from WriteJoinHello.
 func TestWriteJoinHello_PropagatesHeaderWriteError(t *testing.T) {
 	sentinel := errors.New("hello header boom")
 	w := &errWriter{failAt: 0, err: sentinel}
@@ -316,8 +301,7 @@ func TestWriteJoinHello_PropagatesHeaderWriteError(t *testing.T) {
 	}
 }
 
-// TestWriteJoinHello_PropagatesBodyWriteError exercises the body-write error
-// wrap (failAt: 1 — the addr bytes write, only reached when addr non-empty).
+// TestWriteJoinHello_PropagatesBodyWriteError asserts a body-write failure surfaces from WriteJoinHello.
 func TestWriteJoinHello_PropagatesBodyWriteError(t *testing.T) {
 	sentinel := errors.New("hello body boom")
 	w := &errWriter{failAt: 1, err: sentinel}
@@ -327,9 +311,7 @@ func TestWriteJoinHello_PropagatesBodyWriteError(t *testing.T) {
 	}
 }
 
-// TestWriteJoinHello_EmptyAddr_NoBodyWrite asserts that an empty addr causes
-// only the header write (no body-write call); combined with the pass-through
-// errWriter, a failAt beyond the header should never fire.
+// TestWriteJoinHello_EmptyAddr_NoBodyWrite asserts an empty addr causes only the header write.
 func TestWriteJoinHello_EmptyAddr_NoBodyWrite(t *testing.T) {
 	sentinel := errors.New("body should not be written")
 	w := &errWriter{failAt: 1, err: sentinel}
@@ -338,8 +320,7 @@ func TestWriteJoinHello_EmptyAddr_NoBodyWrite(t *testing.T) {
 	}
 }
 
-// TestWriteJoinAck_PropagatesSuccessWriteError exercises the status-write
-// error wrap on the success (appErr == "") path.
+// TestWriteJoinAck_PropagatesSuccessWriteError asserts the status-write error surfaces from WriteJoinAck on the success path.
 func TestWriteJoinAck_PropagatesSuccessWriteError(t *testing.T) {
 	sentinel := errors.New("ack status boom")
 	w := &errWriter{failAt: 0, err: sentinel}
@@ -348,8 +329,7 @@ func TestWriteJoinAck_PropagatesSuccessWriteError(t *testing.T) {
 	}
 }
 
-// TestWriteJoinAck_PropagatesErrorFrameWriteErrors exercises every stage on
-// the error-frame path: status (0), length (1), body (2).
+// TestWriteJoinAck_PropagatesErrorFrameWriteErrors asserts a write failure at every error-frame stage surfaces from WriteJoinAck.
 func TestWriteJoinAck_PropagatesErrorFrameWriteErrors(t *testing.T) {
 	for i, name := range []string{"status", "length", "body"} {
 		sentinel := errors.New(name + " ack err boom")
@@ -361,20 +341,16 @@ func TestWriteJoinAck_PropagatesErrorFrameWriteErrors(t *testing.T) {
 	}
 }
 
-// TestReadJoinAck_RejectsTruncatedErrorLength exercises the error-length
-// read wrap in ReadJoinAck (status byte present, length prefix truncated).
+// TestReadJoinAck_RejectsTruncatedErrorLength asserts a truncated error-length prefix is rejected by ReadJoinAck.
 func TestReadJoinAck_RejectsTruncatedErrorLength(t *testing.T) {
-	// status=err, but only 2 bytes of the 4-byte length prefix
 	frame := []byte{1, 0x00, 0x00}
 	if _, err := protocol.ReadJoinAck(bytes.NewReader(frame)); err == nil {
 		t.Error("ReadJoinAck accepted truncated error length prefix")
 	}
 }
 
-// TestReadJoinAck_RejectsOversizedErrorMessage exercises the MaxErrorMessageLen
-// cap in ReadJoinAck.
+// TestReadJoinAck_RejectsOversizedErrorMessage asserts an oversized error length is rejected by ReadJoinAck.
 func TestReadJoinAck_RejectsOversizedErrorMessage(t *testing.T) {
-	// status=err, advertised length >> MaxErrorMessageLen
 	frame := []byte{1, 0x00, 0x10, 0x00, 0x01}
 	if _, err := protocol.ReadJoinAck(bytes.NewReader(frame)); err == nil {
 		t.Error("ReadJoinAck accepted oversized error length")

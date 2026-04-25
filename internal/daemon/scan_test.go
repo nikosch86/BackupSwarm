@@ -23,9 +23,7 @@ import (
 	"backupswarm/internal/store"
 )
 
-// seedPeer opens peers.db at <dataDir>/peers.db and writes the single
-// storage peer the daemon should dial. Mirrors what a real `invite`/
-// `join` handshake would have persisted.
+// seedPeer opens peers.db at <dataDir>/peers.db and writes a single storage peer.
 func seedPeer(t *testing.T, dataDir, addr string, pub []byte) {
 	t.Helper()
 	ps, err := peers.Open(filepath.Join(dataDir, "peers.db"))
@@ -38,9 +36,7 @@ func seedPeer(t *testing.T, dataDir, addr string, pub []byte) {
 	}
 }
 
-// scanRig spins up a real peer (store + listener + Serve) plus an
-// owner-side QUIC connection, index, and recipient pubkey. Mirrors the
-// rig pattern in internal/backup but scoped to what daemon tests need.
+// scanRig spins up a real peer plus an owner-side QUIC connection, index, and recipient pubkey.
 type scanRig struct {
 	peerStore    *store.Store
 	ownerIndex   *index.Index
@@ -119,8 +115,7 @@ func writeFile(t *testing.T, path string, size int) {
 	}
 }
 
-// TestScanOnce_BackupAndPrune asserts one pass ships changed files and
-// emits deletes for missing ones in a single call.
+// TestScanOnce_BackupAndPrune asserts one pass ships changed files and emits deletes for missing ones.
 func TestScanOnce_BackupAndPrune(t *testing.T) {
 	rig := newScanRig(t)
 	root := t.TempDir()
@@ -145,7 +140,6 @@ func TestScanOnce_BackupAndPrune(t *testing.T) {
 		t.Fatalf("Get goner: %v", err)
 	}
 
-	// Remove one file and run again; the second pass should prune.
 	if err := os.Remove(goner); err != nil {
 		t.Fatalf("rm goner: %v", err)
 	}
@@ -174,8 +168,7 @@ func TestScanOnce_BackupAndPrune(t *testing.T) {
 	}
 }
 
-// TestScanOnce_NilProgress asserts nil Progress falls back to io.Discard
-// without panicking.
+// TestScanOnce_NilProgress asserts nil Progress falls back to io.Discard without panicking.
 func TestScanOnce_NilProgress(t *testing.T) {
 	rig := newScanRig(t)
 	root := t.TempDir()
@@ -192,9 +185,7 @@ func TestScanOnce_NilProgress(t *testing.T) {
 	}
 }
 
-// TestScanOnce_BackupFailurePropagates asserts a backup.Run error wraps
-// as "backup run: ...". We trigger a failure by giving an invalid
-// ChunkSize (below MinChunkSize).
+// TestScanOnce_BackupFailurePropagates asserts a backup.Run error wraps as "backup run".
 func TestScanOnce_BackupFailurePropagates(t *testing.T) {
 	rig := newScanRig(t)
 	root := t.TempDir()
@@ -204,7 +195,7 @@ func TestScanOnce_BackupFailurePropagates(t *testing.T) {
 		Conn:         rig.ownerConn,
 		Index:        rig.ownerIndex,
 		RecipientPub: rig.recipientPub,
-		ChunkSize:    1, // invalid
+		ChunkSize:    1,
 		Progress:     io.Discard,
 	}
 	err := daemon.ScanOnce(context.Background(), opts)
@@ -216,16 +207,10 @@ func TestScanOnce_BackupFailurePropagates(t *testing.T) {
 	}
 }
 
-// TestScanOnce_PruneFailurePropagates asserts a Prune error wraps as
-// "prune: ...". We force a failure by closing the index between Run and
-// Prune... but that's hard; easier to close the peer connection before
-// the Prune call reaches it. Instead we set up a scenario where Run
-// succeeds (no files) but Prune hits a closed index.
+// TestScanOnce_PruneFailurePropagates asserts a Prune error wraps as "prune".
 func TestScanOnce_PruneFailurePropagates(t *testing.T) {
 	rig := newScanRig(t)
 	root := t.TempDir()
-	// Pre-populate the index with a dangling entry (file doesn't exist)
-	// so Prune tries to send deletes.
 	if err := rig.ownerIndex.Put(index.FileEntry{
 		Path:   filepath.Join(root, "ghost.bin"),
 		Size:   1,
@@ -233,7 +218,6 @@ func TestScanOnce_PruneFailurePropagates(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed index: %v", err)
 	}
-	// Close the owner's QUIC connection; Prune's sendDeleteChunk will fail.
 	_ = rig.ownerConn.Close()
 
 	opts := daemon.ScanOnceOptions{
@@ -253,15 +237,11 @@ func TestScanOnce_PruneFailurePropagates(t *testing.T) {
 	}
 }
 
-// TestRun_RefusesWhenBackupDirEmptyButIndexPopulated asserts the guard
-// fires all the way through Run, not just in Classify. An empty backup
-// dir with a populated index and no --restore/--purge must fail before
-// any network activity.
+// TestRun_RefusesWhenBackupDirEmptyButIndexPopulated asserts Run wraps ErrRefuseStart for an empty backup dir with a populated index.
 func TestRun_RefusesWhenBackupDirEmptyButIndexPopulated(t *testing.T) {
 	dataDir := t.TempDir()
 	backupDir := t.TempDir()
 
-	// Seed a populated index at dataDir/index.db (the name Run expects).
 	ix, err := index.Open(filepath.Join(dataDir, "index.db"))
 	if err != nil {
 		t.Fatalf("seed index: %v", err)
@@ -287,9 +267,7 @@ func TestRun_RefusesWhenBackupDirEmptyButIndexPopulated(t *testing.T) {
 	}
 }
 
-// TestRun_IdleStorageOnlyExitsOnContextCancel asserts that a daemon
-// started with no --peer (pure storage-peer role) blocks cleanly until
-// context cancellation and returns nil.
+// TestRun_IdleStorageOnlyExitsOnContextCancel asserts a no-peer daemon blocks until context cancellation and returns nil.
 func TestRun_IdleStorageOnlyExitsOnContextCancel(t *testing.T) {
 	dataDir := t.TempDir()
 	backupDir := t.TempDir()
@@ -306,7 +284,6 @@ func TestRun_IdleStorageOnlyExitsOnContextCancel(t *testing.T) {
 		})
 	}()
 
-	// Cancel after a short delay so Run has time to enter its wait.
 	time.AfterFunc(100*time.Millisecond, cancel)
 
 	select {
@@ -319,9 +296,7 @@ func TestRun_IdleStorageOnlyExitsOnContextCancel(t *testing.T) {
 	}
 }
 
-// peerRig spins up a pure storage peer (identity + listener + Serve) at
-// a random local address. Owner-side tests use the returned addr + pub
-// to drive daemon.Run end-to-end.
+// peerRig spins up a pure storage peer at a random local address.
 type peerRig struct {
 	addr      string
 	pub       ed25519.PublicKey
@@ -365,11 +340,7 @@ func newPeerRig(t *testing.T) *peerRig {
 	}
 }
 
-// TestRun_WithPeer_FirstBackupShipsChunks exercises the full happy path:
-// fresh data dir, backup dir with one file, peer is up. Daemon starts,
-// does at least one scan pass, the peer sees the blob, then we cancel
-// and expect clean exit. The storage peer is persisted via peers.db —
-// mirroring how `invite`/`join` would have persisted it.
+// TestRun_WithPeer_FirstBackupShipsChunks asserts the daemon ships a chunk to the peer in one happy-path scan and exits cleanly on cancel.
 func TestRun_WithPeer_FirstBackupShipsChunks(t *testing.T) {
 	peer := newPeerRig(t)
 	dataDir := t.TempDir()
@@ -390,14 +361,10 @@ func TestRun_WithPeer_FirstBackupShipsChunks(t *testing.T) {
 		})
 	}()
 
-	// Wait up to ~3s for the peer store to see at least one blob.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		entries, err := os.ReadDir(peer.storeRoot)
 		if err == nil && len(entries) > 0 {
-			// Found at least one shard directory; good enough signal that
-			// a chunk landed. (The owners db file is also in root but it's
-			// created lazily on first PutOwned so it's fine either way.)
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -413,8 +380,6 @@ func TestRun_WithPeer_FirstBackupShipsChunks(t *testing.T) {
 		t.Fatal("Run did not exit within 5s of cancel")
 	}
 
-	// Confirm the peer store has at least one blob subdir (proves ScanOnce
-	// ran and sent something).
 	entries, err := os.ReadDir(peer.storeRoot)
 	if err != nil {
 		t.Fatalf("read peer store root: %v", err)
@@ -430,9 +395,7 @@ func TestRun_WithPeer_FirstBackupShipsChunks(t *testing.T) {
 	}
 }
 
-// TestRun_RestoreMode: after a backup, empty backupDir and restart with
-// --restore; every indexed file must be rewritten to its absolute path
-// with matching content and mtime.
+// TestRun_RestoreMode asserts a restart with --restore rewrites every indexed file with matching content and mtime.
 func TestRun_RestoreMode(t *testing.T) {
 	peer := newPeerRig(t)
 	dataDir := t.TempDir()
@@ -449,7 +412,6 @@ func TestRun_RestoreMode(t *testing.T) {
 	}
 	seedPeer(t, dataDir, peer.addr, peer.pub)
 
-	// Stage 1: run a normal daemon long enough to ship the file.
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	done1 := make(chan error, 1)
 	go func() {
@@ -473,12 +435,10 @@ func TestRun_RestoreMode(t *testing.T) {
 	cancel1()
 	<-done1
 
-	// Remove the local file so backupDir is empty for the restore run.
 	if err := os.Remove(filePath); err != nil {
 		t.Fatalf("rm original: %v", err)
 	}
 
-	// Stage 2: run with --restore. The file should reappear at its original path.
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	done2 := make(chan error, 1)
 	go func() {
@@ -492,7 +452,6 @@ func TestRun_RestoreMode(t *testing.T) {
 			Progress:     io.Discard,
 		})
 	}()
-	// Poll for the file reappearing (bounded).
 	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(filePath); err == nil {
@@ -511,7 +470,6 @@ func TestRun_RestoreMode(t *testing.T) {
 		t.Fatal("Run restore did not exit within 5s of cancel")
 	}
 
-	// File must be back, with original bytes and mtime.
 	restored, err := os.ReadFile(filePath)
 	if err != nil {
 		t.Fatalf("read restored: %v", err)
@@ -528,15 +486,12 @@ func TestRun_RestoreMode(t *testing.T) {
 	}
 }
 
-// TestRun_PurgeMode clears the index and sends deletes for every entry.
+// TestRun_PurgeMode asserts --purge sends deletes for every index entry and clears the peer's blobs.
 func TestRun_PurgeMode(t *testing.T) {
 	peer := newPeerRig(t)
 	dataDir := t.TempDir()
 	backupDir := t.TempDir()
 
-	// First: run a short backup with a file so the peer actually has a
-	// blob, and the index is populated. Then remove the file and restart
-	// with --purge.
 	filePath := filepath.Join(backupDir, "doomed.bin")
 	writeFile(t, filePath, 1<<20)
 	seedPeer(t, dataDir, peer.addr, peer.pub)
@@ -553,7 +508,6 @@ func TestRun_PurgeMode(t *testing.T) {
 			Progress:     io.Discard,
 		})
 	}()
-	// Wait for the backup to happen.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		entries, err := os.ReadDir(peer.storeRoot)
@@ -565,8 +519,6 @@ func TestRun_PurgeMode(t *testing.T) {
 	cancel1()
 	<-done1
 
-	// Now empty the backup dir and run with --purge. Index is populated
-	// and backup dir is empty => ModePurge.
 	if err := os.Remove(filePath); err != nil {
 		t.Fatalf("rm: %v", err)
 	}
@@ -584,7 +536,6 @@ func TestRun_PurgeMode(t *testing.T) {
 			Progress:     io.Discard,
 		})
 	}()
-	// Wait for the purge + idle transition.
 	time.Sleep(500 * time.Millisecond)
 	cancel2()
 
@@ -597,7 +548,6 @@ func TestRun_PurgeMode(t *testing.T) {
 		t.Fatal("Run purge did not exit within 5s of cancel")
 	}
 
-	// After purge, all shard dirs should be empty (the blobs were removed).
 	entries, err := os.ReadDir(peer.storeRoot)
 	if err != nil {
 		t.Fatalf("read peer store root: %v", err)
@@ -625,8 +575,7 @@ func hasShardDir(entries []os.DirEntry) bool {
 	return false
 }
 
-// TestRun_DialFailure covers the dial-error branch when the peer from
-// peers.db points at nothing listening.
+// TestRun_DialFailure asserts Run wraps a dial failure as "dial peer" when peers.db points at nothing listening.
 func TestRun_DialFailure(t *testing.T) {
 	dataDir := t.TempDir()
 	backupDir := t.TempDir()
@@ -636,7 +585,7 @@ func TestRun_DialFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("keygen: %v", err)
 	}
-	seedPeer(t, dataDir, "127.0.0.1:1", anyPub) // nothing listens here
+	seedPeer(t, dataDir, "127.0.0.1:1", anyPub)
 
 	err = daemon.Run(context.Background(), daemon.Options{
 		DataDir:     dataDir,
@@ -654,8 +603,7 @@ func TestRun_DialFailure(t *testing.T) {
 	}
 }
 
-// TestRun_MultiplePeers rejects startup when peers.db has more than
-// one dialable entry (single-peer mode only).
+// TestRun_MultiplePeers asserts Run wraps ErrMultiplePeers when peers.db has more than one dialable entry.
 func TestRun_MultiplePeers(t *testing.T) {
 	dataDir := t.TempDir()
 	backupDir := t.TempDir()
@@ -680,14 +628,10 @@ func TestRun_MultiplePeers(t *testing.T) {
 	}
 }
 
-// TestRun_StorageOnly_NoBackupDir asserts that omitting BackupDir
-// starts the daemon in pure storage-peer mode and that a real owner
-// can still ship a chunk through it. Proves the --backup-dir-optional
-// path isn't just a clean exit but a fully functional storage role.
+// TestRun_StorageOnly_NoBackupDir asserts a daemon started with no BackupDir accepts an inbound chunk from a real owner.
 func TestRun_StorageOnly_NoBackupDir(t *testing.T) {
 	dataDir := t.TempDir()
 
-	// Start daemon with no BackupDir on a concrete port we can dial.
 	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
 		t.Fatalf("probe udp port: %v", err)
@@ -712,10 +656,8 @@ func TestRun_StorageOnly_NoBackupDir(t *testing.T) {
 			Progress:   io.Discard,
 		})
 	}()
-	// Give the daemon a moment to bind.
 	time.Sleep(200 * time.Millisecond)
 
-	// The daemon's pubkey is at <dataDir>/node.pub after node.Ensure.
 	pubBytes, err := os.ReadFile(filepath.Join(dataDir, "node.pub"))
 	if err != nil {
 		t.Fatalf("read node.pub: %v", err)
@@ -731,9 +673,6 @@ func TestRun_StorageOnly_NoBackupDir(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// The simplest way to confirm the storage path works is to run the
-	// backup.Run pipeline into the daemon's listener. Build an index +
-	// recipient key for the owner side, back up a small file.
 	ownerIdx, err := index.Open(filepath.Join(t.TempDir(), "owner-index.db"))
 	if err != nil {
 		t.Fatalf("owner index: %v", err)
@@ -758,7 +697,6 @@ func TestRun_StorageOnly_NoBackupDir(t *testing.T) {
 		t.Fatalf("backup.Run against storage-only daemon: %v", err)
 	}
 
-	// Confirm the daemon persisted the blob under its store root.
 	entries, err := os.ReadDir(filepath.Join(dataDir, "chunks"))
 	if err != nil {
 		t.Fatalf("read daemon chunks dir: %v", err)
@@ -778,15 +716,10 @@ func TestRun_StorageOnly_NoBackupDir(t *testing.T) {
 	}
 }
 
-// TestRun_RejectsUnknownPeerAtHandshake closes F-01 from SECURITY_REVIEW_M1.md:
-// a stranger whose pubkey is not in peers.db cannot complete a connection
-// against the daemon's listener. Counterpart to TestRun_StorageOnly_NoBackupDir,
-// which proves a *known* peer is admitted; this proves an *unknown* peer
-// is rejected at the TLS handshake (no stream ever dispatches).
+// TestRun_RejectsUnknownPeerAtHandshake asserts the daemon's listener rejects a dialer whose pubkey is not in peers.db.
 func TestRun_RejectsUnknownPeerAtHandshake(t *testing.T) {
 	dataDir := t.TempDir()
 
-	// Bind to a known port so we can dial it.
 	probe, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
 		t.Fatalf("probe udp port: %v", err)
@@ -794,8 +727,6 @@ func TestRun_RejectsUnknownPeerAtHandshake(t *testing.T) {
 	listenAddr := probe.LocalAddr().String()
 	_ = probe.Close()
 
-	// Seed peers.db with a *different* peer than the one we'll dial with;
-	// the daemon's membership check must reject our actual dialer.
 	knownPub, _, _ := ed25519.GenerateKey(rand.Reader)
 	seedPeer(t, dataDir, "127.0.0.1:1", knownPub)
 
@@ -818,14 +749,11 @@ func TestRun_RejectsUnknownPeerAtHandshake(t *testing.T) {
 	}
 	daemonPub := ed25519.PublicKey(pubBytes)
 
-	// Dial with a fresh keypair the daemon has never heard of.
 	_, strangerPriv, _ := ed25519.GenerateKey(rand.Reader)
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer dialCancel()
 	conn, err := bsquic.Dial(dialCtx, listenAddr, strangerPriv, daemonPub)
 	if err == nil {
-		// Server-side TLS rejection in TLS 1.3 surfaces on the first wire
-		// round-trip, not at Dial time. Force one and confirm it fails.
 		defer func() { _ = conn.Close() }()
 		s, sErr := conn.OpenStream(dialCtx)
 		if sErr == nil {
@@ -837,8 +765,6 @@ func TestRun_RejectsUnknownPeerAtHandshake(t *testing.T) {
 		}
 	}
 
-	// Confirm the daemon's chunks dir is still empty — the stranger never
-	// got a stream dispatched, so no PutChunk request landed.
 	chunksDir := filepath.Join(dataDir, "chunks")
 	entries, _ := os.ReadDir(chunksDir)
 	if hasShardDir(entries) {
@@ -846,10 +772,7 @@ func TestRun_RejectsUnknownPeerAtHandshake(t *testing.T) {
 	}
 }
 
-// TestRun_IgnoresPeersWithEmptyAddr asserts that peers with empty Addr
-// (recorded by `join` when the joiner had no --listen) don't count
-// toward the dialable-peer tally. With only an addr-less entry the
-// daemon should enter storage-only idle mode rather than error.
+// TestRun_IgnoresPeersWithEmptyAddr asserts peers with empty Addr do not count toward the dialable-peer tally.
 func TestRun_IgnoresPeersWithEmptyAddr(t *testing.T) {
 	dataDir := t.TempDir()
 	backupDir := t.TempDir()
@@ -880,11 +803,7 @@ func TestRun_IgnoresPeersWithEmptyAddr(t *testing.T) {
 	}
 }
 
-// TestRun_StorageOnly_BadListenAddr covers the bsquic.Listen error
-// wrap in Run on the BackupDir == "" path. A syntactically invalid UDP
-// address makes quic-go's ListenAddr fail before any bind attempt. The
-// error must surface as 'listen "..."': the daemon should not silently
-// fall through to an idle state.
+// TestRun_StorageOnly_BadListenAddr asserts an invalid ListenAddr surfaces as a "listen" error on the BackupDir == "" path.
 func TestRun_StorageOnly_BadListenAddr(t *testing.T) {
 	dataDir := t.TempDir()
 	err := daemon.Run(context.Background(), daemon.Options{
@@ -901,6 +820,4 @@ func TestRun_StorageOnly_BadListenAddr(t *testing.T) {
 	}
 }
 
-// Compile-time assertion that fs.DirEntry is used somewhere, documenting
-// where the symlink-vs-regular distinction is being enforced.
 var _ fs.DirEntry = (fs.DirEntry)(nil)

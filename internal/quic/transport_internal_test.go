@@ -11,9 +11,7 @@ import (
 	"testing/iotest"
 )
 
-// withRandReader swaps the package-level randReader for the duration of a
-// test, restoring the previous value on cleanup. White-box only — production
-// code never reassigns randReader.
+// withRandReader swaps the package-level randReader for the duration of a test.
 func withRandReader(t *testing.T, r io.Reader) {
 	t.Helper()
 	prev := randReader
@@ -21,19 +19,13 @@ func withRandReader(t *testing.T, r io.Reader) {
 	t.Cleanup(func() { randReader = prev })
 }
 
-// TestDefaultQUICConfig_EnablesKeepAlive pins the invariant that the
-// shared quic-go Config has a non-zero KeepAlivePeriod. Without it, a
-// connection that stays idle across two scan intervals (or any gap
-// longer than the 30s default MaxIdleTimeout) tears down with
-// "timeout: no recent network activity" and the next OpenStream fails.
-// Setting KeepAlivePeriod to ~10s keeps the connection warm with cheap
-// PING frames.
+// TestDefaultQUICConfig_EnablesKeepAlive asserts the shared quic-go Config has a non-zero KeepAlivePeriod under 20s.
 func TestDefaultQUICConfig_EnablesKeepAlive(t *testing.T) {
 	cfg := newQUICConfig()
 	if cfg.KeepAlivePeriod == 0 {
 		t.Error("quic Config KeepAlivePeriod = 0; connections will time out on idle scan intervals")
 	}
-	if cfg.KeepAlivePeriod > 20*1_000_000_000 { // > 20s
+	if cfg.KeepAlivePeriod > 20*1_000_000_000 {
 		t.Errorf("KeepAlivePeriod = %v is too close to MaxIdleTimeout; need 1/3 or less", cfg.KeepAlivePeriod)
 	}
 }
@@ -56,9 +48,6 @@ func TestEd25519FromCerts_EmptyChain(t *testing.T) {
 
 func TestEd25519FromCerts_NonEd25519Key(t *testing.T) {
 	t.Parallel()
-	// A *x509.Certificate constructed in-test with a non-Ed25519 PublicKey;
-	// reaches the type-assertion failure branch without round-tripping
-	// through the certificate parser.
 	cert := &x509.Certificate{PublicKey: "not-a-key"}
 	if _, err := ed25519FromCerts([]*x509.Certificate{cert}); !errors.Is(err, ErrInvalidPeerCert) {
 		t.Fatalf("want ErrInvalidPeerCert for non-Ed25519 leaf, got %v", err)
@@ -74,7 +63,6 @@ func TestPeerEd25519Pub_EmptyRawCerts(t *testing.T) {
 
 func TestPeerEd25519Pub_BadDER(t *testing.T) {
 	t.Parallel()
-	// Garbage bytes — x509.ParseCertificate fails before our type checks.
 	_, err := peerEd25519Pub([][]byte{{0x00, 0x01, 0x02, 0x03}})
 	if err == nil {
 		t.Fatalf("want parse error, got nil")
@@ -84,9 +72,7 @@ func TestPeerEd25519Pub_BadDER(t *testing.T) {
 	}
 }
 
-// TestNewSelfSignedCert_SerialRandFailure exercises the rand.Int error path
-// inside newSelfSignedCert by swapping the package randReader for one that
-// always errors. Covers the "serial: %w" wrap branch.
+// TestNewSelfSignedCert_SerialRandFailure asserts newSelfSignedCert wraps a rand.Int failure as a "serial" error.
 func TestNewSelfSignedCert_SerialRandFailure(t *testing.T) {
 	priv := newTestKey(t)
 	withRandReader(t, iotest.ErrReader(errors.New("forced rng failure")))
@@ -96,8 +82,7 @@ func TestNewSelfSignedCert_SerialRandFailure(t *testing.T) {
 	}
 }
 
-// TestListen_CertBuildFailure exercises the cert-build error wrap inside
-// Listen, reached when newSelfSignedCert fails because randomness is broken.
+// TestListen_CertBuildFailure asserts Listen returns an error when cert generation fails.
 func TestListen_CertBuildFailure(t *testing.T) {
 	priv := newTestKey(t)
 	withRandReader(t, iotest.ErrReader(errors.New("forced rng failure")))
@@ -107,7 +92,7 @@ func TestListen_CertBuildFailure(t *testing.T) {
 	}
 }
 
-// TestDial_CertBuildFailure exercises the cert-build error wrap inside Dial.
+// TestDial_CertBuildFailure asserts Dial returns an error when cert generation fails.
 func TestDial_CertBuildFailure(t *testing.T) {
 	priv := newTestKey(t)
 	pub := priv.Public().(ed25519.PublicKey)

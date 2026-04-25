@@ -67,6 +67,8 @@ type VerifyPeerFunc func(pub ed25519.PublicKey) error
 // (used during invite→daemon handoff).
 type Listener struct {
 	inner      *qgo.Listener
+	tr         *qgo.Transport
+	conn       *net.UDPConn
 	verifyPeer atomic.Pointer[VerifyPeerFunc]
 }
 
@@ -98,11 +100,23 @@ func Listen(addr string, priv ed25519.PrivateKey, verifyPeer VerifyPeerFunc) (*L
 		MinVersion: tls.VersionTLS13,
 		NextProtos: []string{NextProtocol},
 	}
-	inner, err := qgo.ListenAddr(addr, tlsConf, newQUICConfig())
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
+		return nil, fmt.Errorf("resolve udp %q: %w", addr, err)
+	}
+	udpConn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return nil, fmt.Errorf("listen udp %q: %w", addr, err)
+	}
+	tr := &qgo.Transport{Conn: udpConn}
+	inner, err := tr.Listen(tlsConf, newQUICConfig())
+	if err != nil {
+		_ = udpConn.Close()
 		return nil, fmt.Errorf("quic listen %q: %w", addr, err)
 	}
 	l.inner = inner
+	l.tr = tr
+	l.conn = udpConn
 	return l, nil
 }
 
@@ -132,8 +146,12 @@ func (l *Listener) Accept(ctx context.Context) (*Conn, error) {
 	return &Conn{inner: qc, remotePub: connRemotePub(qc)}, nil
 }
 
-// Close shuts down the listener and refuses new connections.
-func (l *Listener) Close() error { return l.inner.Close() }
+// Close shuts down the listener, tears down all accepted connections, and
+// releases the UDP port.
+func (l *Listener) Close() error {
+	_ = l.tr.Close()
+	return l.conn.Close()
+}
 
 // Dial opens an outbound QUIC connection to addr authenticated as priv,
 // pinning the peer's Ed25519 public key to expectedPeerPub. The dial fails

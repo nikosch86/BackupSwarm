@@ -86,16 +86,13 @@ func TestReadGetChunkResponse_RejectsTruncated(t *testing.T) {
 	if _, _, err := protocol.ReadGetChunkResponse(bytes.NewReader(nil), 1<<20); err == nil {
 		t.Error("ReadGetChunkResponse accepted empty stream")
 	}
-	// Success status, truncated length prefix.
 	if _, _, err := protocol.ReadGetChunkResponse(bytes.NewReader([]byte{0, 0x00}), 1<<20); err == nil {
 		t.Error("ReadGetChunkResponse accepted truncated success length prefix")
 	}
-	// Success status, length claims 10 bytes, supply 3.
 	frame := []byte{0, 0x00, 0x00, 0x00, 0x0a, 'a', 'b', 'c'}
 	if _, _, err := protocol.ReadGetChunkResponse(bytes.NewReader(frame), 1<<20); err == nil {
 		t.Error("ReadGetChunkResponse accepted truncated success body")
 	}
-	// Error status, truncated length prefix.
 	if _, _, err := protocol.ReadGetChunkResponse(bytes.NewReader([]byte{1, 0x00, 0x00}), 1<<20); err == nil {
 		t.Error("ReadGetChunkResponse accepted truncated error length prefix")
 	}
@@ -124,7 +121,6 @@ func TestReadGetChunkResponse_RejectsOversizedErrorMessage(t *testing.T) {
 }
 
 func TestWriteGetChunkResponse_PropagatesAllWriteErrors(t *testing.T) {
-	// Success path: status (0), length (1), body (2).
 	for i, name := range []string{"status", "length", "body"} {
 		sentinel := errors.New(name + " success boom")
 		w := &errWriter{failAt: i, err: sentinel}
@@ -133,7 +129,6 @@ func TestWriteGetChunkResponse_PropagatesAllWriteErrors(t *testing.T) {
 			t.Errorf("success %s-stage err = %v, want wraps sentinel", name, err)
 		}
 	}
-	// Error path: status (0), length (1), body (2).
 	for i, name := range []string{"status", "length", "body"} {
 		sentinel := errors.New(name + " err boom")
 		w := &errWriter{failAt: i, err: sentinel}

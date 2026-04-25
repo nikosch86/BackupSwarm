@@ -15,10 +15,7 @@ import (
 	"backupswarm/pkg/token"
 )
 
-// syncBuffer is a thread-safe io.Writer+Snapshot wrapper around
-// bytes.Buffer. cobra's Execute writes to it from one goroutine while
-// the test polls it from another; plain bytes.Buffer is not safe for
-// that.
+// syncBuffer is a thread-safe io.Writer+Snapshot wrapper around bytes.Buffer.
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -74,7 +71,6 @@ func TestInviteCmd_TimesOutWhenNoJoinerArrives(t *testing.T) {
 		t.Error("invite returned nil error on timeout")
 	}
 
-	// Even though no join happened, the token should have been printed.
 	tokStr := strings.TrimSpace(stdout.String())
 	if tokStr == "" {
 		t.Error("invite did not print a token before the timeout")
@@ -83,14 +79,12 @@ func TestInviteCmd_TimesOutWhenNoJoinerArrives(t *testing.T) {
 		t.Errorf("printed token did not decode: %v", err)
 	}
 
-	// Identity should be materialized as a side effect.
 	if _, err := node.Load(dataDir); err != nil {
 		t.Errorf("invite should have created identity: %v", err)
 	}
 }
 
-// TestInviteJoin_HappyPath runs `invite` and `join` in parallel against
-// each other and verifies both sides' peer stores end up populated.
+// TestInviteJoin_HappyPath runs invite and join in parallel and asserts both sides' peer stores end up populated.
 func TestInviteJoin_HappyPath(t *testing.T) {
 	inviterDir := filepath.Join(t.TempDir(), "inviter")
 	joinerDir := filepath.Join(t.TempDir(), "joiner")
@@ -106,9 +100,6 @@ func TestInviteJoin_HappyPath(t *testing.T) {
 		"--timeout", "5s",
 	})
 
-	// Pre-materialise the inviter identity and listener by pulling out
-	// the address from the printed token. We run the command with a
-	// context we can cancel in case things go sideways.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -121,7 +112,6 @@ func TestInviteJoin_HappyPath(t *testing.T) {
 		inviteErr = inviterCmd.ExecuteContext(ctx)
 	}()
 
-	// Poll the invite command's stdout until we see a token.
 	tokStr := waitForToken(t, inviteOut, 3*time.Second)
 
 	joinerCmd := NewRootCmd()
@@ -148,9 +138,7 @@ func TestInviteJoin_HappyPath(t *testing.T) {
 	}
 }
 
-// TestInviteCmd_TokenOut_WritesFile asserts that --token-out writes the
-// same token that was printed to stdout, using atomic rename so readers
-// never see a partial file.
+// TestInviteCmd_TokenOut_WritesFile asserts --token-out writes the same token that was printed to stdout.
 func TestInviteCmd_TokenOut_WritesFile(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "node")
 	tokenPath := filepath.Join(t.TempDir(), "token.txt")
@@ -165,7 +153,6 @@ func TestInviteCmd_TokenOut_WritesFile(t *testing.T) {
 		"--timeout", "300ms",
 		"--token-out", tokenPath,
 	})
-	// Timeout on AcceptJoin is expected — we only care about the token file.
 	_ = root.Execute()
 
 	data, err := os.ReadFile(tokenPath)
@@ -176,16 +163,13 @@ func TestInviteCmd_TokenOut_WritesFile(t *testing.T) {
 	if _, _, err := token.Decode(tokStr); err != nil {
 		t.Errorf("--token-out content did not decode: %v (contents=%q)", err, tokStr)
 	}
-	// File and stdout should carry the same token.
 	stdoutTok := strings.TrimSpace(stdout.String())
 	if stdoutTok != tokStr {
 		t.Errorf("token mismatch: stdout=%q file=%q", stdoutTok, tokStr)
 	}
 }
 
-// TestWriteTokenFile_CreateTempFails covers the error branch taken when
-// the target directory doesn't exist. CreateTemp fails immediately, so
-// the rename step is never attempted.
+// TestWriteTokenFile_CreateTempFails asserts a missing target directory surfaces as a "create temp" error.
 func TestWriteTokenFile_CreateTempFails(t *testing.T) {
 	err := writeTokenFile(filepath.Join(t.TempDir(), "missing-dir", "token.txt"), "tok")
 	if err == nil {
@@ -196,11 +180,7 @@ func TestWriteTokenFile_CreateTempFails(t *testing.T) {
 	}
 }
 
-// TestWriteTokenFile_RenameFails exercises the failure path when the
-// destination path is an existing directory, so rename(file, dir)
-// returns EISDIR. Also asserts the temp file is cleaned up — the defer
-// on `!committed` is the only thing preventing orphaned dotfiles from
-// accumulating when the rename leg fails.
+// TestWriteTokenFile_RenameFails asserts a rename failure surfaces as "rename" and removes the temp file.
 func TestWriteTokenFile_RenameFails(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target-is-a-dir")
@@ -216,8 +196,6 @@ func TestWriteTokenFile_RenameFails(t *testing.T) {
 		t.Errorf("expected 'rename' in error, got: %v", err)
 	}
 
-	// Temp file should have been removed — scan the parent dir for any
-	// `.token-*` leftovers.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("readdir: %v", err)
@@ -229,8 +207,7 @@ func TestWriteTokenFile_RenameFails(t *testing.T) {
 	}
 }
 
-// waitForToken polls a syncBuffer until it contains a newline-terminated
-// decodable token, or the deadline expires.
+// waitForToken polls a syncBuffer until it contains a newline-terminated decodable token or the deadline expires.
 func waitForToken(t *testing.T, buf *syncBuffer, deadline time.Duration) string {
 	t.Helper()
 	end := time.Now().Add(deadline)

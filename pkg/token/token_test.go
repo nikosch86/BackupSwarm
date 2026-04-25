@@ -31,8 +31,6 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 	if encoded == "" {
 		t.Fatal("Encode returned empty string")
 	}
-	// The token must be ASCII-safe so it can paste-travel through email,
-	// chat, etc.
 	for _, r := range encoded {
 		if r < 0x20 || r > 0x7e {
 			t.Fatalf("Encode produced non-printable byte %q in token", r)
@@ -100,7 +98,6 @@ func TestDecode_TruncatedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	// Chop off the last char of the base64 so the decoded payload is short.
 	truncated := full[:len(full)-4]
 	if _, _, err := token.Decode(truncated); err == nil {
 		t.Error("Decode accepted truncated payload")
@@ -108,8 +105,6 @@ func TestDecode_TruncatedPayload(t *testing.T) {
 }
 
 func TestDecode_LengthPrefixOverrun(t *testing.T) {
-	// Claim a 1 KiB address but supply only a few bytes — length prefix
-	// must not drive an allocation past the remaining bytes.
 	raw := []byte{0x01, 0x04, 0x00, 'a', 'b'}
 	raw = append(raw, bytes.Repeat([]byte{0x11}, ed25519.PublicKeySize)...)
 	encoded := token.EncodeRawForTest(raw)
@@ -120,8 +115,6 @@ func TestDecode_LengthPrefixOverrun(t *testing.T) {
 }
 
 func TestEncode_AddrLengthCap(t *testing.T) {
-	// uint16 caps addr length at 65535; anything longer should be
-	// rejected rather than silently truncated.
 	huge := strings.Repeat("a", (1<<16)+1)
 	if _, err := token.Encode(huge, mustKey(t)); err == nil {
 		t.Error("Encode accepted over-sized addr")

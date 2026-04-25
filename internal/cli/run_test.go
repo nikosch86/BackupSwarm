@@ -28,9 +28,7 @@ func TestRunCmd_RegisteredOnRoot(t *testing.T) {
 	}
 }
 
-// TestRunCmd_AcceptsMissingBackupDir: a pure storage-peer role has no
-// backup to run. Run without --backup-dir must start the daemon and
-// exit cleanly on context cancel.
+// TestRunCmd_AcceptsMissingBackupDir asserts run starts and exits cleanly when --backup-dir is omitted.
 func TestRunCmd_AcceptsMissingBackupDir(t *testing.T) {
 	root := NewRootCmd()
 	var stdout, stderr bytes.Buffer
@@ -64,9 +62,7 @@ func TestRunCmd_RequiresListen(t *testing.T) {
 	}
 }
 
-// TestRunCmd_NoPeerFlag asserts the run subcommand does NOT expose
-// --peer or --peer-pubkey flags. Peer identity is derived from
-// peers.db (populated by `invite`/`join`), not from command-line input.
+// TestRunCmd_NoPeerFlag asserts the run subcommand does not expose --peer or --peer-pubkey flags.
 func TestRunCmd_NoPeerFlag(t *testing.T) {
 	root := NewRootCmd()
 	var run *cobra.Command
@@ -87,9 +83,7 @@ func TestRunCmd_NoPeerFlag(t *testing.T) {
 	}
 }
 
-// TestRunCmd_IdleStorageOnly_ExitsOnCancel exercises the happy-path flag
-// plumbing end-to-end: data dir, empty backup dir, listen only (no peer).
-// Cancel shortly after, expect clean exit.
+// TestRunCmd_IdleStorageOnly_ExitsOnCancel asserts run exits cleanly when cancelled while idle as a storage-only peer.
 func TestRunCmd_IdleStorageOnly_ExitsOnCancel(t *testing.T) {
 	dataDir := t.TempDir()
 	backupDir := t.TempDir()
@@ -120,8 +114,7 @@ func TestRunCmd_IdleStorageOnly_ExitsOnCancel(t *testing.T) {
 	}
 }
 
-// TestRunCmd_RefusesWhenLocalEmptyIndexPopulated pre-seeds an index
-// and asserts Run propagates daemon.ErrRefuseStart.
+// TestRunCmd_RefusesWhenLocalEmptyIndexPopulated asserts run wraps daemon.ErrRefuseStart for an empty local with a populated index.
 func TestRunCmd_RefusesWhenLocalEmptyIndexPopulated(t *testing.T) {
 	dataDir := t.TempDir()
 	backupDir := t.TempDir()

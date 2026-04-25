@@ -78,11 +78,7 @@ func TestClassify_AllFourBasicStates(t *testing.T) {
 	}
 }
 
-// TestBackupDirHasRegularFiles covers every branch of the helper:
-// empty dir, dir with a nested regular file, dir with only symlinks
-// (which must not count), missing path (loud error rather than silent
-// "empty"), an unreadable subdir (walk error must propagate), and a
-// regular file passed where a directory is expected.
+// TestBackupDirHasRegularFiles asserts the helper's behavior across empty, populated, symlink-only, missing, unreadable, and file-target inputs.
 func TestBackupDirHasRegularFiles(t *testing.T) {
 	tests := []struct {
 		name    string

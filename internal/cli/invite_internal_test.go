@@ -8,9 +8,7 @@ import (
 	"testing"
 )
 
-// withCreateTokenTempFunc swaps the package-level createTokenTempFunc for
-// the duration of a test, then restores it via t.Cleanup. Matches the
-// seam-swap pattern in internal/store and internal/index.
+// withCreateTokenTempFunc swaps createTokenTempFunc for the duration of a test.
 func withCreateTokenTempFunc(t *testing.T, f func(dir, pattern string) (tokenTempFile, error)) {
 	t.Helper()
 	prev := createTokenTempFunc
@@ -18,9 +16,7 @@ func withCreateTokenTempFunc(t *testing.T, f func(dir, pattern string) (tokenTem
 	t.Cleanup(func() { createTokenTempFunc = prev })
 }
 
-// fakeWriteFailFile wraps *os.File but returns a synthetic error on
-// WriteString. The underlying file is still real so Name() returns a
-// usable path for the defer-remove cleanup path.
+// fakeWriteFailFile wraps *os.File but returns a synthetic error on WriteString.
 type fakeWriteFailFile struct {
 	*os.File
 	err error
@@ -28,9 +24,7 @@ type fakeWriteFailFile struct {
 
 func (f *fakeWriteFailFile) WriteString(string) (int, error) { return 0, f.err }
 
-// fakeCloseFailFile wraps *os.File but returns a synthetic error on
-// Close. The underlying handle is closed for real first so the test
-// doesn't leak fds, but writeTokenFile sees the injected error.
+// fakeCloseFailFile wraps *os.File but returns a synthetic error on Close.
 type fakeCloseFailFile struct {
 	*os.File
 	err error
@@ -41,8 +35,7 @@ func (f *fakeCloseFailFile) Close() error {
 	return f.err
 }
 
-// TestWriteTokenFile_WriteErrorCleansUp exercises the write-failure
-// branch and confirms the defer removes the orphaned temp file.
+// TestWriteTokenFile_WriteErrorCleansUp asserts a WriteString failure removes the orphaned temp file.
 func TestWriteTokenFile_WriteErrorCleansUp(t *testing.T) {
 	dir := t.TempDir()
 	injected := errors.New("synthetic write failure")
@@ -67,8 +60,7 @@ func TestWriteTokenFile_WriteErrorCleansUp(t *testing.T) {
 	assertNoOrphanedTokenTemps(t, dir)
 }
 
-// TestWriteTokenFile_CloseErrorCleansUp exercises the close-failure
-// branch (WriteString succeeds, Close returns an injected error).
+// TestWriteTokenFile_CloseErrorCleansUp asserts a Close failure removes the orphaned temp file.
 func TestWriteTokenFile_CloseErrorCleansUp(t *testing.T) {
 	dir := t.TempDir()
 	injected := errors.New("synthetic close failure")

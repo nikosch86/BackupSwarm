@@ -27,8 +27,7 @@ func TestRootCmd_HasDataDirFlag(t *testing.T) {
 	}
 }
 
-// TestRootCmd_NoInitSubcommand pins that no `init` subcommand exists —
-// identity is auto-ensured by invite/join/run.
+// TestRootCmd_NoInitSubcommand pins that no `init` subcommand exists.
 func TestRootCmd_NoInitSubcommand(t *testing.T) {
 	root := NewRootCmd()
 	for _, sub := range root.Commands() {
@@ -38,9 +37,7 @@ func TestRootCmd_NoInitSubcommand(t *testing.T) {
 	}
 }
 
-// TestRootCmd_SilencesUsageAndErrors verifies the CLI contract that errors
-// are surfaced via structured logs (from run()), not via cobra's default
-// usage/error dump. These flags are user-facing behavior worth pinning.
+// TestRootCmd_SilencesUsageAndErrors asserts the root command sets SilenceUsage and SilenceErrors.
 func TestRootCmd_SilencesUsageAndErrors(t *testing.T) {
 	root := NewRootCmd()
 

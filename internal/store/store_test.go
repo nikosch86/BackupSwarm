@@ -261,8 +261,6 @@ func TestStore_PersistsAcrossInstances(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	// Release any lazily-opened resources before reopening at the same root —
-	// bbolt's file lock would otherwise block a second store on the same dir.
 	if err := first.Close(); err != nil {
 		t.Fatalf("Close #1: %v", err)
 	}
@@ -347,7 +345,6 @@ func TestPut_ShardDirReadOnly(t *testing.T) {
 	if err := os.MkdirAll(shardDir, 0o700); err != nil {
 		t.Fatalf("seed shard: %v", err)
 	}
-	// r-x: search + list, no write → CreateTemp fails with EACCES.
 	if err := os.Chmod(shardDir, 0o500); err != nil {
 		t.Fatalf("chmod shard: %v", err)
 	}
@@ -475,7 +472,6 @@ func TestDelete_RemoveNonEnoentPropagates(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 	shardDir := filepath.Join(root, hex.EncodeToString(hash[:1]))
-	// r-x: search + list allowed, unlink forbidden (needs write on parent).
 	if err := os.Chmod(shardDir, 0o500); err != nil {
 		t.Fatalf("chmod shard: %v", err)
 	}

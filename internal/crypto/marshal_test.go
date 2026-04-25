@@ -55,8 +55,6 @@ func TestUnmarshalEncryptedChunk_RejectsTruncated(t *testing.T) {
 		t.Fatalf("MarshalBinary: %v", err)
 	}
 
-	// Drop the trailing byte — the ciphertext length prefix claims
-	// more bytes than remain in the buffer.
 	truncated := wire[:len(wire)-1]
 	if _, err := crypto.UnmarshalEncryptedChunk(truncated); err == nil {
 		t.Fatal("UnmarshalEncryptedChunk accepted truncated wire bytes")
@@ -85,7 +83,6 @@ func TestUnmarshalEncryptedChunk_RejectsWrongVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalBinary: %v", err)
 	}
-	// Flip the version byte to an unknown value.
 	corrupt := append([]byte{}, wire...)
 	corrupt[0] = 0xff
 	if _, err := crypto.UnmarshalEncryptedChunk(corrupt); err == nil {
@@ -95,9 +92,7 @@ func TestUnmarshalEncryptedChunk_RejectsWrongVersion(t *testing.T) {
 	}
 }
 
-// MarshalBinary must produce the exact same bytes for two encrypts of the
-// same struct value — the on-peer hash of the blob is a content-address
-// and must not depend on encoder internals.
+// TestEncryptedChunk_MarshalBinary_Deterministic asserts MarshalBinary is deterministic for the same struct.
 func TestEncryptedChunk_MarshalBinary_Deterministic(t *testing.T) {
 	ec := &crypto.EncryptedChunk{
 		Nonce:      bytes.Repeat([]byte{0x11}, crypto.NonceSize),
@@ -119,7 +114,7 @@ func TestEncryptedChunk_MarshalBinary_Deterministic(t *testing.T) {
 
 func TestEncryptedChunk_MarshalBinary_RejectsWrongNonceSize(t *testing.T) {
 	ec := &crypto.EncryptedChunk{
-		Nonce:      []byte{1, 2, 3}, // wrong size
+		Nonce:      []byte{1, 2, 3},
 		WrappedKey: []byte{0x01},
 		Ciphertext: []byte{0xaa},
 	}
