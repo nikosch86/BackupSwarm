@@ -50,7 +50,12 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 				}
 			}()
 
-			listener, err := bsquic.Listen(listenAddr, sess.id.PrivateKey)
+			// Bootstrap mode (nil VerifyPeer): AcceptJoin must admit a
+			// joiner whose pubkey is not yet in peers.db. Once the
+			// handshake completes and --then-run hands off to the
+			// daemon, daemon.Run flips the listener to a membership
+			// check against peers.db before starting Serve.
+			listener, err := bsquic.Listen(listenAddr, sess.id.PrivateKey, nil)
 			if err != nil {
 				return fmt.Errorf("listen on %q: %w", listenAddr, err)
 			}

@@ -3,7 +3,10 @@ package store_test
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"backupswarm/internal/store"
@@ -180,6 +183,101 @@ func TestDeleteForOwner_UnownedBlob_ReturnsErrOwnerMismatch(t *testing.T) {
 	}
 	if !errors.Is(err, store.ErrOwnerMismatch) {
 		t.Errorf("err = %v, want wraps ErrOwnerMismatch", err)
+	}
+}
+
+func TestPutOwned_OrphanedBlob_RejectsAsOwnerMismatch(t *testing.T) {
+	s := newStore(t)
+	data := []byte("orphaned content")
+
+	if _, err := s.Put(data); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	_, err := s.PutOwned(data, []byte("eve"))
+	if err == nil {
+		t.Fatal("PutOwned on orphan blob returned nil; expected ErrOwnerMismatch")
+	}
+	if !errors.Is(err, store.ErrOwnerMismatch) {
+		t.Errorf("err = %v, want wraps ErrOwnerMismatch", err)
+	}
+
+	if _, ownerErr := s.Owner(sha256.Sum256(data)); !errors.Is(ownerErr, store.ErrNoOwnerRecorded) {
+		t.Errorf("Owner err = %v, want ErrNoOwnerRecorded (orphan was claimed)", ownerErr)
+	}
+}
+
+func TestPutOwned_OwnerRowWithMissingBlob_SameOwnerRecovers(t *testing.T) {
+	root := t.TempDir()
+	s, err := store.New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	data := []byte("recovery content")
+	owner := []byte("alice")
+	h, err := s.PutOwned(data, owner)
+	if err != nil {
+		t.Fatalf("PutOwned setup: %v", err)
+	}
+
+	blobPath := filepath.Join(root, hex.EncodeToString(h[:1]), hex.EncodeToString(h[:]))
+	if err := os.Remove(blobPath); err != nil {
+		t.Fatalf("remove blob: %v", err)
+	}
+
+	if _, err := s.PutOwned(data, owner); err != nil {
+		t.Fatalf("PutOwned recovery: %v", err)
+	}
+	ok, err := s.Has(h)
+	if err != nil {
+		t.Fatalf("Has: %v", err)
+	}
+	if !ok {
+		t.Error("blob not restored after same-owner re-upload")
+	}
+	blob, err := s.Get(h)
+	if err != nil {
+		t.Fatalf("Get after recovery: %v", err)
+	}
+	if !bytes.Equal(blob, data) {
+		t.Error("recovered blob bytes differ from original content")
+	}
+}
+
+func TestPutOwned_OwnerRowWithMissingBlob_DifferentOwnerRejected(t *testing.T) {
+	root := t.TempDir()
+	s, err := store.New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	data := []byte("contested recovery")
+	h, err := s.PutOwned(data, []byte("alice"))
+	if err != nil {
+		t.Fatalf("PutOwned setup: %v", err)
+	}
+	blobPath := filepath.Join(root, hex.EncodeToString(h[:1]), hex.EncodeToString(h[:]))
+	if err := os.Remove(blobPath); err != nil {
+		t.Fatalf("remove blob: %v", err)
+	}
+
+	_, err = s.PutOwned(data, []byte("mallory"))
+	if err == nil {
+		t.Fatal("PutOwned by different owner returned nil; expected ErrOwnerMismatch")
+	}
+	if !errors.Is(err, store.ErrOwnerMismatch) {
+		t.Errorf("err = %v, want wraps ErrOwnerMismatch", err)
+	}
+
+	got, err := s.Owner(h)
+	if err != nil {
+		t.Fatalf("Owner: %v", err)
+	}
+	if !bytes.Equal(got, []byte("alice")) {
+		t.Errorf("Owner = %x, want alice", got)
 	}
 }
 

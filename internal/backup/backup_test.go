@@ -56,7 +56,7 @@ func newTestRig(t *testing.T) *testRig {
 	}
 	_ = ownerPub
 
-	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv)
+	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -392,95 +392,91 @@ func TestPrune_IgnoresEntriesOutsideRoot(t *testing.T) {
 	}
 }
 
-// TestRun_IncrementalSkipsUnchanged asserts a second Run on the same file leaves the index entry intact and prints a skip note.
-func TestRun_IncrementalSkipsUnchanged(t *testing.T) {
-	rig := newTestRig(t)
-	root := t.TempDir()
-	path := filepath.Join(root, "stable.bin")
-	writeFile(t, path, 1<<20)
+// TestRun_Incremental asserts a second Run on an unchanged file skips re-encryption and a size change forces re-upload.
+func TestRun_Incremental(t *testing.T) {
+	tests := []struct {
+		name                 string
+		mutate               func(t *testing.T, path string)
+		wantUnchanged        bool
+		wantSizeGrew         bool
+		wantProgressContains string
+	}{
+		{
+			name:                 "unchanged file skips re-encryption",
+			mutate:               func(t *testing.T, path string) {},
+			wantUnchanged:        true,
+			wantProgressContains: "unchanged",
+		},
+		{
+			name: "size change forces re-upload",
+			mutate: func(t *testing.T, path string) {
+				f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+				if err != nil {
+					t.Fatalf("open-append: %v", err)
+				}
+				if _, err := f.Write([]byte("X")); err != nil {
+					t.Fatalf("append: %v", err)
+				}
+				_ = f.Close()
+			},
+			wantSizeGrew: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newTestRig(t)
+			root := t.TempDir()
+			path := filepath.Join(root, "f.bin")
+			writeFile(t, path, 1<<20)
 
-	opts := backup.RunOptions{
-		Path:         path,
-		Conn:         rig.ownerConn,
-		RecipientPub: rig.recipientPub,
-		Index:        rig.ownerIndex,
-		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
-	}
-	if err := backup.Run(context.Background(), opts); err != nil {
-		t.Fatalf("Run #1: %v", err)
-	}
-	firstEntry, err := rig.ownerIndex.Get(path)
-	if err != nil {
-		t.Fatalf("Get #1: %v", err)
-	}
+			opts := backup.RunOptions{
+				Path:         path,
+				Conn:         rig.ownerConn,
+				RecipientPub: rig.recipientPub,
+				Index:        rig.ownerIndex,
+				ChunkSize:    1 << 20,
+				Progress:     io.Discard,
+			}
+			if err := backup.Run(context.Background(), opts); err != nil {
+				t.Fatalf("Run #1: %v", err)
+			}
+			firstEntry, err := rig.ownerIndex.Get(path)
+			if err != nil {
+				t.Fatalf("Get #1: %v", err)
+			}
 
-	var progress bytes.Buffer
-	opts.Progress = &progress
-	if err := backup.Run(context.Background(), opts); err != nil {
-		t.Fatalf("Run #2: %v", err)
-	}
-	secondEntry, err := rig.ownerIndex.Get(path)
-	if err != nil {
-		t.Fatalf("Get #2: %v", err)
-	}
-	if firstEntry.ModTime != secondEntry.ModTime {
-		t.Errorf("ModTime changed despite unchanged file: %v -> %v", firstEntry.ModTime, secondEntry.ModTime)
-	}
-	if len(firstEntry.Chunks) != len(secondEntry.Chunks) {
-		t.Errorf("chunk count changed: %d -> %d", len(firstEntry.Chunks), len(secondEntry.Chunks))
-	}
-	for i := range firstEntry.Chunks {
-		if firstEntry.Chunks[i].CiphertextHash != secondEntry.Chunks[i].CiphertextHash {
-			t.Errorf("chunk %d CiphertextHash changed; re-encryption happened despite unchanged file", i)
-		}
-	}
-	if !bytes.Contains(progress.Bytes(), []byte("unchanged")) {
-		t.Errorf("expected progress note mentioning 'unchanged', got %q", progress.String())
-	}
-}
+			tc.mutate(t, path)
 
-// TestRun_IncrementalReuploadsOnSizeChange asserts a size change re-chunks and updates the index entry.
-func TestRun_IncrementalReuploadsOnSizeChange(t *testing.T) {
-	rig := newTestRig(t)
-	root := t.TempDir()
-	path := filepath.Join(root, "grows.bin")
-	writeFile(t, path, 1<<20)
+			var progress bytes.Buffer
+			opts.Progress = &progress
+			if err := backup.Run(context.Background(), opts); err != nil {
+				t.Fatalf("Run #2: %v", err)
+			}
+			secondEntry, err := rig.ownerIndex.Get(path)
+			if err != nil {
+				t.Fatalf("Get #2: %v", err)
+			}
 
-	opts := backup.RunOptions{
-		Path:         path,
-		Conn:         rig.ownerConn,
-		RecipientPub: rig.recipientPub,
-		Index:        rig.ownerIndex,
-		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
-	}
-	if err := backup.Run(context.Background(), opts); err != nil {
-		t.Fatalf("Run #1: %v", err)
-	}
-	firstEntry, err := rig.ownerIndex.Get(path)
-	if err != nil {
-		t.Fatalf("Get #1: %v", err)
-	}
-
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		t.Fatalf("open-append: %v", err)
-	}
-	if _, err := f.Write([]byte("X")); err != nil {
-		t.Fatalf("append: %v", err)
-	}
-	_ = f.Close()
-
-	if err := backup.Run(context.Background(), opts); err != nil {
-		t.Fatalf("Run #2: %v", err)
-	}
-	secondEntry, err := rig.ownerIndex.Get(path)
-	if err != nil {
-		t.Fatalf("Get #2: %v", err)
-	}
-	if secondEntry.Size == firstEntry.Size {
-		t.Errorf("Size unchanged after file grew: %d", secondEntry.Size)
+			if tc.wantUnchanged {
+				if firstEntry.ModTime != secondEntry.ModTime {
+					t.Errorf("ModTime changed despite unchanged file: %v -> %v", firstEntry.ModTime, secondEntry.ModTime)
+				}
+				if len(firstEntry.Chunks) != len(secondEntry.Chunks) {
+					t.Errorf("chunk count changed: %d -> %d", len(firstEntry.Chunks), len(secondEntry.Chunks))
+				}
+				for i := range firstEntry.Chunks {
+					if firstEntry.Chunks[i].CiphertextHash != secondEntry.Chunks[i].CiphertextHash {
+						t.Errorf("chunk %d CiphertextHash changed; re-encryption happened despite unchanged file", i)
+					}
+				}
+			}
+			if tc.wantSizeGrew && secondEntry.Size <= firstEntry.Size {
+				t.Errorf("Size did not grow: %d -> %d", firstEntry.Size, secondEntry.Size)
+			}
+			if tc.wantProgressContains != "" && !bytes.Contains(progress.Bytes(), []byte(tc.wantProgressContains)) {
+				t.Errorf("expected progress note containing %q, got %q", tc.wantProgressContains, progress.String())
+			}
+		})
 	}
 }
 
@@ -753,7 +749,7 @@ func TestRun_PeerErrorPropagation(t *testing.T) {
 		t.Fatalf("owner key: %v", err)
 	}
 
-	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv)
+	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}

@@ -11,28 +11,22 @@ import (
 )
 
 func TestMessageType_ReadWriteRoundTrip(t *testing.T) {
-	var buf bytes.Buffer
-	if err := protocol.WriteMessageType(&buf, protocol.MsgPutChunk); err != nil {
-		t.Fatalf("WriteMessageType: %v", err)
-	}
-	got, err := protocol.ReadMessageType(&buf)
-	if err != nil {
-		t.Fatalf("ReadMessageType: %v", err)
-	}
-	if got != protocol.MsgPutChunk {
-		t.Errorf("type = %v, want %v", got, protocol.MsgPutChunk)
-	}
-
-	buf.Reset()
-	if err := protocol.WriteMessageType(&buf, protocol.MsgDeleteChunk); err != nil {
-		t.Fatalf("WriteMessageType delete: %v", err)
-	}
-	got, err = protocol.ReadMessageType(&buf)
-	if err != nil {
-		t.Fatalf("ReadMessageType delete: %v", err)
-	}
-	if got != protocol.MsgDeleteChunk {
-		t.Errorf("type = %v, want %v", got, protocol.MsgDeleteChunk)
+	for _, msg := range []protocol.MessageType{
+		protocol.MsgPutChunk,
+		protocol.MsgDeleteChunk,
+		protocol.MsgGetChunk,
+	} {
+		var buf bytes.Buffer
+		if err := protocol.WriteMessageType(&buf, msg); err != nil {
+			t.Fatalf("WriteMessageType(%v): %v", msg, err)
+		}
+		got, err := protocol.ReadMessageType(&buf)
+		if err != nil {
+			t.Fatalf("ReadMessageType(%v): %v", msg, err)
+		}
+		if got != msg {
+			t.Errorf("type = %v, want %v", got, msg)
+		}
 	}
 }
 

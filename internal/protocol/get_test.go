@@ -9,20 +9,6 @@ import (
 	"backupswarm/internal/protocol"
 )
 
-func TestMessageType_GetChunk_RoundTrip(t *testing.T) {
-	var buf bytes.Buffer
-	if err := protocol.WriteMessageType(&buf, protocol.MsgGetChunk); err != nil {
-		t.Fatalf("WriteMessageType: %v", err)
-	}
-	got, err := protocol.ReadMessageType(&buf)
-	if err != nil {
-		t.Fatalf("ReadMessageType: %v", err)
-	}
-	if got != protocol.MsgGetChunk {
-		t.Errorf("type = %v, want %v", got, protocol.MsgGetChunk)
-	}
-}
-
 func TestWriteReadGetChunkRequest_RoundTrip(t *testing.T) {
 	hash := sha256.Sum256([]byte("fetch me"))
 
