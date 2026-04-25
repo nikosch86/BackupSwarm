@@ -491,6 +491,51 @@ func TestRun_MkdirError(t *testing.T) {
 	}
 }
 
+// TestRun_RefusesSymlinkAtTarget pre-plants a symlink at the restore target
+// path and asserts restore refuses to follow it — chunk plaintext must never
+// reach the symlink's destination.
+func TestRun_RefusesSymlinkAtTarget(t *testing.T) {
+	rig := newRestoreRig(t)
+	srcRoot := t.TempDir()
+	srcPath := filepath.Join(srcRoot, "victim.bin")
+	rig.backupFile(srcPath, []byte("plaintext that must not leak"))
+
+	dest := t.TempDir()
+	sentinelPath := filepath.Join(t.TempDir(), "sentinel")
+	sentinelOriginal := []byte("untouched")
+	if err := os.WriteFile(sentinelPath, sentinelOriginal, 0o600); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	target := filepath.Join(dest, srcPath)
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
+	if err := os.Symlink(sentinelPath, target); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	err := restore.Run(context.Background(), restore.Options{
+		Dest:          dest,
+		Conn:          rig.ownerConn,
+		Index:         rig.ownerIndex,
+		RecipientPub:  rig.recipientPub,
+		RecipientPriv: rig.recipientPriv,
+		Progress:      io.Discard,
+	})
+	if err == nil {
+		t.Fatal("restore.Run followed pre-planted symlink")
+	}
+
+	got, readErr := os.ReadFile(sentinelPath)
+	if readErr != nil {
+		t.Fatalf("read sentinel: %v", readErr)
+	}
+	if !bytes.Equal(got, sentinelOriginal) {
+		t.Errorf("sentinel was overwritten through symlink: %q", got)
+	}
+}
+
 // TestRun_GetChunkError asserts a closed conn surfaces the transport err.
 func TestRun_GetChunkError(t *testing.T) {
 	rig := newRestoreRig(t)

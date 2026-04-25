@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"backupswarm/internal/backup"
 	"backupswarm/internal/crypto"
@@ -87,7 +88,7 @@ func restoreFile(ctx context.Context, opts Options, entry index.FileEntry) error
 	if err := os.MkdirAll(filepath.Dir(outPath), dirPerm); err != nil {
 		return fmt.Errorf("mkdir parent: %w", err)
 	}
-	f, err := openFileFunc(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, filePerm)
+	f, err := openFileFunc(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, filePerm)
 	if err != nil {
 		return fmt.Errorf("create: %w", err)
 	}
