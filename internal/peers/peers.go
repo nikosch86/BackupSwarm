@@ -28,11 +28,84 @@ const (
 	// DefaultFilename is the conventional basename for the peer-store
 	// bbolt file inside a node's data directory.
 	DefaultFilename = "peers.db"
+
+	// valueFormatVersion is the leading byte of every encoded peer record.
+	valueFormatVersion byte = 1
 )
 
 // ErrPeerNotFound is returned by Get and Remove when no peer is stored
 // under the given public key.
 var ErrPeerNotFound = errors.New("peer not found")
+
+// ErrUnknownVersion is returned by decodeValue when the leading version
+// byte is not recognized.
+var ErrUnknownVersion = errors.New("unknown peer record version")
+
+// Role classifies how this node knows about a peer.
+type Role uint8
+
+const (
+	// RoleUnspecified is the zero value; rejected by Add.
+	RoleUnspecified Role = 0
+	// RolePeer is a known peer that is not a chosen backup partner.
+	RolePeer Role = 1
+	// RoleIntroducer is a peer recorded by DoJoin.
+	RoleIntroducer Role = 2
+	// RoleStorage is an explicit storage target.
+	RoleStorage Role = 3
+)
+
+// String returns a short human label for the role.
+func (r Role) String() string {
+	switch r {
+	case RoleUnspecified:
+		return "unspecified"
+	case RolePeer:
+		return "peer"
+	case RoleIntroducer:
+		return "introducer"
+	case RoleStorage:
+		return "storage"
+	default:
+		return fmt.Sprintf("unknown(%d)", uint8(r))
+	}
+}
+
+// IsStorageCandidate reports whether peers with this role admit as
+// backup destinations.
+func (r Role) IsStorageCandidate() bool {
+	return r == RoleIntroducer || r == RoleStorage
+}
+
+func validateRole(r Role) error {
+	switch r {
+	case RolePeer, RoleIntroducer, RoleStorage:
+		return nil
+	default:
+		return fmt.Errorf("peers: invalid role %v", r)
+	}
+}
+
+// encodeValue serializes a peer record as [version | role | addr...].
+func encodeValue(role Role, addr string) []byte {
+	out := make([]byte, 2+len(addr))
+	out[0] = valueFormatVersion
+	out[1] = byte(role)
+	copy(out[2:], addr)
+	return out
+}
+
+// decodeValue parses an encoded peer record, returning ErrUnknownVersion
+// when the leading byte is not valueFormatVersion.
+func decodeValue(raw []byte) (Role, string, error) {
+	if len(raw) < 2 {
+		return RoleUnspecified, "", fmt.Errorf("peers: record too short (%d bytes)", len(raw))
+	}
+	if raw[0] != valueFormatVersion {
+		return RoleUnspecified, "", fmt.Errorf("%w: %d", ErrUnknownVersion, raw[0])
+	}
+	return Role(raw[1]), string(raw[2:]), nil
+}
 
 // Test-only seams; production never reassigns these.
 var (
@@ -42,11 +115,12 @@ var (
 	}
 )
 
-// Peer is one known storage peer: its last-reported listen address and
-// Ed25519 identity public key.
+// Peer is one known storage peer: its last-reported listen address,
+// Ed25519 identity public key, and Role.
 type Peer struct {
 	Addr   string
 	PubKey ed25519.PublicKey
+	Role   Role
 }
 
 // Store is a bbolt-backed peer registry.
@@ -94,9 +168,12 @@ func (s *Store) Add(p Peer) error {
 	if err := validatePubKey(p.PubKey); err != nil {
 		return err
 	}
+	if err := validateRole(p.Role); err != nil {
+		return err
+	}
 	return s.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucketName))
-		return b.Put(p.PubKey, []byte(p.Addr))
+		return b.Put(p.PubKey, encodeValue(p.Role, p.Addr))
 	})
 }
 
@@ -112,9 +189,14 @@ func (s *Store) Get(pub ed25519.PublicKey) (Peer, error) {
 		if raw == nil {
 			return fmt.Errorf("%w: %x", ErrPeerNotFound, pub[:8])
 		}
+		role, addr, decErr := decodeValue(raw)
+		if decErr != nil {
+			return fmt.Errorf("decode peer record: %w", decErr)
+		}
 		got = Peer{
-			Addr:   string(raw),
+			Addr:   addr,
 			PubKey: bytes.Clone(pub),
+			Role:   role,
 		}
 		return nil
 	})
@@ -146,9 +228,14 @@ func (s *Store) List() ([]Peer, error) {
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucketName))
 		return b.ForEach(func(k, v []byte) error {
+			role, addr, decErr := decodeValue(v)
+			if decErr != nil {
+				return fmt.Errorf("decode peer record: %w", decErr)
+			}
 			out = append(out, Peer{
-				Addr:   string(v),
+				Addr:   addr,
 				PubKey: bytes.Clone(k),
+				Role:   role,
 			})
 			return nil
 		})

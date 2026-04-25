@@ -51,6 +51,7 @@ func AcceptJoin(ctx context.Context, l *bsquic.Listener, store *peers.Store) (pe
 	peer := peers.Peer{
 		Addr:   addr,
 		PubKey: ed25519PubCopy(conn.RemotePub()),
+		Role:   peers.RolePeer,
 	}
 	if err := store.Add(peer); err != nil {
 		_ = protocol.WriteJoinAck(stream, "store error")
@@ -100,7 +101,7 @@ func DoJoin(ctx context.Context, tokenStr string, myPriv ed25519.PrivateKey, myL
 		return peers.Peer{}, fmt.Errorf("introducer rejected join: %s", appErr)
 	}
 
-	peer := peers.Peer{Addr: addr, PubKey: ed25519PubCopy(pub)}
+	peer := peers.Peer{Addr: addr, PubKey: ed25519PubCopy(pub), Role: peers.RoleIntroducer}
 	if err := store.Add(peer); err != nil {
 		return peers.Peer{}, fmt.Errorf("persist peer: %w", err)
 	}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,7 +90,7 @@ func TestRestoreCmd_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("peers.Open: %v", err)
 	}
-	if err := ps.Add(peers.Peer{Addr: listener.Addr().String(), PubKey: peerPub}); err != nil {
+	if err := ps.Add(peers.Peer{Addr: listener.Addr().String(), PubKey: peerPub, Role: peers.RoleIntroducer}); err != nil {
 		t.Fatalf("peers.Add: %v", err)
 	}
 	if err := ps.Close(); err != nil {
@@ -168,6 +169,30 @@ func TestRestoreCmd_NoPeer(t *testing.T) {
 	}
 }
 
+// TestRestoreCmd_OnlyRolePeer asserts restore errors when the sole
+// entry in peers.db is RolePeer.
+func TestRestoreCmd_OnlyRolePeer(t *testing.T) {
+	dataDir := t.TempDir()
+	dest := t.TempDir()
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	ps, err := peers.Open(filepath.Join(dataDir, "peers.db"))
+	if err != nil {
+		t.Fatalf("peers.Open: %v", err)
+	}
+	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:1", PubKey: pub, Role: peers.RolePeer}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	_ = ps.Close()
+
+	root := NewRootCmd()
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"--data-dir", dataDir, "restore", dest})
+	if err := root.Execute(); err == nil {
+		t.Error("restore accepted RolePeer record as storage target")
+	}
+}
+
 // TestRestoreCmd_MultiplePeers asserts restore errors when peers.db has multiple dialable entries.
 func TestRestoreCmd_MultiplePeers(t *testing.T) {
 	dataDir := t.TempDir()
@@ -178,10 +203,10 @@ func TestRestoreCmd_MultiplePeers(t *testing.T) {
 	}
 	pub1, _, _ := ed25519.GenerateKey(rand.Reader)
 	pub2, _, _ := ed25519.GenerateKey(rand.Reader)
-	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:1001", PubKey: pub1}); err != nil {
+	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:1001", PubKey: pub1, Role: peers.RoleIntroducer}); err != nil {
 		t.Fatalf("Add 1: %v", err)
 	}
-	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:1002", PubKey: pub2}); err != nil {
+	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:1002", PubKey: pub2, Role: peers.RoleIntroducer}); err != nil {
 		t.Fatalf("Add 2: %v", err)
 	}
 	_ = ps.Close()
@@ -220,7 +245,7 @@ func TestRestoreCmd_IndexOpenError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("peers.Open: %v", err)
 	}
-	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:1", PubKey: pub}); err != nil {
+	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:1", PubKey: pub, Role: peers.RoleIntroducer}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	_ = ps.Close()
@@ -247,7 +272,7 @@ func TestRestoreCmd_DialFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("peers.Open: %v", err)
 	}
-	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:1", PubKey: pub}); err != nil {
+	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:1", PubKey: pub, Role: peers.RoleIntroducer}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	_ = ps.Close()
@@ -262,5 +287,24 @@ func TestRestoreCmd_DialFailure(t *testing.T) {
 	})
 	if err := root.Execute(); err == nil {
 		t.Error("restore accepted unreachable peer")
+	}
+}
+
+// TestPickSingleDialablePeer_ListFailureSurfacesWrapped asserts a List
+// error surfaces from pickSingleDialablePeer with a "list peers" wrap.
+func TestPickSingleDialablePeer_ListFailureSurfacesWrapped(t *testing.T) {
+	ps, err := peers.Open(filepath.Join(t.TempDir(), "list-fail.db"))
+	if err != nil {
+		t.Fatalf("peers.Open: %v", err)
+	}
+	if err := ps.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	_, err = pickSingleDialablePeer(ps)
+	if err == nil {
+		t.Fatal("pickSingleDialablePeer returned nil on closed store")
+	}
+	if !strings.Contains(err.Error(), "list peers") {
+		t.Errorf("err = %q, want 'list peers' wrap", err)
 	}
 }

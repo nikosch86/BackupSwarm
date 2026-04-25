@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"io"
 	"path/filepath"
 	"strings"
@@ -12,9 +14,144 @@ import (
 
 	"backupswarm/internal/backup"
 	"backupswarm/internal/index"
+	"backupswarm/internal/peers"
 	bsquic "backupswarm/internal/quic"
 	"backupswarm/internal/store"
 )
+
+// openPickStoragePeerStore opens a fresh peers.db and registers a
+// t.Cleanup for it.
+func openPickStoragePeerStore(t *testing.T) *peers.Store {
+	t.Helper()
+	ps, err := peers.Open(filepath.Join(t.TempDir(), "peers.db"))
+	if err != nil {
+		t.Fatalf("peers.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = ps.Close() })
+	return ps
+}
+
+func mustGenPub(t *testing.T) ed25519.PublicKey {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("gen key: %v", err)
+	}
+	return pub
+}
+
+// TestPickStoragePeer_SkipsRolePeer asserts a RolePeer record with a
+// dialable Addr is not selected.
+func TestPickStoragePeer_SkipsRolePeer(t *testing.T) {
+	ps := openPickStoragePeerStore(t)
+	pub := mustGenPub(t)
+	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:9", PubKey: pub, Role: peers.RolePeer}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	got, err := pickStoragePeer(ps)
+	if err != nil {
+		t.Fatalf("pickStoragePeer: %v", err)
+	}
+	if got != nil {
+		t.Errorf("pickStoragePeer returned %+v, want nil for RolePeer record", got)
+	}
+}
+
+// TestPickStoragePeer_AdmitsRoleIntroducer asserts a RoleIntroducer
+// record is selected.
+func TestPickStoragePeer_AdmitsRoleIntroducer(t *testing.T) {
+	ps := openPickStoragePeerStore(t)
+	pub := mustGenPub(t)
+	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:10", PubKey: pub, Role: peers.RoleIntroducer}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	got, err := pickStoragePeer(ps)
+	if err != nil {
+		t.Fatalf("pickStoragePeer: %v", err)
+	}
+	if got == nil {
+		t.Fatal("pickStoragePeer returned nil for RoleIntroducer record")
+	}
+	if !bytes.Equal(got.PubKey, pub) {
+		t.Errorf("pickStoragePeer returned wrong pubkey")
+	}
+}
+
+// TestPickStoragePeer_AdmitsRoleStorage asserts a RoleStorage record
+// is selected.
+func TestPickStoragePeer_AdmitsRoleStorage(t *testing.T) {
+	ps := openPickStoragePeerStore(t)
+	pub := mustGenPub(t)
+	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:11", PubKey: pub, Role: peers.RoleStorage}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	got, err := pickStoragePeer(ps)
+	if err != nil {
+		t.Fatalf("pickStoragePeer: %v", err)
+	}
+	if got == nil {
+		t.Fatal("pickStoragePeer returned nil for RoleStorage record")
+	}
+}
+
+// TestPickStoragePeer_MixedRolesPicksStorageRoleOnly asserts that with
+// one RolePeer and one RoleIntroducer both dialable, the RoleIntroducer
+// is returned without ErrMultiplePeers.
+func TestPickStoragePeer_MixedRolesPicksStorageRoleOnly(t *testing.T) {
+	ps := openPickStoragePeerStore(t)
+	introPub := mustGenPub(t)
+	peerPub := mustGenPub(t)
+	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:20", PubKey: introPub, Role: peers.RoleIntroducer}); err != nil {
+		t.Fatalf("Add introducer: %v", err)
+	}
+	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:21", PubKey: peerPub, Role: peers.RolePeer}); err != nil {
+		t.Fatalf("Add peer: %v", err)
+	}
+	got, err := pickStoragePeer(ps)
+	if err != nil {
+		t.Fatalf("pickStoragePeer: %v", err)
+	}
+	if got == nil {
+		t.Fatal("pickStoragePeer returned nil despite a RoleIntroducer record")
+	}
+	if !bytes.Equal(got.PubKey, introPub) {
+		t.Errorf("pickStoragePeer chose wrong record (got %x, want introducer %x)", got.PubKey[:8], introPub[:8])
+	}
+}
+
+// TestPickStoragePeer_MultipleStorageRolesErrors asserts ErrMultiplePeers
+// when two storage-eligible records both have dialable Addrs.
+func TestPickStoragePeer_MultipleStorageRolesErrors(t *testing.T) {
+	ps := openPickStoragePeerStore(t)
+	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:30", PubKey: mustGenPub(t), Role: peers.RoleIntroducer}); err != nil {
+		t.Fatalf("Add 1: %v", err)
+	}
+	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:31", PubKey: mustGenPub(t), Role: peers.RoleStorage}); err != nil {
+		t.Fatalf("Add 2: %v", err)
+	}
+	if _, err := pickStoragePeer(ps); !errors.Is(err, ErrMultiplePeers) {
+		t.Errorf("err = %v, want ErrMultiplePeers", err)
+	}
+}
+
+// TestPickStoragePeer_ListFailureSurfacesWrapped asserts a List error
+// surfaces from pickStoragePeer with a "list peers" wrap.
+func TestPickStoragePeer_ListFailureSurfacesWrapped(t *testing.T) {
+	ps, err := peers.Open(filepath.Join(t.TempDir(), "list-fail.db"))
+	if err != nil {
+		t.Fatalf("peers.Open: %v", err)
+	}
+	if err := ps.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	_, err = pickStoragePeer(ps)
+	if err == nil {
+		t.Fatal("pickStoragePeer returned nil on closed store")
+	}
+	if !strings.Contains(err.Error(), "list peers") {
+		t.Errorf("err = %q, want 'list peers' wrap", err)
+	}
+}
 
 // TestModeName_AllCases asserts modeName returns the expected string for every Mode value plus the unknown fallback.
 func TestModeName_AllCases(t *testing.T) {

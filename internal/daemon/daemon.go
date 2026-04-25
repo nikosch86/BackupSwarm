@@ -366,9 +366,9 @@ func waitForServe(ctx context.Context, serveErrCh <-chan error) error {
 	}
 }
 
-// pickStoragePeer picks the single dialable peer from peers.db. Returns
-// (nil, nil) if none have an address (storage-peer-only role),
-// (peer, nil) if exactly one does, or (nil, ErrMultiplePeers) otherwise.
+// pickStoragePeer picks the single dialable storage candidate from
+// peers.db: non-empty Addr and a Role that IsStorageCandidate. Returns
+// (nil, nil) on zero matches, (nil, ErrMultiplePeers) on more than one.
 func pickStoragePeer(ps *peers.Store) (*peers.Peer, error) {
 	all, err := ps.List()
 	if err != nil {
@@ -376,7 +376,7 @@ func pickStoragePeer(ps *peers.Store) (*peers.Peer, error) {
 	}
 	var dialable []peers.Peer
 	for _, p := range all {
-		if p.Addr != "" {
+		if p.Addr != "" && p.Role.IsStorageCandidate() {
 			dialable = append(dialable, p)
 		}
 	}

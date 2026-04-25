@@ -88,10 +88,9 @@ func newRestoreCmd(dataDir *string) *cobra.Command {
 	return cmd
 }
 
-// pickSingleDialablePeer returns the single peer in ps with a
-// non-empty address, or an error if zero or more than one exist.
-// Matches daemon.pickStoragePeer's contract without forcing an
-// import of the daemon package into the CLI.
+// pickSingleDialablePeer returns the single peer in ps with a non-empty
+// Addr and a Role that IsStorageCandidate, or an error if zero or more
+// than one exist.
 func pickSingleDialablePeer(ps *peers.Store) (*peers.Peer, error) {
 	all, err := ps.List()
 	if err != nil {
@@ -99,7 +98,7 @@ func pickSingleDialablePeer(ps *peers.Store) (*peers.Peer, error) {
 	}
 	var dialable []peers.Peer
 	for _, p := range all {
-		if p.Addr != "" {
+		if p.Addr != "" && p.Role.IsStorageCandidate() {
 			dialable = append(dialable, p)
 		}
 	}

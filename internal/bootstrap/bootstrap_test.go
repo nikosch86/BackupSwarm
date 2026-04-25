@@ -111,12 +111,18 @@ func TestBootstrap_EndToEnd(t *testing.T) {
 	if acceptedPeer.Addr != joinerListen {
 		t.Errorf("AcceptJoin addr = %q, want %q", acceptedPeer.Addr, joinerListen)
 	}
+	if acceptedPeer.Role != peers.RolePeer {
+		t.Errorf("AcceptJoin role = %v, want RolePeer", acceptedPeer.Role)
+	}
 	got, err := rig.introducerPeerList.Get(rig.joinerPub)
 	if err != nil {
 		t.Fatalf("introducer's peer store missing joiner: %v", err)
 	}
 	if got.Addr != joinerListen {
 		t.Errorf("introducer saw joiner addr %q, want %q", got.Addr, joinerListen)
+	}
+	if got.Role != peers.RolePeer {
+		t.Errorf("introducer's stored joiner role = %v, want RolePeer", got.Role)
 	}
 
 	if !bytes.Equal(introducerPeer.PubKey, rig.introducerPub) {
@@ -125,12 +131,18 @@ func TestBootstrap_EndToEnd(t *testing.T) {
 	if introducerPeer.Addr != rig.listener.Addr().String() {
 		t.Errorf("DoJoin addr = %q, want %q", introducerPeer.Addr, rig.listener.Addr().String())
 	}
+	if introducerPeer.Role != peers.RoleIntroducer {
+		t.Errorf("DoJoin role = %v, want RoleIntroducer", introducerPeer.Role)
+	}
 	got, err = rig.joinerPeerList.Get(rig.introducerPub)
 	if err != nil {
 		t.Fatalf("joiner's peer store missing introducer: %v", err)
 	}
 	if got.Addr != rig.listener.Addr().String() {
 		t.Errorf("joiner saw introducer addr %q, want %q", got.Addr, rig.listener.Addr().String())
+	}
+	if got.Role != peers.RoleIntroducer {
+		t.Errorf("joiner's stored introducer role = %v, want RoleIntroducer", got.Role)
 	}
 }
 

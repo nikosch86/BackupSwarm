@@ -54,7 +54,7 @@ func TestOpen_CreatesFileAtSecurePerms(t *testing.T) {
 
 func TestAddGet_RoundTrip(t *testing.T) {
 	s := openTestStore(t)
-	peer := peers.Peer{Addr: "127.0.0.1:7777", PubKey: mustKey(t)}
+	peer := peers.Peer{Addr: "127.0.0.1:7777", PubKey: mustKey(t), Role: peers.RolePeer}
 
 	if err := s.Add(peer); err != nil {
 		t.Fatalf("Add: %v", err)
@@ -69,15 +69,137 @@ func TestAddGet_RoundTrip(t *testing.T) {
 	if !bytes.Equal(got.PubKey, peer.PubKey) {
 		t.Error("PubKey round-trip mismatch")
 	}
+	if got.Role != peer.Role {
+		t.Errorf("Role = %v, want %v", got.Role, peer.Role)
+	}
+}
+
+// TestAddGet_PreservesRole asserts every defined Role survives Add/Get round-trip.
+func TestAddGet_PreservesRole(t *testing.T) {
+	s := openTestStore(t)
+	cases := []peers.Role{peers.RolePeer, peers.RoleIntroducer, peers.RoleStorage}
+	for _, role := range cases {
+		pub := mustKey(t)
+		p := peers.Peer{Addr: "x:1", PubKey: pub, Role: role}
+		if err := s.Add(p); err != nil {
+			t.Fatalf("Add %v: %v", role, err)
+		}
+		got, err := s.Get(pub)
+		if err != nil {
+			t.Fatalf("Get %v: %v", role, err)
+		}
+		if got.Role != role {
+			t.Errorf("Role round-trip = %v, want %v", got.Role, role)
+		}
+	}
+}
+
+// TestList_PreservesRole asserts roles survive a List read.
+func TestList_PreservesRole(t *testing.T) {
+	s := openTestStore(t)
+	want := map[peers.Role]string{
+		peers.RolePeer:       "p:1",
+		peers.RoleIntroducer: "i:1",
+		peers.RoleStorage:    "s:1",
+	}
+	pubsByAddr := make(map[string]ed25519.PublicKey, len(want))
+	for role, addr := range want {
+		pub := mustKey(t)
+		pubsByAddr[addr] = pub
+		if err := s.Add(peers.Peer{Addr: addr, PubKey: pub, Role: role}); err != nil {
+			t.Fatalf("Add %v: %v", role, err)
+		}
+	}
+	listed, err := s.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(listed) != len(want) {
+		t.Fatalf("List len = %d, want %d", len(listed), len(want))
+	}
+	for _, p := range listed {
+		expectedRole := peers.RolePeer
+		switch p.Addr {
+		case "i:1":
+			expectedRole = peers.RoleIntroducer
+		case "s:1":
+			expectedRole = peers.RoleStorage
+		case "p:1":
+			expectedRole = peers.RolePeer
+		default:
+			t.Errorf("unexpected addr in list: %q", p.Addr)
+		}
+		if p.Role != expectedRole {
+			t.Errorf("addr %q: Role = %v, want %v", p.Addr, p.Role, expectedRole)
+		}
+	}
+}
+
+// TestRole_IsStorageCandidate asserts only RoleIntroducer and RoleStorage
+// return true; every other role returns false.
+func TestRole_IsStorageCandidate(t *testing.T) {
+	cases := []struct {
+		role peers.Role
+		want bool
+	}{
+		{peers.RoleUnspecified, false},
+		{peers.RolePeer, false},
+		{peers.RoleIntroducer, true},
+		{peers.RoleStorage, true},
+		{peers.Role(99), false},
+	}
+	for _, tc := range cases {
+		if got := tc.role.IsStorageCandidate(); got != tc.want {
+			t.Errorf("(%v).IsStorageCandidate() = %v, want %v", tc.role, got, tc.want)
+		}
+	}
+}
+
+// TestRole_String asserts String returns a stable label for every
+// defined role plus the unknown fallback.
+func TestRole_String(t *testing.T) {
+	cases := []struct {
+		role peers.Role
+		want string
+	}{
+		{peers.RoleUnspecified, "unspecified"},
+		{peers.RolePeer, "peer"},
+		{peers.RoleIntroducer, "introducer"},
+		{peers.RoleStorage, "storage"},
+	}
+	for _, tc := range cases {
+		if got := tc.role.String(); got != tc.want {
+			t.Errorf("(%v).String() = %q, want %q", tc.role, got, tc.want)
+		}
+	}
+	if got := peers.Role(99).String(); got == "" {
+		t.Error("Role(99).String() = empty; want unknown(...) fallback")
+	}
+}
+
+// TestAdd_RejectsUnknownRole asserts Add fails when the Peer carries an undefined Role.
+func TestAdd_RejectsUnknownRole(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.Add(peers.Peer{Addr: "x:1", PubKey: mustKey(t), Role: peers.Role(99)}); err == nil {
+		t.Error("Add accepted undefined Role(99)")
+	}
+}
+
+// TestAdd_RejectsUnspecifiedRole asserts a zero-valued Role is refused.
+func TestAdd_RejectsUnspecifiedRole(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.Add(peers.Peer{Addr: "x:1", PubKey: mustKey(t)}); err == nil {
+		t.Error("Add accepted zero-value Role")
+	}
 }
 
 func TestAdd_UpsertsByPubKey(t *testing.T) {
 	s := openTestStore(t)
 	pub := mustKey(t)
-	if err := s.Add(peers.Peer{Addr: "old:1", PubKey: pub}); err != nil {
+	if err := s.Add(peers.Peer{Addr: "old:1", PubKey: pub, Role: peers.RolePeer}); err != nil {
 		t.Fatalf("Add first: %v", err)
 	}
-	if err := s.Add(peers.Peer{Addr: "new:2", PubKey: pub}); err != nil {
+	if err := s.Add(peers.Peer{Addr: "new:2", PubKey: pub, Role: peers.RoleIntroducer}); err != nil {
 		t.Fatalf("Add second: %v", err)
 	}
 	listed, err := s.List()
@@ -90,14 +212,17 @@ func TestAdd_UpsertsByPubKey(t *testing.T) {
 	if listed[0].Addr != "new:2" {
 		t.Errorf("Addr = %q, want %q (upsert should overwrite)", listed[0].Addr, "new:2")
 	}
+	if listed[0].Role != peers.RoleIntroducer {
+		t.Errorf("Role = %v, want RoleIntroducer (upsert should overwrite)", listed[0].Role)
+	}
 }
 
 func TestAdd_RejectsInvalidPubkey(t *testing.T) {
 	s := openTestStore(t)
-	if err := s.Add(peers.Peer{Addr: "x:1", PubKey: []byte{1, 2, 3}}); err == nil {
+	if err := s.Add(peers.Peer{Addr: "x:1", PubKey: []byte{1, 2, 3}, Role: peers.RolePeer}); err == nil {
 		t.Error("Add accepted wrong-size pubkey")
 	}
-	if err := s.Add(peers.Peer{Addr: "x:1", PubKey: nil}); err == nil {
+	if err := s.Add(peers.Peer{Addr: "x:1", PubKey: nil, Role: peers.RolePeer}); err == nil {
 		t.Error("Add accepted nil pubkey")
 	}
 }
@@ -106,7 +231,7 @@ func TestAdd_RejectsInvalidPubkey(t *testing.T) {
 func TestAdd_AcceptsEmptyAddr(t *testing.T) {
 	s := openTestStore(t)
 	pub := mustKey(t)
-	if err := s.Add(peers.Peer{Addr: "", PubKey: pub}); err != nil {
+	if err := s.Add(peers.Peer{Addr: "", PubKey: pub, Role: peers.RolePeer}); err != nil {
 		t.Fatalf("Add with empty addr: %v", err)
 	}
 	got, err := s.Get(pub)
@@ -147,7 +272,7 @@ func TestList_ReturnsAllSortedByPubKey(t *testing.T) {
 	for i := range 3 {
 		pub := make(ed25519.PublicKey, ed25519.PublicKeySize)
 		pub[0] = byte(3 - i)
-		p := peers.Peer{Addr: string(rune('a'+i)) + ":1", PubKey: pub}
+		p := peers.Peer{Addr: string(rune('a'+i)) + ":1", PubKey: pub, Role: peers.RolePeer}
 		if err := s.Add(p); err != nil {
 			t.Fatalf("Add %d: %v", i, err)
 		}
@@ -170,7 +295,7 @@ func TestList_ReturnsAllSortedByPubKey(t *testing.T) {
 
 func TestRemove_DeletesEntry(t *testing.T) {
 	s := openTestStore(t)
-	peer := peers.Peer{Addr: "x:1", PubKey: mustKey(t)}
+	peer := peers.Peer{Addr: "x:1", PubKey: mustKey(t), Role: peers.RolePeer}
 	if err := s.Add(peer); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -202,7 +327,7 @@ func TestPeers_PersistAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open #1: %v", err)
 	}
-	peer := peers.Peer{Addr: "remembered:9999", PubKey: mustKey(t)}
+	peer := peers.Peer{Addr: "remembered:9999", PubKey: mustKey(t), Role: peers.RoleIntroducer}
 	if err := first.Add(peer); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -223,6 +348,9 @@ func TestPeers_PersistAcrossReopen(t *testing.T) {
 	if got.Addr != peer.Addr {
 		t.Errorf("persisted Addr = %q, want %q", got.Addr, peer.Addr)
 	}
+	if got.Role != peer.Role {
+		t.Errorf("persisted Role = %v, want %v", got.Role, peer.Role)
+	}
 }
 
 func TestOpen_FailsWhenParentIsFile(t *testing.T) {
@@ -240,7 +368,7 @@ func TestOperationsAfterClose_Error(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if err := s.Add(peers.Peer{Addr: "x:1", PubKey: mustKey(t)}); err == nil {
+	if err := s.Add(peers.Peer{Addr: "x:1", PubKey: mustKey(t), Role: peers.RolePeer}); err == nil {
 		t.Error("Add on closed store succeeded")
 	}
 	if _, err := s.Get(mustKey(t)); err == nil {

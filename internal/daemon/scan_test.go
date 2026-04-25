@@ -23,7 +23,8 @@ import (
 	"backupswarm/internal/store"
 )
 
-// seedPeer opens peers.db at <dataDir>/peers.db and writes a single storage peer.
+// seedPeer opens peers.db at <dataDir>/peers.db and writes a single
+// RoleIntroducer peer.
 func seedPeer(t *testing.T, dataDir, addr string, pub []byte) {
 	t.Helper()
 	ps, err := peers.Open(filepath.Join(dataDir, "peers.db"))
@@ -31,7 +32,7 @@ func seedPeer(t *testing.T, dataDir, addr string, pub []byte) {
 		t.Fatalf("peers.Open: %v", err)
 	}
 	defer ps.Close()
-	if err := ps.Add(peers.Peer{Addr: addr, PubKey: pub}); err != nil {
+	if err := ps.Add(peers.Peer{Addr: addr, PubKey: pub, Role: peers.RoleIntroducer}); err != nil {
 		t.Fatalf("peers.Add: %v", err)
 	}
 }
