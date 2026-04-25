@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"backupswarm/internal/chunk"
 	"backupswarm/internal/crypto"
@@ -335,8 +336,11 @@ func sendDeleteChunk(ctx context.Context, conn streamOpener, hash [32]byte) erro
 }
 
 // Serve accepts inbound QUIC connections on l and dispatches streams
-// against st. Exits cleanly on ctx cancellation.
+// against st. Exits cleanly on ctx cancellation. Blocks until every
+// per-connection serveConn it spawned has fully drained.
 func Serve(ctx context.Context, l *bsquic.Listener, st *store.Store) error {
+	var wg sync.WaitGroup
+	defer wg.Wait()
 	for {
 		conn, err := l.Accept(ctx)
 		if err != nil {
@@ -345,7 +349,11 @@ func Serve(ctx context.Context, l *bsquic.Listener, st *store.Store) error {
 			}
 			return fmt.Errorf("accept: %w", err)
 		}
-		go serveConn(ctx, conn, st)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			serveConn(ctx, conn, st)
+		}()
 	}
 }
 
@@ -354,6 +362,10 @@ func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store) {
 	ownerKey := append([]byte(nil), conn.RemotePub()...)
 	// sem bounds concurrent dispatcher goroutines per connection.
 	sem := make(chan struct{}, serveConnStreamCap)
+	// wg ensures we don't return while dispatcher goroutines are still
+	// reading dispatchStreamFunc or touching st.
+	var wg sync.WaitGroup
+	defer wg.Wait()
 	for {
 		s, err := conn.AcceptStream(ctx)
 		if err != nil {
@@ -365,7 +377,9 @@ func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store) {
 			_ = s.Close()
 			return
 		}
+		wg.Add(1)
 		go func(stream io.ReadWriteCloser) {
+			defer wg.Done()
 			defer func() {
 				<-sem
 				_ = stream.Close()

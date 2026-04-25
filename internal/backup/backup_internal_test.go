@@ -783,15 +783,12 @@ func TestServeConn_BoundsConcurrentDispatchers(t *testing.T) {
 	serveConnStreamCap = testCap
 	t.Cleanup(func() { serveConnStreamCap = prevCap })
 
-	// wg.Wait must register before the release-channel cleanup so LIFO
-	// closes release first, letting the held goroutines drain.
 	var wg sync.WaitGroup
 	t.Cleanup(wg.Wait)
 
 	started := make(chan struct{}, totalStreams)
 	release := make(chan struct{})
 	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
 
 	withDispatchStreamFunc(t, func(_ context.Context, _ io.ReadWriter, _ *store.Store, _ []byte) error {
 		started <- struct{}{}
@@ -815,8 +812,22 @@ func TestServeConn_BoundsConcurrentDispatchers(t *testing.T) {
 	t.Cleanup(func() { _ = listener.Close() })
 
 	serveCtx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = Serve(serveCtx, listener, nil) }()
+	serveDone := make(chan struct{})
+	go func() {
+		_ = Serve(serveCtx, listener, nil)
+		close(serveDone)
+	}()
+	// Registered after withDispatchStreamFunc so LIFO drains all
+	// dispatchers before the dispatchStreamFunc restore.
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
+		cancel()
+		select {
+		case <-serveDone:
+		case <-time.After(3 * time.Second):
+			t.Error("Serve did not return within 3s of cancel")
+		}
+	})
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(dialCancel)
@@ -1004,11 +1015,25 @@ func TestServeConn_SemaphoreAcquireCancelled(t *testing.T) {
 
 	cancel()
 
+	// The cancel-aware sem-acquire branch closes s2 server-side. From the
+	// client, that surfaces as Read returning before the deadline. If
+	// sem-acquire is not cancellation-aware, s2 stays open server-side and
+	// Read blocks until the deadline.
+	if err := s2.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("s2 SetReadDeadline: %v", err)
+	}
+	if _, err := s2.Read(make([]byte, 1)); err == nil {
+		t.Fatal("s2 Read returned nil err after cancel; sem-acquire not cancellation-aware")
+	} else if errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatal("s2 Read hit deadline; sem-acquire not cancellation-aware")
+	}
+
+	// Release the held dispatcher so serveConn's deferred wg.Wait can
+	// drain and Serve can return.
+	releaseOnce.Do(func() { close(blockForever) })
 	select {
 	case <-serveDone:
 	case <-time.After(3 * time.Second):
-		t.Fatal("Serve did not return after ctx cancel; semaphore acquire likely not cancellation-aware")
+		t.Fatal("Serve did not return after dispatcher released")
 	}
-
-	releaseOnce.Do(func() { close(blockForever) })
 }
