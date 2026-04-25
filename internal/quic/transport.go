@@ -17,6 +17,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"sync/atomic"
 	"time"
 
 	qgo "github.com/quic-go/quic-go"
@@ -54,24 +55,45 @@ var ErrPeerPubkeyMismatch = errors.New("peer Ed25519 public key mismatch")
 // or its public key is not an Ed25519 key.
 var ErrInvalidPeerCert = errors.New("peer TLS certificate not Ed25519")
 
-// Listener accepts inbound peer connections.
+// VerifyPeerFunc is called during the TLS handshake with the peer's verified
+// Ed25519 public key. A non-nil error aborts the handshake; use this to
+// enforce swarm-membership (reject unknown pubkeys at the transport boundary).
+// A nil VerifyPeerFunc means "accept any Ed25519 peer" — bootstrap mode, used
+// by `invite` before the joiner's pubkey is in peers.db.
+type VerifyPeerFunc func(pub ed25519.PublicKey) error
+
+// Listener accepts inbound peer connections. The membership predicate is
+// held behind an atomic so SetVerifyPeer can swap it race-free after bind
+// (used during invite→daemon handoff).
 type Listener struct {
-	inner *qgo.Listener
+	inner      *qgo.Listener
+	verifyPeer atomic.Pointer[VerifyPeerFunc]
 }
 
 // Listen starts a QUIC listener on addr (e.g. "127.0.0.1:0", ":7777"),
-// presenting a TLS certificate signed by priv.
-func Listen(addr string, priv ed25519.PrivateKey) (*Listener, error) {
+// presenting a TLS certificate signed by priv. verifyPeer, when non-nil,
+// gates every inbound handshake on the peer's Ed25519 pubkey — returning
+// an error rejects the connection at the TLS layer before any stream is
+// dispatched. nil = bootstrap mode (accept any Ed25519 peer).
+func Listen(addr string, priv ed25519.PrivateKey, verifyPeer VerifyPeerFunc) (*Listener, error) {
 	cert, err := newSelfSignedCert(priv)
 	if err != nil {
 		return nil, fmt.Errorf("build server cert: %w", err)
 	}
+	l := &Listener{}
+	l.SetVerifyPeer(verifyPeer)
 	tlsConf := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		ClientAuth:   tls.RequireAnyClientCert,
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			_, err := peerEd25519Pub(rawCerts)
-			return err
+			pub, err := peerEd25519Pub(rawCerts)
+			if err != nil {
+				return err
+			}
+			if fn := l.verifyPeer.Load(); fn != nil && *fn != nil {
+				return (*fn)(pub)
+			}
+			return nil
 		},
 		MinVersion: tls.VersionTLS13,
 		NextProtos: []string{NextProtocol},
@@ -80,7 +102,18 @@ func Listen(addr string, priv ed25519.PrivateKey) (*Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("quic listen %q: %w", addr, err)
 	}
-	return &Listener{inner: inner}, nil
+	l.inner = inner
+	return l, nil
+}
+
+// SetVerifyPeer swaps the membership predicate atomically. Used during
+// the invite→daemon handoff: the invite path binds with nil (bootstrap
+// mode), runs AcceptJoin, then flips the listener to a peers.db-backed
+// predicate before the daemon starts its Serve loop. Subsequent inbound
+// handshakes are gated by the new predicate; connections that completed
+// their TLS handshake before the swap are unaffected.
+func (l *Listener) SetVerifyPeer(fn VerifyPeerFunc) {
+	l.verifyPeer.Store(&fn)
 }
 
 // Addr returns the local address the listener is bound to.

@@ -57,7 +57,7 @@ func newTestRig(t *testing.T) *testRig {
 	}
 	_ = ownerPub
 
-	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv)
+	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -780,7 +780,7 @@ func TestRun_PeerErrorPropagation(t *testing.T) {
 		t.Fatalf("owner key: %v", err)
 	}
 
-	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv)
+	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}

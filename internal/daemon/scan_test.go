@@ -69,7 +69,7 @@ func newScanRig(t *testing.T) *scanRig {
 		t.Fatalf("owner key: %v", err)
 	}
 
-	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv)
+	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -344,7 +344,7 @@ func newPeerRig(t *testing.T) *peerRig {
 	if err != nil {
 		t.Fatalf("peer key: %v", err)
 	}
-	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv)
+	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -695,6 +695,13 @@ func TestRun_StorageOnly_NoBackupDir(t *testing.T) {
 	listenAddr := listener.LocalAddr().String()
 	_ = listener.Close()
 
+	// The daemon's listener now enforces peers.db membership at the TLS
+	// handshake (F-01 fix). Seed the owner's pubkey before the daemon
+	// opens the bbolt file so the dial is admitted; otherwise the test
+	// owner is rejected at handshake.
+	ownerPub, ownerPriv, _ := ed25519.GenerateKey(rand.Reader)
+	seedPeer(t, dataDir, "", ownerPub)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -715,8 +722,6 @@ func TestRun_StorageOnly_NoBackupDir(t *testing.T) {
 	}
 	daemonPub := ed25519.PublicKey(pubBytes)
 
-	// Dial the daemon and send one PutChunk stream manually.
-	_, ownerPriv, _ := ed25519.GenerateKey(rand.Reader)
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer dialCancel()
 	conn, err := bsquic.Dial(dialCtx, listenAddr, ownerPriv, daemonPub)
@@ -770,6 +775,74 @@ func TestRun_StorageOnly_NoBackupDir(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("storage-only daemon did not exit within 5s of cancel")
+	}
+}
+
+// TestRun_RejectsUnknownPeerAtHandshake closes F-01 from SECURITY_REVIEW_M1.md:
+// a stranger whose pubkey is not in peers.db cannot complete a connection
+// against the daemon's listener. Counterpart to TestRun_StorageOnly_NoBackupDir,
+// which proves a *known* peer is admitted; this proves an *unknown* peer
+// is rejected at the TLS handshake (no stream ever dispatches).
+func TestRun_RejectsUnknownPeerAtHandshake(t *testing.T) {
+	dataDir := t.TempDir()
+
+	// Bind to a known port so we can dial it.
+	probe, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("probe udp port: %v", err)
+	}
+	listenAddr := probe.LocalAddr().String()
+	_ = probe.Close()
+
+	// Seed peers.db with a *different* peer than the one we'll dial with;
+	// the daemon's membership check must reject our actual dialer.
+	knownPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	seedPeer(t, dataDir, "127.0.0.1:1", knownPub)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.Run(ctx, daemon.Options{
+			DataDir:    dataDir,
+			ListenAddr: listenAddr,
+			ChunkSize:  1 << 20,
+			Progress:   io.Discard,
+		})
+	}()
+	time.Sleep(200 * time.Millisecond)
+
+	pubBytes, err := os.ReadFile(filepath.Join(dataDir, "node.pub"))
+	if err != nil {
+		t.Fatalf("read node.pub: %v", err)
+	}
+	daemonPub := ed25519.PublicKey(pubBytes)
+
+	// Dial with a fresh keypair the daemon has never heard of.
+	_, strangerPriv, _ := ed25519.GenerateKey(rand.Reader)
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer dialCancel()
+	conn, err := bsquic.Dial(dialCtx, listenAddr, strangerPriv, daemonPub)
+	if err == nil {
+		// Server-side TLS rejection in TLS 1.3 surfaces on the first wire
+		// round-trip, not at Dial time. Force one and confirm it fails.
+		defer func() { _ = conn.Close() }()
+		s, sErr := conn.OpenStream(dialCtx)
+		if sErr == nil {
+			_, _ = s.Write([]byte("ping"))
+			_ = s.Close()
+			if _, rErr := io.Copy(io.Discard, s); rErr == nil {
+				t.Fatal("daemon accepted a stream from a stranger; F-01 not enforced")
+			}
+		}
+	}
+
+	// Confirm the daemon's chunks dir is still empty — the stranger never
+	// got a stream dispatched, so no PutChunk request landed.
+	chunksDir := filepath.Join(dataDir, "chunks")
+	entries, _ := os.ReadDir(chunksDir)
+	if hasShardDir(entries) {
+		t.Errorf("daemon persisted bytes from a rejected peer; F-01 not enforced")
 	}
 }
 

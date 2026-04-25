@@ -26,7 +26,7 @@ func newKeyPair(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 func TestListen_AssignsAddr(t *testing.T) {
 	t.Parallel()
 	_, priv := newKeyPair(t)
-	l, err := bsw.Listen("127.0.0.1:0", priv)
+	l, err := bsw.Listen("127.0.0.1:0", priv, nil)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestRoundTrip(t *testing.T) {
 	serverPub, serverPriv := newKeyPair(t)
 	clientPub, clientPriv := newKeyPair(t)
 
-	l, err := bsw.Listen("127.0.0.1:0", serverPriv)
+	l, err := bsw.Listen("127.0.0.1:0", serverPriv, nil)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestDial_RejectsWrongPeerPubkey(t *testing.T) {
 	_, clientPriv := newKeyPair(t)
 	wrongPub, _ := newKeyPair(t)
 
-	l, err := bsw.Listen("127.0.0.1:0", serverPriv)
+	l, err := bsw.Listen("127.0.0.1:0", serverPriv, nil)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestDial_RejectsWrongPeerPubkey(t *testing.T) {
 func TestListen_InvalidAddr(t *testing.T) {
 	t.Parallel()
 	_, priv := newKeyPair(t)
-	if _, err := bsw.Listen("not:a:valid:addr", priv); err == nil {
+	if _, err := bsw.Listen("not:a:valid:addr", priv, nil); err == nil {
 		t.Fatalf("expected error for invalid addr")
 	}
 }
@@ -191,5 +191,221 @@ func TestDial_ContextCancel(t *testing.T) {
 	cancel()
 	if _, err := bsw.Dial(ctx, "127.0.0.1:1", priv, pub); err == nil {
 		t.Fatalf("expected error from cancelled context")
+	}
+}
+
+// TestListen_NilVerifyPeerAdmitsAny covers the bootstrap mode where Listen
+// is given a nil predicate — the listener accepts any Ed25519 peer (used
+// during invite's AcceptJoin before the joiner's pubkey is in peers.db).
+func TestListen_NilVerifyPeerAdmitsAny(t *testing.T) {
+	t.Parallel()
+	serverPub, serverPriv := newKeyPair(t)
+	_, clientPriv := newKeyPair(t)
+
+	l, err := bsw.Listen("127.0.0.1:0", serverPriv, nil)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		c, err := l.Accept(ctx)
+		if err == nil {
+			// Hold the connection open so the client doesn't tear down
+			// before we've finished accepting; closes when the test exits.
+			t.Cleanup(func() { _ = c.Close() })
+		}
+		done <- err
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := bsw.Dial(ctx, l.Addr().String(), clientPriv, serverPub)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	if err := <-done; err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	_ = conn.Close()
+}
+
+// TestListen_VerifyPeerRejectsUnknown covers membership enforcement — a
+// client whose pubkey is rejected by the predicate cannot use the
+// connection. This is the F-01 fix: unknown peers' streams never reach
+// the server's dispatcher.
+//
+// In TLS 1.3 mTLS the client considers its own handshake complete after
+// sending its Finished message, so quic-go's Dial may return successfully
+// before the server has validated the client cert. The server-side
+// rejection surfaces on the first wire round-trip as a CRYPTO_ERROR; the
+// server-side Accept never returns the connection.
+//
+// We assert two invariants that together prove the rejection: (a) the
+// server never accepted the connection, and (b) any stream we tried to use
+// fails on a write/read round-trip.
+func TestListen_VerifyPeerRejectsUnknown(t *testing.T) {
+	t.Parallel()
+	serverPub, serverPriv := newKeyPair(t)
+	_, clientPriv := newKeyPair(t)
+	allowed, _ := newKeyPair(t)
+
+	verify := func(pub ed25519.PublicKey) error {
+		if !pub.Equal(allowed) {
+			return errors.New("not a known peer")
+		}
+		return nil
+	}
+
+	l, err := bsw.Listen("127.0.0.1:0", serverPriv, verify)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	// Server should never see an accepted connection from a rejected peer.
+	accepted := make(chan struct{}, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if c, err := l.Accept(ctx); err == nil {
+			_ = c.Close()
+			accepted <- struct{}{}
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, err := bsw.Dial(ctx, l.Addr().String(), clientPriv, serverPub)
+	if err == nil {
+		// Force a round-trip — opening + writing + reading exercises the
+		// closed connection state set by the server's TLS rejection.
+		defer func() { _ = conn.Close() }()
+		s, sErr := conn.OpenStream(ctx)
+		if sErr == nil {
+			_, _ = s.Write([]byte("ping"))
+			_ = s.Close()
+			if _, rErr := io.Copy(io.Discard, s); rErr == nil {
+				t.Fatalf("expected stream round-trip to fail when client pubkey is not in the predicate allowlist")
+			}
+		}
+	}
+
+	// Listener never saw the rejected peer as an accepted connection.
+	select {
+	case <-accepted:
+		t.Fatalf("server accepted a connection that should have failed VerifyPeer")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestListen_VerifyPeerAdmitsKnown covers the steady-state case — a client
+// whose pubkey passes the predicate handshakes successfully.
+func TestListen_VerifyPeerAdmitsKnown(t *testing.T) {
+	t.Parallel()
+	serverPub, serverPriv := newKeyPair(t)
+	clientPub, clientPriv := newKeyPair(t)
+
+	verify := func(pub ed25519.PublicKey) error {
+		if !pub.Equal(clientPub) {
+			return errors.New("not a known peer")
+		}
+		return nil
+	}
+
+	l, err := bsw.Listen("127.0.0.1:0", serverPriv, verify)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		c, err := l.Accept(ctx)
+		if err == nil {
+			t.Cleanup(func() { _ = c.Close() })
+		}
+		done <- err
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := bsw.Dial(ctx, l.Addr().String(), clientPriv, serverPub)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	if err := <-done; err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	_ = conn.Close()
+}
+
+// TestListener_SetVerifyPeer covers the invite→daemon handoff: the listener
+// is bound in bootstrap mode (nil predicate, accept any Ed25519) so AcceptJoin
+// works for a peer not yet in peers.db; after AcceptJoin, the caller flips
+// the predicate to a membership check before starting the steady-state serve
+// loop. Subsequent handshakes must use the new predicate.
+func TestListener_SetVerifyPeer(t *testing.T) {
+	t.Parallel()
+	serverPub, serverPriv := newKeyPair(t)
+	_, clientPriv := newKeyPair(t)
+
+	l, err := bsw.Listen("127.0.0.1:0", serverPriv, nil)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	// Drain accepts in a loop — the first dial succeeds, the second will
+	// fail at the TLS handshake so no further connection surfaces to Accept.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for {
+			c, err := l.Accept(ctx)
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+
+	// First dial: bootstrap mode (nil predicate) admits any Ed25519 client.
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel1()
+	conn1, err := bsw.Dial(ctx1, l.Addr().String(), clientPriv, serverPub)
+	if err != nil {
+		t.Fatalf("bootstrap dial: %v", err)
+	}
+	_ = conn1.Close()
+
+	// Swap in a predicate that rejects everything.
+	l.SetVerifyPeer(func(_ ed25519.PublicKey) error {
+		return errors.New("membership check: rejected")
+	})
+
+	// Second dial: the new predicate applies. As with TestListen_VerifyPeerRejectsUnknown,
+	// the server-side rejection surfaces on the first wire round-trip
+	// rather than at Dial time (TLS 1.3 timing).
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel2()
+	conn2, err := bsw.Dial(ctx2, l.Addr().String(), clientPriv, serverPub)
+	if err == nil {
+		defer func() { _ = conn2.Close() }()
+		s, sErr := conn2.OpenStream(ctx2)
+		if sErr == nil {
+			_, _ = s.Write([]byte("ping"))
+			_ = s.Close()
+			if _, rErr := io.Copy(io.Discard, s); rErr == nil {
+				t.Fatalf("expected stream round-trip to fail after SetVerifyPeer(reject-all)")
+			}
+		}
 	}
 }

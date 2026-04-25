@@ -8,6 +8,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -246,12 +247,28 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
+	// Membership-check predicate: an inbound handshake is only admitted
+	// if the peer's pubkey is already in peers.db.
+	verifyMember := func(pub ed25519.PublicKey) error {
+		if _, err := peerStore.Get(pub); err != nil {
+			return fmt.Errorf("unknown peer %x: %w", pub[:8], err)
+		}
+		return nil
+	}
+
 	listener := opts.Listener
 	if listener == nil {
-		listener, err = bsquic.Listen(opts.ListenAddr, id.PrivateKey)
+		listener, err = bsquic.Listen(opts.ListenAddr, id.PrivateKey, verifyMember)
 		if err != nil {
 			return fmt.Errorf("listen on %q: %w", opts.ListenAddr, err)
 		}
+	} else {
+		// Handed-off listener (from `invite --then-run`): it was bound
+		// in bootstrap mode (nil predicate) so AcceptJoin could admit
+		// the joiner before they existed in peers.db. Flip to the
+		// membership check now, before Serve starts, so steady-state
+		// handshakes enforce swarm membership.
+		listener.SetVerifyPeer(verifyMember)
 	}
 	defer func() { _ = listener.Close() }()
 

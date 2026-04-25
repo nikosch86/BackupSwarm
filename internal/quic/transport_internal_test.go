@@ -102,7 +102,7 @@ func TestListen_CertBuildFailure(t *testing.T) {
 	priv := newTestKey(t)
 	withRandReader(t, iotest.ErrReader(errors.New("forced rng failure")))
 
-	if _, err := Listen("127.0.0.1:0", priv); err == nil {
+	if _, err := Listen("127.0.0.1:0", priv, nil); err == nil {
 		t.Fatal("expected Listen to fail when cert build fails")
 	}
 }

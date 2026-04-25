@@ -43,7 +43,7 @@ func setupTwoSides(t *testing.T) *twoSides {
 	if err != nil {
 		t.Fatalf("join key: %v", err)
 	}
-	l, err := bsquic.Listen("127.0.0.1:0", introPriv)
+	l, err := bsquic.Listen("127.0.0.1:0", introPriv, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}

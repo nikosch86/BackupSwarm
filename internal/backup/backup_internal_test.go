@@ -487,7 +487,7 @@ func TestPrune_IndexDeleteError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = peerStore.Close() })
 
-	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv)
+	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
