@@ -31,14 +31,10 @@ var (
 	indexDeleteFunc = func(idx *index.Index, path string) error {
 		return idx.Delete(path)
 	}
-	// dispatchStreamFunc indirects the per-stream handler so a test can
-	// observe how many handlers run concurrently without having to drive
-	// a full protocol exchange.
+	// dispatchStreamFunc routes each accepted stream to a handler.
 	dispatchStreamFunc = dispatchStream
-	// serveConnStreamCap is the size of the per-connection goroutine
-	// semaphore — pinned to bsquic.MaxIncomingStreamsPerConn so the
-	// listener-side stream cap and the handler-side fan-out cap move
-	// together. Tests shrink it to drive cap-violation scenarios.
+	// serveConnStreamCap is the per-connection handler-goroutine cap,
+	// matched to bsquic.MaxIncomingStreamsPerConn.
 	serveConnStreamCap = int(bsquic.MaxIncomingStreamsPerConn)
 )
 
@@ -356,10 +352,7 @@ func Serve(ctx context.Context, l *bsquic.Listener, st *store.Store) error {
 func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store) {
 	defer func() { _ = conn.Close() }()
 	ownerKey := append([]byte(nil), conn.RemotePub()...)
-	// sem caps how many dispatchStream goroutines run concurrently for
-	// this connection. Sized to the listener-side stream cap so a
-	// well-behaved peer never blocks here; a misbehaving peer that opens
-	// streams faster than handlers complete sees backpressure on Accept.
+	// sem bounds concurrent dispatcher goroutines per connection.
 	sem := make(chan struct{}, serveConnStreamCap)
 	for {
 		s, err := conn.AcceptStream(ctx)
