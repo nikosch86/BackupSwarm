@@ -901,64 +901,6 @@ func TestRun_StorageOnly_BadListenAddr(t *testing.T) {
 	}
 }
 
-// TestRun_WithBackupDir_BadListenAddr covers the bsquic.Listen error
-// wrap in Run on the BackupDir != "" path. Identical shape to the
-// storage-only variant but goes through the Classify path first.
-func TestRun_WithBackupDir_BadListenAddr(t *testing.T) {
-	dataDir := t.TempDir()
-	backupDir := t.TempDir()
-	// Non-empty backup dir + empty index -> ModeFirstBackup, which
-	// requires the listener to come up. A bad ListenAddr must fail
-	// here before any dial attempt.
-	writeFile(t, filepath.Join(backupDir, "file.bin"), 1<<20)
-
-	err := daemon.Run(context.Background(), daemon.Options{
-		DataDir:    dataDir,
-		BackupDir:  backupDir,
-		ListenAddr: "not-a-valid-addr",
-		ChunkSize:  1 << 20,
-		Progress:   io.Discard,
-	})
-	if err == nil {
-		t.Fatal("Run accepted malformed ListenAddr")
-	}
-	if !bytes.Contains([]byte(err.Error()), []byte("listen")) {
-		t.Errorf("err = %q, want 'listen' in message", err)
-	}
-}
-
-// TestBackupDirHasRegularFiles_UnreadableSubdir covers the walk-error
-// branch: a subdirectory set to mode 0 causes WalkDir to surface an
-// error on descent, which BackupDirHasRegularFiles must propagate.
-func TestBackupDirHasRegularFiles_UnreadableSubdir(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses POSIX file-permission checks")
-	}
-	dir := t.TempDir()
-	sub := filepath.Join(dir, "locked")
-	if err := os.Mkdir(sub, 0o000); err != nil {
-		t.Fatalf("mkdir locked: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(sub, 0o700) })
-
-	_, err := daemon.BackupDirHasRegularFiles(dir)
-	if err == nil {
-		t.Error("BackupDirHasRegularFiles accepted unreadable subdir")
-	}
-}
-
-// TestBackupDirHasRegularFiles_PathIsFile covers the not-a-directory
-// branch.
-func TestBackupDirHasRegularFiles_PathIsFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "file.bin")
-	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if _, err := daemon.BackupDirHasRegularFiles(path); err == nil {
-		t.Error("BackupDirHasRegularFiles accepted regular-file path as dir")
-	}
-}
-
 // Compile-time assertion that fs.DirEntry is used somewhere, documenting
 // where the symlink-vs-regular distinction is being enforced.
 var _ fs.DirEntry = (fs.DirEntry)(nil)

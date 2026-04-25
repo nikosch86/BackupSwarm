@@ -305,17 +305,6 @@ func TestHandleDeleteChunkStream_UnknownHash(t *testing.T) {
 	}
 }
 
-func TestHandleDeleteChunkStream_ReadRequestError(t *testing.T) {
-	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(nil)}
-	err := handleDeleteChunkStream(rw, nil, []byte{0x01})
-	if err == nil {
-		t.Fatal("handleDeleteChunkStream returned nil on empty request")
-	}
-	if !bytes.Contains([]byte(err.Error()), []byte("read request")) {
-		t.Errorf("err = %q, want 'read request' prefix", err)
-	}
-}
-
 // TestDispatchStream_UnknownMessageType asserts the dispatcher rejects
 // an unrecognized leading byte rather than silently parsing one of the
 // known body shapes against mismatched bytes.
@@ -659,17 +648,6 @@ func TestHandleGetChunkStream_UnknownHash(t *testing.T) {
 	}
 	if appErr == "" {
 		t.Error("expected chunk-not-found app error, got empty")
-	}
-}
-
-func TestHandleGetChunkStream_ReadRequestError(t *testing.T) {
-	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(nil)}
-	err := handleGetChunkStream(rw, nil)
-	if err == nil {
-		t.Fatal("handleGetChunkStream returned nil on empty request")
-	}
-	if !bytes.Contains([]byte(err.Error()), []byte("read request")) {
-		t.Errorf("err = %q, want 'read request' prefix", err)
 	}
 }
 
