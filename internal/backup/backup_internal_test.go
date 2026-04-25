@@ -565,7 +565,7 @@ func getErrFrame(t *testing.T, msg string) []byte {
 	return buf.Bytes()
 }
 
-// TestHandleGetChunkStream_Success asserts a stored blob is returned over a GetChunk stream with an empty appErr.
+// TestHandleGetChunkStream_Success asserts the recorded owner can read its blob over a GetChunk stream with an empty appErr.
 func TestHandleGetChunkStream_Success(t *testing.T) {
 	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
 	if err != nil {
@@ -574,9 +574,10 @@ func TestHandleGetChunkStream_Success(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	blob := []byte("ciphertext blob")
-	hash, err := st.Put(blob)
+	owner := []byte("alice")
+	hash, err := st.PutOwned(blob, owner)
 	if err != nil {
-		t.Fatalf("Put: %v", err)
+		t.Fatalf("PutOwned: %v", err)
 	}
 
 	var reqBuf bytes.Buffer
@@ -584,7 +585,7 @@ func TestHandleGetChunkStream_Success(t *testing.T) {
 		t.Fatalf("WriteGetChunkRequest: %v", err)
 	}
 	rw := &fakeStream{writeErrAt: -1, rd: &reqBuf}
-	if err := handleGetChunkStream(context.Background(), rw, st); err != nil {
+	if err := handleGetChunkStream(context.Background(), rw, st, owner); err != nil {
 		t.Fatalf("handleGetChunkStream: %v", err)
 	}
 	got, appErr, err := protocol.ReadGetChunkResponse(&rw.wbuf, 1<<20)
@@ -613,7 +614,7 @@ func TestHandleGetChunkStream_UnknownHash(t *testing.T) {
 		t.Fatalf("WriteGetChunkRequest: %v", err)
 	}
 	rw := &fakeStream{writeErrAt: -1, rd: &reqBuf}
-	if err := handleGetChunkStream(context.Background(), rw, st); err != nil {
+	if err := handleGetChunkStream(context.Background(), rw, st, []byte("alice")); err != nil {
 		t.Fatalf("handleGetChunkStream: %v", err)
 	}
 	_, appErr, err := protocol.ReadGetChunkResponse(&rw.wbuf, 1<<20)
@@ -628,9 +629,81 @@ func TestHandleGetChunkStream_UnknownHash(t *testing.T) {
 	}
 }
 
+// TestHandleGetChunkStream_WrongOwner asserts a non-owner request surfaces
+// as the "owner_mismatch" short code without leaking a path or hex hash.
+func TestHandleGetChunkStream_WrongOwner(t *testing.T) {
+	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	blob := []byte("alice's ciphertext")
+	hash, err := st.PutOwned(blob, []byte("alice"))
+	if err != nil {
+		t.Fatalf("PutOwned: %v", err)
+	}
+
+	var reqBuf bytes.Buffer
+	if err := protocol.WriteGetChunkRequest(&reqBuf, hash); err != nil {
+		t.Fatalf("WriteGetChunkRequest: %v", err)
+	}
+	rw := &fakeStream{writeErrAt: -1, rd: &reqBuf}
+	if err := handleGetChunkStream(context.Background(), rw, st, []byte("bob")); err != nil {
+		t.Fatalf("handleGetChunkStream: %v", err)
+	}
+	got, appErr, err := protocol.ReadGetChunkResponse(&rw.wbuf, 1<<20)
+	if err != nil {
+		t.Fatalf("ReadGetChunkResponse: %v", err)
+	}
+	if appErr != "owner_mismatch" {
+		t.Errorf("appErr = %q, want %q", appErr, "owner_mismatch")
+	}
+	if len(got) != 0 {
+		t.Errorf("blob payload non-empty on owner_mismatch: %q", got)
+	}
+	hexHash := fmt.Sprintf("%x", hash)
+	if bytes.Contains(rw.wbuf.Bytes(), []byte(hexHash)) {
+		t.Errorf("response frame contains chunk hex; leak: %q", rw.wbuf.String())
+	}
+}
+
+// TestHandleGetChunkStream_UnownedBlob asserts a blob written via plain
+// Put (no owner row) is unreadable to any caller — surfaces as
+// "owner_mismatch", not as a successful blob fetch.
+func TestHandleGetChunkStream_UnownedBlob(t *testing.T) {
+	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	blob := []byte("ownerless ciphertext")
+	hash, err := st.Put(blob)
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	var reqBuf bytes.Buffer
+	if err := protocol.WriteGetChunkRequest(&reqBuf, hash); err != nil {
+		t.Fatalf("WriteGetChunkRequest: %v", err)
+	}
+	rw := &fakeStream{writeErrAt: -1, rd: &reqBuf}
+	if err := handleGetChunkStream(context.Background(), rw, st, []byte("anyone")); err != nil {
+		t.Fatalf("handleGetChunkStream: %v", err)
+	}
+	_, appErr, err := protocol.ReadGetChunkResponse(&rw.wbuf, 1<<20)
+	if err != nil {
+		t.Fatalf("ReadGetChunkResponse: %v", err)
+	}
+	if appErr != "owner_mismatch" {
+		t.Errorf("appErr = %q, want %q", appErr, "owner_mismatch")
+	}
+}
+
 func TestHandleGetChunkStream_ReadRequestError(t *testing.T) {
 	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(nil)}
-	err := handleGetChunkStream(context.Background(), rw, nil)
+	err := handleGetChunkStream(context.Background(), rw, nil, nil)
 	if err == nil {
 		t.Fatal("handleGetChunkStream returned nil on empty request")
 	}
@@ -639,7 +712,7 @@ func TestHandleGetChunkStream_ReadRequestError(t *testing.T) {
 	}
 }
 
-// TestDispatchStream_RoutesGetChunk asserts the get-chunk path reaches handleGetChunkStream through the dispatcher.
+// TestDispatchStream_RoutesGetChunk asserts the get-chunk path reaches handleGetChunkStream through the dispatcher with the connection's owner key threaded through.
 func TestDispatchStream_RoutesGetChunk(t *testing.T) {
 	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
 	if err != nil {
@@ -647,10 +720,11 @@ func TestDispatchStream_RoutesGetChunk(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
+	owner := []byte("alice")
 	blob := []byte("bytes for get")
-	hash, err := st.Put(blob)
+	hash, err := st.PutOwned(blob, owner)
 	if err != nil {
-		t.Fatalf("Put: %v", err)
+		t.Fatalf("PutOwned: %v", err)
 	}
 
 	var reqBuf bytes.Buffer
@@ -661,7 +735,7 @@ func TestDispatchStream_RoutesGetChunk(t *testing.T) {
 		t.Fatalf("WriteGetChunkRequest: %v", err)
 	}
 	rw := &fakeStream{writeErrAt: -1, rd: &reqBuf}
-	if err := dispatchStream(context.Background(), rw, st, []byte("anyone")); err != nil {
+	if err := dispatchStream(context.Background(), rw, st, owner); err != nil {
 		t.Fatalf("dispatchStream: %v", err)
 	}
 	got, appErr, err := protocol.ReadGetChunkResponse(&rw.wbuf, 1<<20)
@@ -1201,7 +1275,7 @@ func TestHandleDeleteChunkStream_InternalErrorReturnsCode(t *testing.T) {
 }
 
 // TestHandleGetChunkStream_InternalErrorReturnsCode chmods the shard dir
-// 0o000 after Put so os.Open fails with EACCES (not ErrNotExist). Wire
+// 0o000 after PutOwned so os.Open fails with EACCES (not ErrNotExist). Wire
 // must be "internal" without the path or hex hash.
 func TestHandleGetChunkStream_InternalErrorReturnsCode(t *testing.T) {
 	if os.Geteuid() == 0 {
@@ -1214,10 +1288,11 @@ func TestHandleGetChunkStream_InternalErrorReturnsCode(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
+	owner := []byte("alice")
 	blob := []byte("ciphertext")
-	hash, err := st.Put(blob)
+	hash, err := st.PutOwned(blob, owner)
 	if err != nil {
-		t.Fatalf("Put: %v", err)
+		t.Fatalf("PutOwned: %v", err)
 	}
 	hexHash := fmt.Sprintf("%x", hash)
 	shardDir := filepath.Join(chunksDir, hexHash[:2])
@@ -1231,7 +1306,7 @@ func TestHandleGetChunkStream_InternalErrorReturnsCode(t *testing.T) {
 		t.Fatalf("WriteGetChunkRequest: %v", err)
 	}
 	rw := &fakeStream{writeErrAt: -1, rd: &reqBuf}
-	if err := handleGetChunkStream(context.Background(), rw, st); err != nil {
+	if err := handleGetChunkStream(context.Background(), rw, st, owner); err != nil {
 		t.Fatalf("handleGetChunkStream: %v", err)
 	}
 	_, appErr, err := protocol.ReadGetChunkResponse(&rw.wbuf, 1<<20)

@@ -405,7 +405,7 @@ func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owne
 	case protocol.MsgDeleteChunk:
 		return handleDeleteChunkStream(ctx, rw, st, ownerKey)
 	case protocol.MsgGetChunk:
-		return handleGetChunkStream(ctx, rw, st)
+		return handleGetChunkStream(ctx, rw, st, ownerKey)
 	default:
 		return fmt.Errorf("unknown message type %d", msgType)
 	}
@@ -457,15 +457,15 @@ func handleDeleteChunkStream(ctx context.Context, rw io.ReadWriter, st *store.St
 	return protocol.WriteDeleteChunkResponse(rw, "")
 }
 
-// handleGetChunkStream returns the blob for hash to any authenticated peer.
-// Store errors map to a short code on the wire; the rich error is logged
-// via slog.WarnContext.
-func handleGetChunkStream(ctx context.Context, rw io.ReadWriter, st *store.Store) error {
+// handleGetChunkStream authorizes the get against owner (the TLS-
+// authenticated pubkey) and writes the response. Store errors map to a
+// short code on the wire; the rich error is logged via slog.WarnContext.
+func handleGetChunkStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owner []byte) error {
 	hash, err := protocol.ReadGetChunkRequest(rw)
 	if err != nil {
 		return fmt.Errorf("read request: %w", err)
 	}
-	blob, getErr := st.Get(hash)
+	blob, getErr := st.GetForOwner(hash, owner)
 	if getErr != nil {
 		code := errCode(getErr)
 		slog.WarnContext(ctx, "get chunk failed", "code", code, "err", getErr)

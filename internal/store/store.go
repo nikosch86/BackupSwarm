@@ -231,6 +231,34 @@ func (s *Store) Owner(hash [sha256.Size]byte) ([]byte, error) {
 	return out, nil
 }
 
+// GetForOwner returns the blob bytes only if the recorded owner matches.
+// Returns ErrChunkNotFound (no blob) or ErrOwnerMismatch (owner check
+// failed, including unowned blobs). On error, no bytes are returned.
+func (s *Store) GetForOwner(hash [sha256.Size]byte, owner []byte) ([]byte, error) {
+	ok, err := s.Has(hash)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("%w: %x", ErrChunkNotFound, hash)
+	}
+	db, err := s.ensureOwnersDB()
+	if err != nil {
+		return nil, err
+	}
+	if err := db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(ownersBucket))
+		v := b.Get(hash[:])
+		if v == nil || !bytes.Equal(v, owner) {
+			return fmt.Errorf("%w: %x", ErrOwnerMismatch, hash)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return s.Get(hash)
+}
+
 // DeleteForOwner removes the blob only if the recorded owner matches.
 // Returns ErrChunkNotFound (no blob) or ErrOwnerMismatch (owner check
 // failed, including unowned blobs). On error, disk state is untouched.

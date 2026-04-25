@@ -30,6 +30,7 @@ type restoreRig struct {
 	recipientPub  *[32]byte
 	recipientPriv *[32]byte
 	peerPubKey    ed25519.PublicKey
+	ownerPubKey   ed25519.PublicKey
 }
 
 func newRestoreRig(t *testing.T) *restoreRig {
@@ -48,7 +49,7 @@ func newRestoreRig(t *testing.T) *restoreRig {
 	if err != nil {
 		t.Fatalf("peer key: %v", err)
 	}
-	_, ownerPriv, err := ed25519.GenerateKey(rand.Reader)
+	ownerPub, ownerPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("owner key: %v", err)
 	}
@@ -88,6 +89,7 @@ func newRestoreRig(t *testing.T) *restoreRig {
 		recipientPub:  recipientPub,
 		recipientPriv: recipientPriv,
 		peerPubKey:    peerPub,
+		ownerPubKey:   ownerPub,
 	}
 }
 
@@ -408,7 +410,7 @@ func TestRun_UnmarshalError(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	garbage := []byte{0xff, 0x00, 0xff}
-	newHash, err := rig.peerStore.Put(garbage)
+	newHash, err := rig.peerStore.PutOwned(garbage, rig.ownerPubKey)
 	if err != nil {
 		t.Fatalf("seed garbage: %v", err)
 	}

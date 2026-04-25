@@ -186,6 +186,69 @@ func TestDeleteForOwner_UnownedBlob_ReturnsErrOwnerMismatch(t *testing.T) {
 	}
 }
 
+func TestGetForOwner_MatchingOwner_ReturnsBlob(t *testing.T) {
+	s := newStore(t)
+	data := []byte("alice's blob")
+	owner := []byte("alice")
+	h, err := s.PutOwned(data, owner)
+	if err != nil {
+		t.Fatalf("PutOwned: %v", err)
+	}
+	got, err := s.GetForOwner(h, owner)
+	if err != nil {
+		t.Fatalf("GetForOwner: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Errorf("GetForOwner bytes differ from PutOwned input")
+	}
+}
+
+func TestGetForOwner_WrongOwner_RejectsAsOwnerMismatch(t *testing.T) {
+	s := newStore(t)
+	data := []byte("alice's blob")
+	ownerA := []byte("alice")
+	ownerB := []byte("bob")
+	h, err := s.PutOwned(data, ownerA)
+	if err != nil {
+		t.Fatalf("PutOwned: %v", err)
+	}
+	_, err = s.GetForOwner(h, ownerB)
+	if err == nil {
+		t.Fatal("GetForOwner with wrong owner returned nil")
+	}
+	if !errors.Is(err, store.ErrOwnerMismatch) {
+		t.Errorf("err = %v, want wraps ErrOwnerMismatch", err)
+	}
+}
+
+func TestGetForOwner_UnknownHash_ReturnsErrChunkNotFound(t *testing.T) {
+	s := newStore(t)
+	var h [sha256.Size]byte
+	_, err := s.GetForOwner(h, []byte("anyone"))
+	if err == nil {
+		t.Fatal("GetForOwner on unknown hash returned nil")
+	}
+	if !errors.Is(err, store.ErrChunkNotFound) {
+		t.Errorf("err = %v, want wraps ErrChunkNotFound", err)
+	}
+}
+
+func TestGetForOwner_UnownedBlob_ReturnsErrOwnerMismatch(t *testing.T) {
+	s := newStore(t)
+	data := []byte("ownerless")
+	h, err := s.Put(data)
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	_, err = s.GetForOwner(h, []byte("anyone"))
+	if err == nil {
+		t.Fatal("GetForOwner on un-owned blob returned nil")
+	}
+	if !errors.Is(err, store.ErrOwnerMismatch) {
+		t.Errorf("err = %v, want wraps ErrOwnerMismatch", err)
+	}
+}
+
 func TestPutOwned_OrphanedBlob_RejectsAsOwnerMismatch(t *testing.T) {
 	s := newStore(t)
 	data := []byte("orphaned content")

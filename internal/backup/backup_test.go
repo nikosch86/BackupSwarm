@@ -32,7 +32,8 @@ type testRig struct {
 	serveErr     chan error
 	recipientPub *[32]byte
 
-	peerPubKey ed25519.PublicKey
+	peerPubKey  ed25519.PublicKey
+	ownerPubKey ed25519.PublicKey
 }
 
 func newTestRig(t *testing.T) *testRig {
@@ -54,7 +55,6 @@ func newTestRig(t *testing.T) *testRig {
 	if err != nil {
 		t.Fatalf("owner key: %v", err)
 	}
-	_ = ownerPub
 
 	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil)
 	if err != nil {
@@ -96,6 +96,7 @@ func newTestRig(t *testing.T) *testRig {
 		serveErr:     serveErr,
 		recipientPub: recipientPub,
 		peerPubKey:   peerPub,
+		ownerPubKey:  ownerPub,
 	}
 }
 
@@ -816,9 +817,9 @@ var _ = errors.Is
 func TestSendGetChunk_RoundTrip(t *testing.T) {
 	rig := newTestRig(t)
 	blob := []byte("peer-stored ciphertext bytes")
-	hash, err := rig.peerStore.Put(blob)
+	hash, err := rig.peerStore.PutOwned(blob, rig.ownerPubKey)
 	if err != nil {
-		t.Fatalf("peerStore.Put: %v", err)
+		t.Fatalf("peerStore.PutOwned: %v", err)
 	}
 
 	got, err := backup.SendGetChunk(context.Background(), rig.ownerConn, hash)
@@ -827,6 +828,27 @@ func TestSendGetChunk_RoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(got, blob) {
 		t.Errorf("blob mismatch: got %q, want %q", got, blob)
+	}
+}
+
+// TestSendGetChunk_ForeignPeer_OwnerMismatch asserts a peer that did not
+// upload the blob cannot read it back: the GetChunk handler refuses with
+// the "owner_mismatch" short code.
+func TestSendGetChunk_ForeignPeer_OwnerMismatch(t *testing.T) {
+	rig := newTestRig(t)
+	blob := []byte("alice's ciphertext")
+	stranger := ed25519.PublicKey(bytes.Repeat([]byte{0xAB}, ed25519.PublicKeySize))
+	hash, err := rig.peerStore.PutOwned(blob, stranger)
+	if err != nil {
+		t.Fatalf("peerStore.PutOwned: %v", err)
+	}
+
+	_, err = backup.SendGetChunk(context.Background(), rig.ownerConn, hash)
+	if err == nil {
+		t.Fatal("SendGetChunk by non-owner returned nil; expected owner_mismatch")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("owner_mismatch")) {
+		t.Errorf("err = %q, want 'owner_mismatch'", err)
 	}
 }
 
