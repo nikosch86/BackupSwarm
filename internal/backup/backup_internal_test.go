@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -751,4 +752,227 @@ func TestSendGetChunk_ReadResponseError(t *testing.T) {
 	if !bytes.Contains([]byte(err.Error()), []byte("read response")) {
 		t.Errorf("err = %q, want 'read response' prefix", err)
 	}
+}
+
+// withDispatchStreamFunc swaps dispatchStreamFunc for the duration of a test.
+func withDispatchStreamFunc(t *testing.T, fn func(context.Context, io.ReadWriter, *store.Store, []byte) error) {
+	t.Helper()
+	prev := dispatchStreamFunc
+	dispatchStreamFunc = fn
+	t.Cleanup(func() { dispatchStreamFunc = prev })
+}
+
+// TestServeConnStreamCap_MatchesQUICConfig pins the per-conn goroutine
+// semaphore size to the listener-side stream cap. If the two ever drift
+// apart (e.g. a future change raises one without the other) F-07's
+// guarantee weakens silently — the listener admits more streams than the
+// semaphore lets through, or vice versa.
+func TestServeConnStreamCap_MatchesQUICConfig(t *testing.T) {
+	if int64(serveConnStreamCap) != bsquic.MaxIncomingStreamsPerConn {
+		t.Errorf("serveConnStreamCap = %d, want %d (must match QUIC MaxIncomingStreamsPerConn)",
+			serveConnStreamCap, bsquic.MaxIncomingStreamsPerConn)
+	}
+}
+
+// TestServeConn_BoundsConcurrentDispatchers proves the per-conn semaphore
+// applies backpressure: a single peer cannot induce more than
+// serveConnStreamCap concurrent dispatchStream goroutines, even when it
+// opens streams faster than the handler completes. Closes F-07.
+//
+// Strategy: shrink the cap to 2, swap dispatchStreamFunc for a stub that
+// signals on entry and blocks on `release`, dial as a peer, and open more
+// streams than the cap. After at least `cap` "started" signals arrive we
+// wait a settle window and assert no extras leak through. Without the
+// semaphore, all 6 stub handlers would fire `started` immediately.
+func TestServeConn_BoundsConcurrentDispatchers(t *testing.T) {
+	const testCap = 2
+	const totalStreams = 6
+	const settleWindow = 200 * time.Millisecond
+
+	prevCap := serveConnStreamCap
+	serveConnStreamCap = testCap
+	t.Cleanup(func() { serveConnStreamCap = prevCap })
+
+	// Register wg cleanup first so it runs LAST in cleanup LIFO — after
+	// releaseOnce closes the release channel, so the held goroutines can
+	// drain. Without this ordering an early t.Fatalf deadlocks the test.
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+
+	started := make(chan struct{}, totalStreams)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+	withDispatchStreamFunc(t, func(_ context.Context, _ io.ReadWriter, _ *store.Store, _ []byte) error {
+		started <- struct{}{}
+		<-release
+		return nil
+	})
+
+	serverPub, serverPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("server key: %v", err)
+	}
+	_, clientPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("client key: %v", err)
+	}
+
+	listener, err := bsquic.Listen("127.0.0.1:0", serverPriv, nil)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	serveCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = Serve(serveCtx, listener, nil) }()
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(dialCancel)
+	conn, err := bsquic.Dial(dialCtx, listener.Addr().String(), clientPriv, serverPub)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	for i := 0; i < totalStreams; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s, err := conn.OpenStream(dialCtx)
+			if err != nil {
+				return
+			}
+			// A write triggers the STREAM frame so the server's
+			// AcceptStream returns; without it, OpenStream alone may
+			// not surface the stream to the peer.
+			_, _ = s.Write([]byte{0xff})
+			_ = s.Close()
+			_, _ = io.Copy(io.Discard, s)
+		}()
+	}
+
+	// Wait until `cap` handlers have entered the stub.
+	for i := 0; i < testCap; i++ {
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("only %d/%d handlers started within 3s", i, testCap)
+		}
+	}
+
+	// Settle window: any additional starts here mean the cap leaked.
+	settle := time.NewTimer(settleWindow)
+	defer settle.Stop()
+	extra := 0
+loop:
+	for {
+		select {
+		case <-started:
+			extra++
+		case <-settle.C:
+			break loop
+		}
+	}
+	if extra > 0 {
+		t.Errorf("%d extra handlers started past cap=%d", extra, testCap)
+	}
+
+	// Release the held handlers so the remaining streams can drain.
+	releaseOnce.Do(func() { close(release) })
+}
+
+// TestServeConn_SemaphoreAcquireCancelled covers the ctx-Done branch of the
+// per-conn semaphore acquire: when the cap is full and the serve context is
+// cancelled mid-acquire, serveConn closes the pending stream and exits
+// rather than parking until the slow handler frees a slot.
+func TestServeConn_SemaphoreAcquireCancelled(t *testing.T) {
+	prev := serveConnStreamCap
+	serveConnStreamCap = 1
+	t.Cleanup(func() { serveConnStreamCap = prev })
+
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+
+	stubEntered := make(chan struct{}, 1)
+	blockForever := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(blockForever) }) })
+
+	withDispatchStreamFunc(t, func(_ context.Context, _ io.ReadWriter, _ *store.Store, _ []byte) error {
+		stubEntered <- struct{}{}
+		<-blockForever
+		return nil
+	})
+
+	serverPub, serverPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("server key: %v", err)
+	}
+	_, clientPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("client key: %v", err)
+	}
+
+	listener, err := bsquic.Listen("127.0.0.1:0", serverPriv, nil)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	serveCtx, cancel := context.WithCancel(context.Background())
+	serveDone := make(chan struct{})
+	go func() {
+		_ = Serve(serveCtx, listener, nil)
+		close(serveDone)
+	}()
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(dialCancel)
+	conn, err := bsquic.Dial(dialCtx, listener.Addr().String(), clientPriv, serverPub)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// Stream 1: occupies the only semaphore slot.
+	s1, err := conn.OpenStream(dialCtx)
+	if err != nil {
+		t.Fatalf("OpenStream s1: %v", err)
+	}
+	if _, err := s1.Write([]byte{0xff}); err != nil {
+		t.Fatalf("Write s1: %v", err)
+	}
+	select {
+	case <-stubEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stub never entered for stream 1")
+	}
+
+	// Stream 2: serveConn AcceptStream will return it, then the loop
+	// blocks on sem<-{} because the cap (1) is exhausted.
+	s2, err := conn.OpenStream(dialCtx)
+	if err != nil {
+		t.Fatalf("OpenStream s2: %v", err)
+	}
+	if _, err := s2.Write([]byte{0xff}); err != nil {
+		t.Fatalf("Write s2: %v", err)
+	}
+
+	// Give the serve loop time to AcceptStream s2 and park in the select.
+	time.Sleep(150 * time.Millisecond)
+
+	// Cancelling the serve context now forces the select's ctx-Done path
+	// to fire — the pending stream closes and serveConn returns.
+	cancel()
+
+	select {
+	case <-serveDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not return after ctx cancel; semaphore acquire likely not cancellation-aware")
+	}
+
+	releaseOnce.Do(func() { close(blockForever) })
 }

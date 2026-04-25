@@ -38,12 +38,28 @@ const NextProtocol = "bsw/1"
 // so a single lost PING doesn't cascade into a close.
 const defaultKeepAlivePeriod = 10 * time.Second
 
+// MaxIncomingStreamsPerConn caps how many concurrent bidirectional streams
+// a single peer may open against this listener. Closes F-07: without this,
+// a malicious or buggy peer could open streams unbounded and force a
+// goroutine-per-stream fan-out on the server. The serveConn goroutine
+// semaphore is sized to the same value so the two limits move together.
+const MaxIncomingStreamsPerConn int64 = 32
+
+// disallowUniStreams is the quic-go encoding for "no unidirectional streams".
+// quic-go reads MaxIncomingUniStreams = 0 as "use the default of 100"; any
+// negative value disables the channel entirely. The protocol uses only
+// bidirectional streams, so leaving uni streams open would bypass the
+// MaxIncomingStreams cap and reopen the F-07 fan-out surface.
+const disallowUniStreams int64 = -1
+
 // newQUICConfig returns the quic-go Config used by both Listen and
 // Dial. Factored out so white-box tests can assert the invariants
-// (keep-alive enabled, etc.) on a single source of truth.
+// (keep-alive enabled, stream caps, etc.) on a single source of truth.
 func newQUICConfig() *qgo.Config {
 	return &qgo.Config{
-		KeepAlivePeriod: defaultKeepAlivePeriod,
+		KeepAlivePeriod:       defaultKeepAlivePeriod,
+		MaxIncomingStreams:    MaxIncomingStreamsPerConn,
+		MaxIncomingUniStreams: disallowUniStreams,
 	}
 }
 

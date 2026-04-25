@@ -30,6 +30,28 @@ func TestDefaultQUICConfig_EnablesKeepAlive(t *testing.T) {
 	}
 }
 
+// TestDefaultQUICConfig_CapsIncomingStreams pins F-07's bidirectional-stream
+// ceiling. 32 is the agreed cap; if a future config tweak raises this value,
+// the per-conn goroutine semaphore must be raised in lock-step.
+func TestDefaultQUICConfig_CapsIncomingStreams(t *testing.T) {
+	cfg := newQUICConfig()
+	if cfg.MaxIncomingStreams != MaxIncomingStreamsPerConn {
+		t.Errorf("MaxIncomingStreams = %d, want %d (F-07 cap)", cfg.MaxIncomingStreams, MaxIncomingStreamsPerConn)
+	}
+}
+
+// TestDefaultQUICConfig_DisallowsUniStreams pins the "no unidirectional
+// streams" invariant. The protocol only uses bidirectional streams; allowing
+// uni streams would bypass MaxIncomingStreams and reopen the F-07 fan-out
+// surface. quic-go encodes "no streams allowed" as a negative value (0
+// silently means "default 100"); any non-negative value here is a bug.
+func TestDefaultQUICConfig_DisallowsUniStreams(t *testing.T) {
+	cfg := newQUICConfig()
+	if cfg.MaxIncomingUniStreams >= 0 {
+		t.Errorf("MaxIncomingUniStreams = %d, want negative to disallow uni streams (0 means default-100 in quic-go)", cfg.MaxIncomingUniStreams)
+	}
+}
+
 func newTestKey(t *testing.T) ed25519.PrivateKey {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
