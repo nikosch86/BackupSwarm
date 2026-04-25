@@ -21,9 +21,7 @@ import (
 	"backupswarm/internal/store"
 )
 
-// restoreRig brings up a peer (listener + chunk store) plus an owner
-// conn/index/recipient-key pair, and offers a backup helper so tests can
-// seed chunks on the peer the same way a real daemon would.
+// restoreRig bundles a peer listener+store with an owner conn, index, and recipient keys, plus a helper to seed chunks.
 type restoreRig struct {
 	t             *testing.T
 	peerStore     *store.Store
@@ -114,12 +112,7 @@ func (r *restoreRig) backupFile(path string, data []byte) {
 	}
 }
 
-// TestRun_PreservesModTime asserts restored files get their original
-// mtime from the index entry (not the current wall clock). This matters
-// for daemon.Run: after a ModeRestore pass, the scan loop must
-// incremental-skip the just-restored files rather than treating them as
-// new-and-needs-re-upload. If mtime weren't preserved, the restore
-// would orphan blobs on the peer every time.
+// TestRun_PreservesModTime asserts restored files carry the mtime recorded in the index entry.
 func TestRun_PreservesModTime(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
@@ -220,10 +213,7 @@ func TestRun_RestoresDirectoryTree(t *testing.T) {
 	}
 }
 
-// TestRun_RestoreVerifiesPlaintextHash asserts that if the recorded
-// plaintext hash doesn't match the post-decrypt bytes, restore fails
-// loudly rather than writing garbage to Dest. We forge this by
-// editing the index entry after backup to claim a bogus PlaintextHash.
+// TestRun_RestoreVerifiesPlaintextHash asserts restore fails when the recorded plaintext hash doesn't match decrypted bytes.
 func TestRun_RestoreVerifiesPlaintextHash(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
@@ -234,7 +224,6 @@ func TestRun_RestoreVerifiesPlaintextHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	// Corrupt the recorded plaintext hash.
 	entry.Chunks[0].PlaintextHash = [32]byte{0xde, 0xad, 0xbe, 0xef}
 	if err := rig.ownerIndex.Put(entry); err != nil {
 		t.Fatalf("Put: %v", err)
@@ -257,16 +246,13 @@ func TestRun_RestoreVerifiesPlaintextHash(t *testing.T) {
 	}
 }
 
-// TestRun_PeerMissingBlob asserts that a chunk missing from the peer
-// surfaces as a restore-level error (the peer's app-error reaches the
-// caller) rather than silently writing zeros.
+// TestRun_PeerMissingBlob asserts a chunk missing from the peer surfaces as a restore-level error.
 func TestRun_PeerMissingBlob(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
 	srcPath := filepath.Join(srcRoot, "orphan.bin")
 	rig.backupFile(srcPath, []byte("will-be-deleted-from-peer"))
 
-	// Remove the chunk from the peer's store so the GetChunk returns appErr.
 	entry, err := rig.ownerIndex.Get(srcPath)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
@@ -291,8 +277,7 @@ func TestRun_PeerMissingBlob(t *testing.T) {
 	}
 }
 
-// TestRun_EmptyIndex is a no-op restore: nothing to fetch, nothing to
-// write, no error.
+// TestRun_EmptyIndex asserts a restore over an empty index returns no error and writes nothing.
 func TestRun_EmptyIndex(t *testing.T) {
 	rig := newRestoreRig(t)
 	dest := t.TempDir()
@@ -350,7 +335,6 @@ func TestRun_NilProgress(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		// Progress deliberately nil.
 	}); err != nil {
 		t.Fatalf("restore.Run: %v", err)
 	}
@@ -377,9 +361,7 @@ func TestRun_ContextCancellation(t *testing.T) {
 	}
 }
 
-// TestRun_RequiresAbsoluteDest asserts that a relative Dest is rejected
-// (restore writes under Dest/<original-abs-path>, which only makes sense
-// when Dest is anchored somewhere unambiguous).
+// TestRun_RequiresAbsoluteDest asserts a relative Dest is rejected.
 func TestRun_RequiresAbsoluteDest(t *testing.T) {
 	rig := newRestoreRig(t)
 	err := restore.Run(context.Background(), restore.Options{
@@ -414,9 +396,7 @@ func TestRun_IndexListError(t *testing.T) {
 	}
 }
 
-// TestRun_UnmarshalError stores garbage bytes on the peer under a
-// CiphertextHash the index references. The owner fetches them, but
-// crypto.UnmarshalEncryptedChunk rejects the malformed wire format.
+// TestRun_UnmarshalError points the index at garbage bytes on the peer and asserts restore surfaces an unmarshal error.
 func TestRun_UnmarshalError(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
@@ -427,11 +407,6 @@ func TestRun_UnmarshalError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	// Replace the peer's blob for the first chunk with garbage that
-	// UnmarshalEncryptedChunk can't parse. Delete then store bytes at
-	// a different hash (peer content-addresses, so we just drop + add).
-	// Simpler: put raw garbage under a *new* hash and swap the index
-	// reference.
 	garbage := []byte{0xff, 0x00, 0xff}
 	newHash, err := rig.peerStore.Put(garbage)
 	if err != nil {
@@ -458,9 +433,7 @@ func TestRun_UnmarshalError(t *testing.T) {
 	}
 }
 
-// TestRun_DecryptError uses a fresh recipient keypair that doesn't
-// match the one chunks were encrypted for — crypto.Decrypt should fail
-// before the plaintext-hash check.
+// TestRun_DecryptError asserts restore fails when a recipient keypair other than the one chunks were encrypted for is used.
 func TestRun_DecryptError(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
@@ -488,9 +461,7 @@ func TestRun_DecryptError(t *testing.T) {
 	}
 }
 
-// TestRun_MkdirError forces restoreFile's parent-dir creation to fail
-// by pointing Dest at a read-only tree. Also happens to cover the
-// OpenFile error wrap if MkdirAll somehow succeeds first.
+// TestRun_MkdirError points Dest at a read-only tree and asserts restoreFile surfaces the mkdir failure.
 func TestRun_MkdirError(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses POSIX file-permission checks")
@@ -536,7 +507,5 @@ func TestRun_GetChunkError(t *testing.T) {
 	if err == nil {
 		t.Fatal("restore.Run returned nil despite closed conn")
 	}
-	// Don't care about the exact wrap; both "open stream" and "read"
-	// transports are legitimate surfaces here.
 	_ = errors.Is
 }

@@ -21,7 +21,6 @@ import (
 )
 
 // withOpenFileFunc swaps openFileFunc for the duration of a test.
-// White-box only — production never reassigns it.
 func withOpenFileFunc(t *testing.T, fn func(name string, flag int, perm os.FileMode) (writableFile, error)) {
 	t.Helper()
 	prev := openFileFunc
@@ -30,7 +29,6 @@ func withOpenFileFunc(t *testing.T, fn func(name string, flag int, perm os.FileM
 }
 
 // withChtimesFunc swaps chtimesFunc for the duration of a test.
-// White-box only — production never reassigns it.
 func withChtimesFunc(t *testing.T, fn func(name string, atime time.Time, mtime time.Time) error) {
 	t.Helper()
 	prev := chtimesFunc
@@ -38,8 +36,7 @@ func withChtimesFunc(t *testing.T, fn func(name string, atime time.Time, mtime t
 	t.Cleanup(func() { chtimesFunc = prev })
 }
 
-// fakeWritableFile wraps a real *os.File so the deferred Close still
-// drops the fd cleanly, but lets us inject Write / Close failures.
+// fakeWritableFile wraps a real *os.File and lets tests inject Write or Close failures.
 type fakeWritableFile struct {
 	real     *os.File
 	writeErr error
@@ -61,9 +58,7 @@ func (f *fakeWritableFile) Close() error {
 	return realErr
 }
 
-// seedRig brings up a minimal owner/peer rig and seeds one small file
-// so restore.Run has exactly one entry to process. Returns the live
-// Options; the caller tweaks Dest per test.
+// seedRig brings up an owner/peer rig with one seeded file and returns the restore Options.
 func seedRig(t *testing.T) Options {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -135,9 +130,7 @@ func seedRig(t *testing.T) Options {
 	}
 }
 
-// TestRestoreFile_WriteFailure exercises the f.Write error wrap in
-// restoreFile. A real *os.File only fails Write on ENOSPC / EIO /
-// closed-fd — not reproducible portably; the seam carries the branch.
+// TestRestoreFile_WriteFailure injects a Write error and asserts restoreFile wraps it as "write chunk".
 func TestRestoreFile_WriteFailure(t *testing.T) {
 	opts := seedRig(t)
 	opts.Dest = t.TempDir()
@@ -163,10 +156,7 @@ func TestRestoreFile_WriteFailure(t *testing.T) {
 	}
 }
 
-// TestRestoreFile_CloseFailure exercises the explicit f.Close error
-// wrap at the end of restoreFile (distinct from the deferred Close).
-// Close errors from *os.File are rare (deferred flush failure); only
-// reachable in tests via the seam.
+// TestRestoreFile_CloseFailure injects a Close error and asserts restoreFile wraps it.
 func TestRestoreFile_CloseFailure(t *testing.T) {
 	opts := seedRig(t)
 	opts.Dest = t.TempDir()
@@ -192,10 +182,7 @@ func TestRestoreFile_CloseFailure(t *testing.T) {
 	}
 }
 
-// TestRestoreFile_ChtimesFailure exercises the os.Chtimes error wrap
-// at the tail of restoreFile. On Linux this is effectively unreachable
-// for a file we just successfully Open+Wrote — only fault injection
-// covers the branch.
+// TestRestoreFile_ChtimesFailure injects an os.Chtimes error and asserts restoreFile wraps it.
 func TestRestoreFile_ChtimesFailure(t *testing.T) {
 	opts := seedRig(t)
 	opts.Dest = t.TempDir()
@@ -217,7 +204,4 @@ func TestRestoreFile_ChtimesFailure(t *testing.T) {
 	}
 }
 
-// Sanity-check: Options struct exposes the sha256 size constant the
-// plaintext-hash check depends on. Pin so a refactor that changes the
-// hash type would break compile here rather than silently at runtime.
 var _ = sha256.Size

@@ -54,10 +54,7 @@ func TestRestoreCmd_RejectsRelativeDest(t *testing.T) {
 	}
 }
 
-// TestRestoreCmd_EndToEnd stands up a real peer, seeds the local
-// dataDir with identity/recipient keys/peers.db/index + real chunks
-// on the peer, and confirms the restore subcommand produces the
-// original files under the given dest.
+// TestRestoreCmd_EndToEnd backs up a file to a real peer and asserts the restore subcommand reproduces it under dest.
 func TestRestoreCmd_EndToEnd(t *testing.T) {
 	peerStore, err := store.New(filepath.Join(t.TempDir(), "peer-chunks"))
 	if err != nil {
@@ -79,7 +76,6 @@ func TestRestoreCmd_EndToEnd(t *testing.T) {
 	t.Cleanup(serveCancel)
 	go func() { _ = backup.Serve(serveCtx, listener, peerStore) }()
 
-	// Seed owner-side data dir: identity, recipient keys, peers.db, index + chunks.
 	dataDir := t.TempDir()
 	id, _, err := node.Ensure(dataDir)
 	if err != nil {
@@ -106,14 +102,13 @@ func TestRestoreCmd_EndToEnd(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ix.Close() })
 
-	// Backup a real file to the peer (populates index + ships chunks).
 	srcRoot := t.TempDir()
 	srcPath := filepath.Join(srcRoot, "doc.bin")
 	wantBytes := bytes.Repeat([]byte("Z"), 1<<18)
 	if err := os.WriteFile(srcPath, wantBytes, 0o600); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
-	_ = rk // ensure used if test logic grows
+	_ = rk
 	ownerConn, err := func() (*bsquic.Conn, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -133,7 +128,6 @@ func TestRestoreCmd_EndToEnd(t *testing.T) {
 		t.Fatalf("backup.Run: %v", err)
 	}
 	_ = ownerConn.Close()
-	// Close the index so the restore CLI can open it under its own handle.
 	if err := ix.Close(); err != nil {
 		t.Fatalf("ix.Close: %v", err)
 	}
@@ -150,7 +144,6 @@ func TestRestoreCmd_EndToEnd(t *testing.T) {
 		t.Fatalf("restore execute: %v", err)
 	}
 
-	// Restored file lands at Dest + srcPath.
 	restored, err := os.ReadFile(filepath.Join(dest, srcPath))
 	if err != nil {
 		t.Fatalf("read restored: %v", err)
@@ -159,13 +152,10 @@ func TestRestoreCmd_EndToEnd(t *testing.T) {
 		t.Error("restored bytes differ from original")
 	}
 
-	// Prevent unused-imports flags.
 	_ = crypto.RecipientKeySize
 }
 
-// TestRestoreCmd_NoPeer exercises the no-peer branch. Without an entry
-// in peers.db the restore cannot dial anyone; the command must error
-// rather than silently succeed on an empty dest.
+// TestRestoreCmd_NoPeer asserts restore errors when peers.db has no dialable entries.
 func TestRestoreCmd_NoPeer(t *testing.T) {
 	dataDir := t.TempDir()
 	dest := t.TempDir()
@@ -178,7 +168,7 @@ func TestRestoreCmd_NoPeer(t *testing.T) {
 	}
 }
 
-// TestRestoreCmd_MultiplePeers exercises the multi-peer rejection.
+// TestRestoreCmd_MultiplePeers asserts restore errors when peers.db has multiple dialable entries.
 func TestRestoreCmd_MultiplePeers(t *testing.T) {
 	dataDir := t.TempDir()
 	dest := t.TempDir()
@@ -205,12 +195,9 @@ func TestRestoreCmd_MultiplePeers(t *testing.T) {
 	}
 }
 
-// TestRestoreCmd_EnsureIdentityError covers the `node.Ensure` error
-// wrap: squat node.key as a directory so Save's WriteFile fails when
-// Ensure tries to persist a fresh identity.
+// TestRestoreCmd_EnsureIdentityError asserts a node.Ensure failure surfaces from the restore subcommand.
 func TestRestoreCmd_EnsureIdentityError(t *testing.T) {
 	dataDir := t.TempDir()
-	// Squat the private-key path with a directory so Save fails.
 	if err := os.Mkdir(filepath.Join(dataDir, "node.key"), 0o700); err != nil {
 		t.Fatalf("mkdir node.key squatter: %v", err)
 	}
@@ -225,11 +212,9 @@ func TestRestoreCmd_EnsureIdentityError(t *testing.T) {
 	}
 }
 
-// TestRestoreCmd_IndexOpenError squats `index.db` as a directory so
-// index.Open (bbolt) fails; covers the `open index` error wrap.
+// TestRestoreCmd_IndexOpenError asserts an index.Open failure surfaces from the restore subcommand.
 func TestRestoreCmd_IndexOpenError(t *testing.T) {
 	dataDir := t.TempDir()
-	// Seed a valid peers.db entry so we get past pickSingleDialablePeer.
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	ps, err := peers.Open(filepath.Join(dataDir, "peers.db"))
 	if err != nil {
@@ -239,7 +224,6 @@ func TestRestoreCmd_IndexOpenError(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 	_ = ps.Close()
-	// Squat index.db as a directory so bbolt.Open fails.
 	if err := os.Mkdir(filepath.Join(dataDir, "index.db"), 0o700); err != nil {
 		t.Fatalf("mkdir index.db squatter: %v", err)
 	}
@@ -254,8 +238,7 @@ func TestRestoreCmd_IndexOpenError(t *testing.T) {
 	}
 }
 
-// TestRestoreCmd_DialFailure covers the dial-error branch when peers.db
-// points at an unreachable address.
+// TestRestoreCmd_DialFailure asserts restore errors when peers.db points at an unreachable address.
 func TestRestoreCmd_DialFailure(t *testing.T) {
 	dataDir := t.TempDir()
 	dest := t.TempDir()

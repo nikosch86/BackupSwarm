@@ -23,8 +23,7 @@ import (
 	"backupswarm/internal/store"
 )
 
-// testRig brings up a peer (listener + chunk store) and an owner QUIC
-// connection to it. Everything is torn down via t.Cleanup.
+// testRig brings up a peer (listener + chunk store) and an owner QUIC connection.
 type testRig struct {
 	t            *testing.T
 	peerStore    *store.Store
@@ -119,7 +118,7 @@ func TestRun_SingleFileSmall(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
 	path := filepath.Join(root, "file.bin")
-	data := writeFile(t, path, 1<<20) // 1 MiB, fits in one chunk at 1 MiB chunk size
+	data := writeFile(t, path, 1<<20)
 
 	opts := backup.RunOptions{
 		Path:         path,
@@ -141,7 +140,6 @@ func TestRun_SingleFileSmall(t *testing.T) {
 		t.Fatalf("got %d chunks in index, want 1", len(entry.Chunks))
 	}
 
-	// Verify the peer has the ciphertext blob at the recorded address.
 	has, err := rig.peerStore.Has(entry.Chunks[0].CiphertextHash)
 	if err != nil {
 		t.Fatalf("peerStore.Has: %v", err)
@@ -150,7 +148,6 @@ func TestRun_SingleFileSmall(t *testing.T) {
 		t.Error("peer store missing blob at recorded CiphertextHash")
 	}
 
-	// Plaintext hash in the index must match sha256(data).
 	if entry.Chunks[0].PlaintextHash != sha256.Sum256(data) {
 		t.Error("PlaintextHash in index does not match plaintext sha256")
 	}
@@ -189,7 +186,7 @@ func TestRun_MultiChunkFile(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
 	path := filepath.Join(root, "big.bin")
-	data := writeFile(t, path, (1<<20)*3+42) // 3 full chunks + 42-byte tail
+	data := writeFile(t, path, (1<<20)*3+42)
 
 	opts := backup.RunOptions{
 		Path:         path,
@@ -219,7 +216,7 @@ func TestRun_MultiChunkFile(t *testing.T) {
 			t.Errorf("chunk %d: peer missing blob", i)
 		}
 	}
-	_ = data // pipeline shape only; end-to-end restore integrity lives in restore tests
+	_ = data
 }
 
 func TestRun_DirectoryWalk(t *testing.T) {
@@ -261,10 +258,7 @@ func TestRun_DirectoryWalk(t *testing.T) {
 	}
 }
 
-// TestPrune_RemovesMissingFileFromSwarmAndIndex asserts that when a
-// backed-up file disappears from disk under the backup root, Prune
-// emits DeleteChunk for every chunk (peer removes the blob) and
-// deletes the index entry.
+// TestPrune_RemovesMissingFileFromSwarmAndIndex asserts Prune deletes peer chunks and the index entry for a vanished file.
 func TestPrune_RemovesMissingFileFromSwarmAndIndex(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
@@ -290,7 +284,6 @@ func TestPrune_RemovesMissingFileFromSwarmAndIndex(t *testing.T) {
 		t.Fatal("no chunks recorded")
 	}
 
-	// Delete the file from disk; Prune should follow through.
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("rm: %v", err)
 	}
@@ -318,9 +311,7 @@ func TestPrune_RemovesMissingFileFromSwarmAndIndex(t *testing.T) {
 	}
 }
 
-// TestPrune_LeavesPresentFilesAlone asserts Prune does nothing for
-// index entries whose paths still exist on disk, even if the file
-// hasn't been re-chunked since.
+// TestPrune_LeavesPresentFilesAlone asserts Prune leaves chunks and entries alone when the file still exists on disk.
 func TestPrune_LeavesPresentFilesAlone(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
@@ -366,10 +357,7 @@ func TestPrune_LeavesPresentFilesAlone(t *testing.T) {
 	}
 }
 
-// TestPrune_IgnoresEntriesOutsideRoot asserts Prune only considers
-// index entries whose paths are under Root — a paranoid safeguard
-// against a misconfigured daemon pointing at the wrong dir and wiping
-// unrelated entries.
+// TestPrune_IgnoresEntriesOutsideRoot asserts Prune leaves entries whose paths are not under Root untouched.
 func TestPrune_IgnoresEntriesOutsideRoot(t *testing.T) {
 	rig := newTestRig(t)
 	outside := filepath.Join(t.TempDir(), "not-under-root.bin")
@@ -389,7 +377,6 @@ func TestPrune_IgnoresEntriesOutsideRoot(t *testing.T) {
 		t.Fatalf("rm: %v", err)
 	}
 
-	// Prune a different root; the "not-under-root" entry stays intact.
 	emptyRoot := t.TempDir()
 	pruneOpts := backup.PruneOptions{
 		Root:     emptyRoot,
@@ -405,10 +392,7 @@ func TestPrune_IgnoresEntriesOutsideRoot(t *testing.T) {
 	}
 }
 
-// TestRun_IncrementalSkipsUnchanged asserts that when backup.Run is
-// invoked a second time on the same file, no second upload happens —
-// the peer's store sees exactly one blob per chunk, not two — and the
-// index entry is unchanged.
+// TestRun_IncrementalSkipsUnchanged asserts a second Run on the same file leaves the index entry intact and prints a skip note.
 func TestRun_IncrementalSkipsUnchanged(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
@@ -431,8 +415,6 @@ func TestRun_IncrementalSkipsUnchanged(t *testing.T) {
 		t.Fatalf("Get #1: %v", err)
 	}
 
-	// Snapshot the progress output of the second run so the skip note is
-	// visible and we can assert "no chunks shipped" via the peer store.
 	var progress bytes.Buffer
 	opts.Progress = &progress
 	if err := backup.Run(context.Background(), opts); err != nil {
@@ -458,8 +440,7 @@ func TestRun_IncrementalSkipsUnchanged(t *testing.T) {
 	}
 }
 
-// TestRun_IncrementalReuploadsOnSizeChange asserts a size change (even
-// with the same mtime) re-chunks and updates the index entry.
+// TestRun_IncrementalReuploadsOnSizeChange asserts a size change re-chunks and updates the index entry.
 func TestRun_IncrementalReuploadsOnSizeChange(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
@@ -482,7 +463,6 @@ func TestRun_IncrementalReuploadsOnSizeChange(t *testing.T) {
 		t.Fatalf("Get #1: %v", err)
 	}
 
-	// Append a byte (new size, new mtime) — next Run should update the entry.
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		t.Fatalf("open-append: %v", err)
@@ -578,7 +558,7 @@ func TestRun_ContextCancellation(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel before Run starts
+	cancel()
 
 	opts := backup.RunOptions{
 		Path:         path,
@@ -642,7 +622,7 @@ func TestRun_RejectsInvalidChunkSize(t *testing.T) {
 		Conn:         rig.ownerConn,
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
-		ChunkSize:    1024, // below chunk.MinChunkSize (1 MiB)
+		ChunkSize:    1024,
 		Progress:     io.Discard,
 	}
 	err := backup.Run(context.Background(), opts)
@@ -692,11 +672,7 @@ func TestServe_ConcurrentRuns(t *testing.T) {
 	}
 }
 
-// TestRun_PeerRejection simulates a peer that returns an application-level
-// error by wiring a no-space store (directory has zero bytes of space isn't
-// portable; instead we feed store errors by pointing the store at a read-only
-// dir via chmod). This is a soft test — if it can't produce an error it's
-// skipped, but when it does fire it asserts the appErr path is propagated.
+// TestRun_SkipsSymlinks asserts symlinks under root are not indexed and a skip note appears in progress.
 func TestRun_SkipsSymlinks(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
@@ -736,7 +712,6 @@ func TestRun_PropagatesIndexError(t *testing.T) {
 	path := filepath.Join(root, "f.bin")
 	writeFile(t, path, 1<<20)
 
-	// Close the index so Put fails before Run records any entry.
 	if err := rig.ownerIndex.Close(); err != nil {
 		t.Fatalf("Close index: %v", err)
 	}
@@ -755,8 +730,6 @@ func TestRun_PropagatesIndexError(t *testing.T) {
 }
 
 func TestRun_PeerErrorPropagation(t *testing.T) {
-	// Create a store directory, then chmod it to 0500 (read-only) so Put's
-	// MkdirAll of the shard subdirectory fails.
 	peerDir := t.TempDir()
 	rootStoreDir := filepath.Join(peerDir, "store")
 	peerStore, err := store.New(rootStoreDir)
@@ -823,7 +796,6 @@ func TestRun_PeerErrorPropagation(t *testing.T) {
 	if err == nil {
 		t.Fatal("Run succeeded despite read-only peer store")
 	}
-	// The owner sees the application-level error string from the peer.
 	if !containsAny(err.Error(), "peer", "store") {
 		t.Errorf("Run err = %v, want mention of peer/store failure", err)
 	}
@@ -842,15 +814,9 @@ func containsAny(s string, subs ...string) bool {
 	return false
 }
 
-// ensure compile-time that the package-level errors we care about are usable.
 var _ = errors.Is
 
-// TestSendGetChunk_RoundTrip exercises the exported SendGetChunk wrapper
-// end-to-end against a real QUIC peer + store. Cross-package tests (from
-// internal/restore) don't count toward this package's per-function
-// coverage, so we drive the wrapper directly here. Happy path only: the
-// inner sendGetChunk already has exhaustive white-box coverage in
-// backup_internal_test.go.
+// TestSendGetChunk_RoundTrip exercises the exported SendGetChunk wrapper end-to-end against a real QUIC peer and store.
 func TestSendGetChunk_RoundTrip(t *testing.T) {
 	rig := newTestRig(t)
 	blob := []byte("peer-stored ciphertext bytes")
@@ -868,9 +834,7 @@ func TestSendGetChunk_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestRun_DefaultsNilProgress covers the `if opts.Progress == nil`
-// short-circuit: leaving Progress unset must not panic — Run silently
-// falls back to io.Discard.
+// TestRun_DefaultsNilProgress asserts a nil opts.Progress falls back to io.Discard without panicking.
 func TestRun_DefaultsNilProgress(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
@@ -883,17 +847,13 @@ func TestRun_DefaultsNilProgress(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		// Progress deliberately nil — Run must fall back to io.Discard
 	}
 	if err := backup.Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 }
 
-// TestRun_OpenFileError covers the os.Open error wrap in backupFile
-// (backup.go lines 101-103). The path exists (Stat succeeds) but is
-// unreadable because we pre-chmod it to mode 0, so the subsequent
-// os.Open inside backupFile fails.
+// TestRun_OpenFileError asserts an os.Open failure inside backupFile is surfaced as an error.
 func TestRun_OpenFileError(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
@@ -918,10 +878,7 @@ func TestRun_OpenFileError(t *testing.T) {
 	}
 }
 
-// TestRun_WalkError covers the WalkDir walkErr propagation branch
-// (backup.go lines 79-81). A subdirectory is made unreadable (mode 0)
-// during the walk so WalkDir hands down an error to the walk-func,
-// which Run must propagate.
+// TestRun_WalkError asserts a WalkDir walkErr is propagated by Run.
 func TestRun_WalkError(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
@@ -945,12 +902,9 @@ func TestRun_WalkError(t *testing.T) {
 	}
 }
 
-// TestPrune_IndexListError covers the `opts.Index.List` error wrap in
-// Prune (backup.go lines 205-208). Closing the index before the call
-// makes every read fail — the error must surface as "index list: ...".
+// TestPrune_IndexListError asserts an Index.List failure is surfaced as "index list" by Prune.
 func TestPrune_IndexListError(t *testing.T) {
 	rig := newTestRig(t)
-	// Close the index before Prune so List() fails.
 	if err := rig.ownerIndex.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -968,15 +922,10 @@ func TestPrune_IndexListError(t *testing.T) {
 	}
 }
 
-// TestPrune_ContextCancelled covers the per-iteration ctx.Err() guard
-// inside Prune's main loop (backup.go lines 211-213). A pre-cancelled
-// context must bail out of the scan before any delete or index mutation
-// happens — otherwise a user hitting Ctrl-C during a daemon shutdown
-// could still blast the peer with deletes.
+// TestPrune_ContextCancelled asserts a pre-cancelled context bails out of Prune before any delete or index mutation.
 func TestPrune_ContextCancelled(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
-	// Seed an entry so the loop body runs and hits the ctx check.
 	if err := rig.ownerIndex.Put(index.FileEntry{
 		Path:   filepath.Join(root, "ghost.bin"),
 		Size:   1,
@@ -1002,14 +951,10 @@ func TestPrune_ContextCancelled(t *testing.T) {
 	}
 }
 
-// TestPrune_SendDeleteChunkError covers the sendDeleteChunk error
-// wrap (backup.go lines 245-247). Closing the QUIC conn before Prune
-// runs forces the delete-stream OpenStream to fail; the error must
-// surface with the "delete chunk" prefix.
+// TestPrune_SendDeleteChunkError asserts a sendDeleteChunk failure is surfaced as "delete chunk" by Prune.
 func TestPrune_SendDeleteChunkError(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
-	// Seed a dangling entry so Prune tries to send a delete.
 	if err := rig.ownerIndex.Put(index.FileEntry{
 		Path:   filepath.Join(root, "ghost.bin"),
 		Size:   1,
@@ -1017,7 +962,6 @@ func TestPrune_SendDeleteChunkError(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed index: %v", err)
 	}
-	// Close the conn so sendDeleteChunk's OpenStream fails.
 	_ = rig.ownerConn.Close()
 
 	err := backup.Prune(context.Background(), backup.PruneOptions{
@@ -1034,13 +978,7 @@ func TestPrune_SendDeleteChunkError(t *testing.T) {
 	}
 }
 
-// TestPrune_StatError covers the `statErr != os.ErrNotExist` branch
-// (backup.go lines 224-226). An entry whose path is unreadable (parent
-// dir with mode 0) makes os.Stat return a permission error, not
-// os.ErrNotExist, so Prune must surface it as "stat ...: ..." rather
-// than treating the file as "gone" and emitting a delete. This is the
-// belt-and-braces path: the daemon should not silently prune entries
-// whose files might still be there, just unreadable.
+// TestPrune_StatError asserts a non-ErrNotExist os.Stat error is surfaced as "stat" rather than triggering a delete.
 func TestPrune_StatError(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses POSIX file-permission checks")
@@ -1053,8 +991,6 @@ func TestPrune_StatError(t *testing.T) {
 	}
 	path := filepath.Join(sub, "hidden.bin")
 	writeFile(t, path, 1<<20)
-	// Seed the entry first so the file's stat succeeded at backup time,
-	// then chmod the parent dir so Prune's os.Stat fails with EACCES.
 	if err := rig.ownerIndex.Put(index.FileEntry{
 		Path:   path,
 		Size:   1,

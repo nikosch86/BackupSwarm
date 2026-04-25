@@ -247,7 +247,7 @@ func TestList_ReturnsAllEntriesSorted(t *testing.T) {
 	sort.Strings(wantSorted)
 	for i := range gotPaths {
 		if gotPaths[i] != wantSorted[i] {
-			t.Errorf("List[%d] = %q, want %q (expect lexicographic)", i, gotPaths[i], wantSorted[i])
+			t.Errorf("List[%d] = %q, want %q", i, gotPaths[i], wantSorted[i])
 		}
 	}
 }
@@ -304,10 +304,7 @@ func TestOperationsAfterClose_Error(t *testing.T) {
 	}
 }
 
-// TestOpen_ConcurrentLockFails pins the invariant that a second Open on
-// the same db path returns an error rather than hanging, as long as the
-// first Open is still alive. bbolt flocks the file and Index.Open
-// passes a short Timeout so the second call fails fast.
+// TestOpen_ConcurrentLockFails asserts a second Open on the same path errors fast while the first is still active.
 func TestOpen_ConcurrentLockFails(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "locked.db")
 	first, err := index.Open(path)

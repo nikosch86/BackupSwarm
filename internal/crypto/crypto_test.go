@@ -56,7 +56,7 @@ func TestEncryptDecrypt_EmptyPlaintext(t *testing.T) {
 
 func TestEncryptDecrypt_LargePayload(t *testing.T) {
 	pub, priv := mustGenerateRecipient(t)
-	plaintext := make([]byte, 4<<20) // 4 MiB — max chunk size
+	plaintext := make([]byte, 4<<20)
 	if _, err := rand.Read(plaintext); err != nil {
 		t.Fatalf("rand.Read: %v", err)
 	}

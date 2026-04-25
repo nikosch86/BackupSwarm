@@ -102,10 +102,7 @@ func TestAdd_RejectsInvalidPubkey(t *testing.T) {
 	}
 }
 
-// Empty Addr is deliberately permitted — it represents "we know this
-// pubkey but don't have a dialable address yet." See peers.Store.Add for
-// the rationale; bootstrap's join flow relies on this for joiners that
-// haven't yet bound a daemon listen port.
+// TestAdd_AcceptsEmptyAddr asserts Add accepts a peer record with an empty Addr.
 func TestAdd_AcceptsEmptyAddr(t *testing.T) {
 	s := openTestStore(t)
 	pub := mustKey(t)
@@ -146,12 +143,10 @@ func TestList_Empty(t *testing.T) {
 
 func TestList_ReturnsAllSortedByPubKey(t *testing.T) {
 	s := openTestStore(t)
-	// Insert three peers with deterministic pubkey prefixes so sort order
-	// is checkable.
 	var all []peers.Peer
 	for i := range 3 {
 		pub := make(ed25519.PublicKey, ed25519.PublicKeySize)
-		pub[0] = byte(3 - i) // insert in reverse order
+		pub[0] = byte(3 - i)
 		p := peers.Peer{Addr: string(rune('a'+i)) + ":1", PubKey: pub}
 		if err := s.Add(p); err != nil {
 			t.Fatalf("Add %d: %v", i, err)
@@ -165,7 +160,6 @@ func TestList_ReturnsAllSortedByPubKey(t *testing.T) {
 	if len(listed) != len(all) {
 		t.Fatalf("List len = %d, want %d", len(listed), len(all))
 	}
-	// Expect byte-lex order on pubkey, not insertion order.
 	sort.Slice(all, func(i, j int) bool { return bytes.Compare(all[i].PubKey, all[j].PubKey) < 0 })
 	for i, got := range listed {
 		if !bytes.Equal(got.PubKey, all[i].PubKey) {

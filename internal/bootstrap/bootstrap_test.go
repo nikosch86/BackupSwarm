@@ -18,9 +18,7 @@ import (
 	"backupswarm/pkg/token"
 )
 
-// Matches the unexported maxAdvertisedAddrLen used inside the bootstrap
-// package. Kept local to the test so the test doesn't need to be in the
-// internal test file.
+// maxAdvertisedAddrLenForTest matches the unexported maxAdvertisedAddrLen used inside the bootstrap package.
 const maxAdvertisedAddrLenForTest = 1 << 10
 
 type twoSides struct {
@@ -107,7 +105,6 @@ func TestBootstrap_EndToEnd(t *testing.T) {
 		t.Fatalf("AcceptJoin: %v", acceptErr)
 	}
 
-	// Introducer should now know the joiner (pubkey from TLS + addr from hello).
 	if !bytes.Equal(acceptedPeer.PubKey, rig.joinerPub) {
 		t.Error("AcceptJoin returned wrong pubkey")
 	}
@@ -122,7 +119,6 @@ func TestBootstrap_EndToEnd(t *testing.T) {
 		t.Errorf("introducer saw joiner addr %q, want %q", got.Addr, joinerListen)
 	}
 
-	// Joiner should know the introducer.
 	if !bytes.Equal(introducerPeer.PubKey, rig.introducerPub) {
 		t.Error("DoJoin returned wrong pubkey")
 	}
@@ -141,8 +137,6 @@ func TestBootstrap_EndToEnd(t *testing.T) {
 func TestBootstrap_WrongPubkeyTokenFailsTLSPin(t *testing.T) {
 	rig := setupTwoSides(t)
 
-	// Token encodes the correct addr but a random other pubkey — TLS pin
-	// must reject the introducer's real cert.
 	otherPub, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("other key: %v", err)
@@ -155,8 +149,6 @@ func TestBootstrap_WrongPubkeyTokenFailsTLSPin(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Keep an AcceptJoin goroutine running so the dial actually reaches
-	// the TLS handshake layer (rather than a connection-refused).
 	acceptCtx, acceptCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer acceptCancel()
 	go func() {
@@ -167,7 +159,6 @@ func TestBootstrap_WrongPubkeyTokenFailsTLSPin(t *testing.T) {
 	if err == nil {
 		t.Fatal("DoJoin succeeded despite wrong pubkey in token")
 	}
-	// Peer store must not have been mutated.
 	list, _ := rig.joinerPeerList.List()
 	if len(list) != 0 {
 		t.Errorf("joiner peer store mutated after failed join: %d entries", len(list))
@@ -186,7 +177,6 @@ func TestBootstrap_MalformedTokenRejected(t *testing.T) {
 
 func TestBootstrap_DeadAddrFailsDial(t *testing.T) {
 	rig := setupTwoSides(t)
-	// Craft a token pointing at an unused port.
 	tok, err := token.Encode("127.0.0.1:1", rig.introducerPub)
 	if err != nil {
 		t.Fatalf("token.Encode: %v", err)
@@ -249,7 +239,6 @@ func TestBootstrap_JoinerWithEmptyListenAddr(t *testing.T) {
 	if acceptedPeer.Addr != "" {
 		t.Errorf("accepted addr = %q, want empty", acceptedPeer.Addr)
 	}
-	// Joiner's pubkey should still be persisted even with no addr.
 	got, err := rig.introducerPeerList.Get(rig.joinerPub)
 	if err != nil {
 		t.Fatalf("Get joiner: %v", err)
@@ -259,14 +248,9 @@ func TestBootstrap_JoinerWithEmptyListenAddr(t *testing.T) {
 	}
 }
 
-// When AcceptJoin's peer-store write fails, the introducer should reply
-// with an application-level error instead of a plain OK ack, and the
-// joiner's DoJoin should surface that error without mutating its own
-// peer store. Exercises both the "store error" ack branch in AcceptJoin
-// and the appErr != "" branch in DoJoin.
+// TestBootstrap_IntroducerStoreError_PropagatesAppErr asserts a peer-store Add failure surfaces as an app error to DoJoin.
 func TestBootstrap_IntroducerStoreError_PropagatesAppErr(t *testing.T) {
 	rig := setupTwoSides(t)
-	// Close the peer store before AcceptJoin so the Add call fails.
 	_ = rig.introducerPeerList.Close()
 
 	tok, err := token.Encode(rig.listener.Addr().String(), rig.introducerPub)
@@ -294,25 +278,17 @@ func TestBootstrap_IntroducerStoreError_PropagatesAppErr(t *testing.T) {
 	if acceptErr == nil {
 		t.Error("AcceptJoin returned nil despite store failure")
 	}
-	// Joiner must not have persisted the introducer after an app error.
 	list, _ := rig.joinerPeerList.List()
 	if len(list) != 0 {
 		t.Errorf("joiner peer list contains %d entries after app-error; want 0", len(list))
 	}
 }
 
-// ensure we don't silently ignore useful comparators
 var _ = errors.Is
 
-// TestAcceptJoin_ClientClosesWithoutStream exercises the conn.AcceptStream
-// error wrap in AcceptJoin. The joiner completes the TLS handshake but
-// closes the connection without opening a stream, so AcceptStream unblocks
-// with an error. This hits the "accept stream: %w" wrap.
+// TestAcceptJoin_ClientClosesWithoutStream asserts AcceptJoin wraps the conn.AcceptStream error when the joiner closes without opening a stream.
 func TestAcceptJoin_ClientClosesWithoutStream(t *testing.T) {
 	rig := setupTwoSides(t)
-	// Short ctx so AcceptStream unblocks within the test window — closing
-	// the conn from the joiner side should make AcceptStream fail more
-	// promptly but we cap the wait to keep the suite snappy.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -330,28 +306,21 @@ func TestAcceptJoin_ClientClosesWithoutStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	// Close the connection without ever opening a stream — the introducer's
-	// AcceptStream call returns an error (eventually: QUIC close is
-	// asynchronous, hence the 2s budget above).
 	_ = conn.Close()
 
 	wg.Wait()
 	if acceptErr == nil {
 		t.Fatal("AcceptJoin returned nil when client closed before opening stream")
 	}
-	// Peer store must not have been mutated.
 	list, _ := rig.introducerPeerList.List()
 	if len(list) != 0 {
 		t.Errorf("introducer peer list has %d entries; want 0", len(list))
 	}
 }
 
-// TestAcceptJoin_ListenerClosed exercises the l.Accept error wrap in
-// AcceptJoin. Closing the listener before Accept forces the underlying
-// qgo.Accept to return an error, which must be wrapped as "accept: ...".
+// TestAcceptJoin_ListenerClosed asserts AcceptJoin wraps the Accept error from a closed listener as "accept".
 func TestAcceptJoin_ListenerClosed(t *testing.T) {
 	rig := setupTwoSides(t)
-	// Close listener so Accept returns immediately with an error.
 	_ = rig.listener.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -361,10 +330,7 @@ func TestAcceptJoin_ListenerClosed(t *testing.T) {
 	}
 }
 
-// TestAcceptJoin_MalformedHello exercises the ReadJoinHello error wrap in
-// AcceptJoin: the joiner opens a stream but half-closes it before sending
-// a well-formed hello, so ReadJoinHello fails on the truncated header.
-// This also covers the "malformed hello" WriteJoinAck call that follows.
+// TestAcceptJoin_MalformedHello asserts AcceptJoin surfaces a ReadJoinHello error when the joiner sends no hello bytes.
 func TestAcceptJoin_MalformedHello(t *testing.T) {
 	rig := setupTwoSides(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -378,8 +344,6 @@ func TestAcceptJoin_MalformedHello(t *testing.T) {
 		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList)
 	}()
 
-	// Dial with the right pubkey (TLS pin passes) but never write a proper
-	// hello frame — just open a stream and close it immediately.
 	conn, err := bsquic.Dial(ctx, rig.listener.Addr().String(), rig.joinerPriv, rig.introducerPub)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -389,25 +353,19 @@ func TestAcceptJoin_MalformedHello(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
-	// Close without writing — introducer's ReadJoinHello header read fails.
 	_ = stream.Close()
 
 	wg.Wait()
 	if acceptErr == nil {
 		t.Fatal("AcceptJoin returned nil on malformed hello")
 	}
-	// Peer store must not have been mutated.
 	list, _ := rig.introducerPeerList.List()
 	if len(list) != 0 {
 		t.Errorf("introducer peer list mutated on malformed hello: %d entries", len(list))
 	}
 }
 
-// TestDoJoin_IntroducerDropsBeforeAck exercises the ReadJoinAck error wrap
-// in DoJoin: the introducer accepts the stream, reads the hello, then
-// closes the connection before writing any ack bytes. The joiner's
-// ReadJoinAck must fail with a wrapped "read ack" error and the peer
-// store must not be mutated.
+// TestDoJoin_IntroducerDropsBeforeAck asserts DoJoin wraps the ReadJoinAck error when the introducer hangs up before the ack.
 func TestDoJoin_IntroducerDropsBeforeAck(t *testing.T) {
 	rig := setupTwoSides(t)
 	tok, err := token.Encode(rig.listener.Addr().String(), rig.introducerPub)
@@ -422,7 +380,6 @@ func TestDoJoin_IntroducerDropsBeforeAck(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		// Custom, minimal introducer: accept, read hello, hang up without ack.
 		conn, err := rig.listener.Accept(ctx)
 		if err != nil {
 			return
@@ -432,8 +389,6 @@ func TestDoJoin_IntroducerDropsBeforeAck(t *testing.T) {
 			_ = conn.Close()
 			return
 		}
-		// Consume the hello bytes so the joiner's write completes, then
-		// close the conn without sending the ack.
 		_, _ = protocol.ReadJoinHello(stream, maxAdvertisedAddrLenForTest)
 		_ = conn.Close()
 	}()
@@ -449,10 +404,7 @@ func TestDoJoin_IntroducerDropsBeforeAck(t *testing.T) {
 	}
 }
 
-// TestDoJoin_JoinerStoreClosed_PropagatesErr exercises the joiner-side
-// store.Add error wrap in DoJoin (after a successful ack was received).
-// The joiner's peer store is closed before DoJoin is called, so Add
-// fails once the ack has been processed.
+// TestDoJoin_JoinerStoreClosed_PropagatesErr asserts DoJoin surfaces a joiner-side store.Add error after a successful ack.
 func TestDoJoin_JoinerStoreClosed_PropagatesErr(t *testing.T) {
 	rig := setupTwoSides(t)
 	tok, err := token.Encode(rig.listener.Addr().String(), rig.introducerPub)
@@ -470,7 +422,6 @@ func TestDoJoin_JoinerStoreClosed_PropagatesErr(t *testing.T) {
 		_, _ = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList)
 	}()
 
-	// Close the joiner's peer store before DoJoin so Add fails after ack.
 	_ = rig.joinerPeerList.Close()
 
 	_, err = bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerPeerList)

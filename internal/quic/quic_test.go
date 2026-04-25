@@ -22,7 +22,7 @@ func newKeyPair(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 	return pub, priv
 }
 
-// TestListen_AssignsAddr ensures Listen on :0 returns a usable bound address.
+// TestListen_AssignsAddr asserts Listen on :0 returns a usable bound address.
 func TestListen_AssignsAddr(t *testing.T) {
 	t.Parallel()
 	_, priv := newKeyPair(t)
@@ -36,8 +36,7 @@ func TestListen_AssignsAddr(t *testing.T) {
 	}
 }
 
-// TestRoundTrip exercises the full mTLS handshake and a chunk-sized stream
-// echo, verifying both sides observe the peer's verified Ed25519 pubkey.
+// TestRoundTrip exercises an mTLS handshake and chunk-sized stream echo and asserts both sides observe the peer's verified Ed25519 pubkey.
 func TestRoundTrip(t *testing.T) {
 	t.Parallel()
 	serverPub, serverPriv := newKeyPair(t)
@@ -49,7 +48,7 @@ func TestRoundTrip(t *testing.T) {
 	}
 	defer func() { _ = l.Close() }()
 
-	payload := make([]byte, 1<<20) // 1 MiB — chunk-sized
+	payload := make([]byte, 1<<20)
 	if _, err := rand.Read(payload); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
@@ -87,8 +86,6 @@ func TestRoundTrip(t *testing.T) {
 			return
 		}
 		_ = s.Close()
-		// Wait for client to close its send side before tearing down the
-		// connection — otherwise conn.Close aborts pending writes mid-flight.
 		if _, err := io.Copy(io.Discard, s); err != nil {
 			_ = conn.Close()
 			done <- result{err: err}
@@ -139,8 +136,7 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
-// TestDial_RejectsWrongPeerPubkey: dialer pins a key the server doesn't
-// hold; the handshake must fail with ErrPeerPubkeyMismatch in the chain.
+// TestDial_RejectsWrongPeerPubkey asserts a dial pinned to a wrong server pubkey fails with ErrPeerPubkeyMismatch.
 func TestDial_RejectsWrongPeerPubkey(t *testing.T) {
 	t.Parallel()
 	_, serverPriv := newKeyPair(t)
@@ -153,7 +149,6 @@ func TestDial_RejectsWrongPeerPubkey(t *testing.T) {
 	}
 	defer func() { _ = l.Close() }()
 
-	// Drain accept so the server doesn't block on the failed handshake.
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -173,7 +168,7 @@ func TestDial_RejectsWrongPeerPubkey(t *testing.T) {
 	}
 }
 
-// TestListen_InvalidAddr covers the bind-error path.
+// TestListen_InvalidAddr asserts Listen errors on an invalid bind address.
 func TestListen_InvalidAddr(t *testing.T) {
 	t.Parallel()
 	_, priv := newKeyPair(t)
@@ -182,7 +177,7 @@ func TestListen_InvalidAddr(t *testing.T) {
 	}
 }
 
-// TestDial_ContextCancel covers the dial-error path without needing a server.
+// TestDial_ContextCancel asserts Dial returns an error when its context is already cancelled.
 func TestDial_ContextCancel(t *testing.T) {
 	t.Parallel()
 	_, priv := newKeyPair(t)

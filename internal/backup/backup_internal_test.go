@@ -20,9 +20,7 @@ import (
 	"backupswarm/internal/store"
 )
 
-// fakeStream is a minimal io.ReadWriteCloser used to drive sendChunk
-// without a real QUIC transport. It reads from rd (what the "peer"
-// would send back) and writes are captured into wbuf.
+// fakeStream is a minimal io.ReadWriteCloser used to drive sendChunk.
 type fakeStream struct {
 	rd         io.Reader
 	wbuf       bytes.Buffer
@@ -53,8 +51,7 @@ func (f *fakeStream) Close() error {
 	return f.closeErr
 }
 
-// fakeOpener satisfies the sendChunk streamOpener interface. It returns
-// openErr if set, otherwise the canned stream.
+// fakeOpener satisfies the sendChunk streamOpener interface.
 type fakeOpener struct {
 	stream  *fakeStream
 	openErr error
@@ -89,9 +86,7 @@ func errResponseFrame(t *testing.T, msg string) []byte {
 	return buf.Bytes()
 }
 
-// TestSendChunk_OpenStreamError exercises the OpenStream error wrap
-// (backup.go line 150-152). The opener returns an error before any
-// bytes are written, which must be surfaced as "open stream: ...".
+// TestSendChunk_OpenStreamError asserts an OpenStream error is surfaced wrapped.
 func TestSendChunk_OpenStreamError(t *testing.T) {
 	sentinel := errors.New("open stream boom")
 	opener := &fakeOpener{openErr: sentinel}
@@ -104,11 +99,7 @@ func TestSendChunk_OpenStreamError(t *testing.T) {
 	}
 }
 
-// TestSendChunk_WritePutChunkRequestError exercises the
-// WritePutChunkRequest error wrap (backup.go line 154-157). The fake
-// stream fails its first write call, so WritePutChunkRequest returns
-// an error that sendChunk must surface without further stream traffic.
-// Also asserts the stream was closed on the error path.
+// TestSendChunk_WritePutChunkRequestError asserts a WritePutChunkRequest write error is surfaced and the stream is closed.
 func TestSendChunk_WritePutChunkRequestError(t *testing.T) {
 	sentinel := errors.New("write request boom")
 	stream := &fakeStream{writeErrAt: 0, writeErr: sentinel}
@@ -126,10 +117,7 @@ func TestSendChunk_WritePutChunkRequestError(t *testing.T) {
 	}
 }
 
-// TestSendChunk_CloseSendSideError exercises the half-close error wrap
-// (backup.go line 159-161). The request write succeeds; the subsequent
-// stream.Close() returns an error that must be wrapped as
-// "close send side: ...".
+// TestSendChunk_CloseSendSideError asserts a stream-close error is surfaced wrapped.
 func TestSendChunk_CloseSendSideError(t *testing.T) {
 	sentinel := errors.New("half-close boom")
 	stream := &fakeStream{writeErrAt: -1, closeErr: sentinel}
@@ -144,9 +132,7 @@ func TestSendChunk_CloseSendSideError(t *testing.T) {
 	}
 }
 
-// TestSendChunk_ReadResponseError exercises the ReadPutChunkResponse
-// error wrap (backup.go line 164-166). Request write and close succeed,
-// but the response read fails immediately (empty reader — EOF).
+// TestSendChunk_ReadResponseError asserts a ReadPutChunkResponse error is surfaced wrapped.
 func TestSendChunk_ReadResponseError(t *testing.T) {
 	stream := &fakeStream{
 		writeErrAt: -1,
@@ -158,16 +144,12 @@ func TestSendChunk_ReadResponseError(t *testing.T) {
 	if err == nil {
 		t.Fatal("sendChunk returned nil on empty response stream")
 	}
-	// Must be surfaced via the "read response" wrap, not the close wrap.
 	if got := err.Error(); !bytes.Contains([]byte(got), []byte("read response")) {
 		t.Errorf("sendChunk err = %q, want 'read response' prefix", got)
 	}
 }
 
-// TestSendChunk_AppErrorPropagation exercises the appErr != "" branch
-// (backup.go line 167-169). The peer returns a well-formed error frame
-// with a non-empty message; sendChunk must wrap it as "peer rejected
-// chunk: <msg>".
+// TestSendChunk_AppErrorPropagation asserts an app-error frame is wrapped as "peer rejected chunk".
 func TestSendChunk_AppErrorPropagation(t *testing.T) {
 	frame := errResponseFrame(t, "store is full")
 	stream := &fakeStream{
@@ -188,13 +170,10 @@ func TestSendChunk_AppErrorPropagation(t *testing.T) {
 	}
 }
 
-// TestHandlePutChunkStream_ReadRequestError exercises the
-// ReadPutChunkRequest error wrap in handlePutChunkStream. The fake
-// stream returns EOF immediately so the header read fails; the
-// returned error wraps "read request".
+// TestHandlePutChunkStream_ReadRequestError asserts the ReadPutChunkRequest error is wrapped as "read request".
 func TestHandlePutChunkStream_ReadRequestError(t *testing.T) {
 	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(nil)}
-	err := handlePutChunkStream(rw, nil, []byte{0x01}) // st unused on early-error path
+	err := handlePutChunkStream(rw, nil, []byte{0x01})
 	if err == nil {
 		t.Fatal("handlePutChunkStream returned nil on empty request")
 	}
@@ -203,8 +182,7 @@ func TestHandlePutChunkStream_ReadRequestError(t *testing.T) {
 	}
 }
 
-// TestHandleDeleteChunkStream_AuthorizedDelete: a blob stored via
-// PutOwned is removable by a DeleteChunk from the same owner key.
+// TestHandleDeleteChunkStream_AuthorizedDelete asserts a DeleteChunk from the original owner removes the blob.
 func TestHandleDeleteChunkStream_AuthorizedDelete(t *testing.T) {
 	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
 	if err != nil {
@@ -239,10 +217,7 @@ func TestHandleDeleteChunkStream_AuthorizedDelete(t *testing.T) {
 	}
 }
 
-// TestHandleDeleteChunkStream_OwnerMismatch asserts that the handler
-// returns an application-level error (owner mismatch) rather than
-// silently succeeding when the requesting pubkey does not match the
-// stored owner. The blob must remain on disk.
+// TestHandleDeleteChunkStream_OwnerMismatch asserts a non-owner DeleteChunk returns an app error and leaves the blob.
 func TestHandleDeleteChunkStream_OwnerMismatch(t *testing.T) {
 	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
 	if err != nil {
@@ -278,8 +253,7 @@ func TestHandleDeleteChunkStream_OwnerMismatch(t *testing.T) {
 	}
 }
 
-// TestHandleDeleteChunkStream_UnknownHash asserts ErrChunkNotFound is
-// surfaced as an application error, not a transport error.
+// TestHandleDeleteChunkStream_UnknownHash asserts ErrChunkNotFound is surfaced as an application error.
 func TestHandleDeleteChunkStream_UnknownHash(t *testing.T) {
 	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
 	if err != nil {
@@ -316,9 +290,7 @@ func TestHandleDeleteChunkStream_ReadRequestError(t *testing.T) {
 	}
 }
 
-// TestDispatchStream_UnknownMessageType asserts the dispatcher rejects
-// an unrecognized leading byte rather than silently parsing one of the
-// known body shapes against mismatched bytes.
+// TestDispatchStream_UnknownMessageType asserts the dispatcher rejects an unrecognized message type byte.
 func TestDispatchStream_UnknownMessageType(t *testing.T) {
 	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader([]byte{0xff})}
 	err := dispatchStream(context.Background(), rw, nil, []byte{0x01})
@@ -341,8 +313,7 @@ func TestDispatchStream_ReadTypeError(t *testing.T) {
 	}
 }
 
-// TestDispatchStream_RoutesPutChunk asserts the put-chunk path still
-// reaches handlePutChunkStream through the dispatcher.
+// TestDispatchStream_RoutesPutChunk asserts the put-chunk path reaches handlePutChunkStream through the dispatcher.
 func TestDispatchStream_RoutesPutChunk(t *testing.T) {
 	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
 	if err != nil {
@@ -361,7 +332,6 @@ func TestDispatchStream_RoutesPutChunk(t *testing.T) {
 	if err := dispatchStream(context.Background(), rw, st, []byte("alice")); err != nil {
 		t.Fatalf("dispatchStream: %v", err)
 	}
-	// Response on wbuf must be a put-chunk response (1B status + 32B hash on OK).
 	hash, appErr, err := protocol.ReadPutChunkResponse(&rw.wbuf)
 	if err != nil {
 		t.Fatalf("ReadPutChunkResponse: %v", err)
@@ -375,8 +345,7 @@ func TestDispatchStream_RoutesPutChunk(t *testing.T) {
 	}
 }
 
-// TestSendDeleteChunk_SuccessPath exercises the happy path through the
-// fake stream.
+// TestSendDeleteChunk_SuccessPath exercises the happy path through the fake stream.
 func TestSendDeleteChunk_SuccessPath(t *testing.T) {
 	var resp bytes.Buffer
 	if err := protocol.WriteDeleteChunkResponse(&resp, ""); err != nil {
@@ -455,7 +424,6 @@ func TestSendDeleteChunk_ReadResponseError(t *testing.T) {
 }
 
 // withIndexDeleteFunc swaps indexDeleteFunc for the duration of a test.
-// White-box only — production never reassigns it.
 func withIndexDeleteFunc(t *testing.T, fn func(idx *index.Index, path string) error) {
 	t.Helper()
 	prev := indexDeleteFunc
@@ -463,16 +431,8 @@ func withIndexDeleteFunc(t *testing.T, fn func(idx *index.Index, path string) er
 	t.Cleanup(func() { indexDeleteFunc = prev })
 }
 
-// TestPrune_IndexDeleteError exercises the `opts.Index.Delete` error
-// wrap at the end of Prune's per-entry body (backup.go lines 235-237).
-// A real bbolt Delete cannot fail on a healthy, open db with an
-// existing key — the error branch is reachable only via fault
-// injection. Same pattern as the `gobEncodeFunc` seam in internal/index
-// and `createTempFunc` in internal/store.
+// TestPrune_IndexDeleteError injects an Index.Delete failure and asserts Prune wraps and returns it.
 func TestPrune_IndexDeleteError(t *testing.T) {
-	// Set up a real peer + conn so sendDeleteChunk succeeds against a
-	// live QUIC transport. Only after all chunks are delivered does
-	// Prune reach the Index.Delete call the seam fails.
 	peerPub, peerPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("peer key: %v", err)
@@ -511,8 +471,6 @@ func TestPrune_IndexDeleteError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = idx.Close() })
 
-	// First, ship a real chunk to the peer with recipient encryption so
-	// the delete call at the peer side succeeds for our seeded hash.
 	recipientPub, _, err := crypto.GenerateRecipientKey()
 	if err != nil {
 		t.Fatalf("GenerateRecipientKey: %v", err)
@@ -558,10 +516,7 @@ func TestPrune_IndexDeleteError(t *testing.T) {
 	}
 }
 
-// TestSendChunk_SuccessPath exercises the happy path through the fake
-// stream — sanity check that the fake plumbs writes and reads the way
-// a real QUIC stream would. Helps the write/read/close coverage
-// interaction line up with what the real integration tests expect.
+// TestSendChunk_SuccessPath exercises the happy path through the fake stream.
 func TestSendChunk_SuccessPath(t *testing.T) {
 	want := sha256.Sum256([]byte("peer would hash this"))
 	frame := okResponseFrame(t, want)
@@ -600,8 +555,7 @@ func getErrFrame(t *testing.T, msg string) []byte {
 	return buf.Bytes()
 }
 
-// TestHandleGetChunkStream_Success asserts that a stored blob is returned
-// over a GetChunk stream with an empty appErr.
+// TestHandleGetChunkStream_Success asserts a stored blob is returned over a GetChunk stream with an empty appErr.
 func TestHandleGetChunkStream_Success(t *testing.T) {
 	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
 	if err != nil {
@@ -635,8 +589,7 @@ func TestHandleGetChunkStream_Success(t *testing.T) {
 	}
 }
 
-// TestHandleGetChunkStream_UnknownHash asserts that an unknown hash
-// surfaces as an application-level error (not a transport error).
+// TestHandleGetChunkStream_UnknownHash asserts an unknown hash surfaces as an application-level error.
 func TestHandleGetChunkStream_UnknownHash(t *testing.T) {
 	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
 	if err != nil {
@@ -673,8 +626,7 @@ func TestHandleGetChunkStream_ReadRequestError(t *testing.T) {
 	}
 }
 
-// TestDispatchStream_RoutesGetChunk asserts the get-chunk path reaches
-// handleGetChunkStream through the dispatcher.
+// TestDispatchStream_RoutesGetChunk asserts the get-chunk path reaches handleGetChunkStream through the dispatcher.
 func TestDispatchStream_RoutesGetChunk(t *testing.T) {
 	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
 	if err != nil {

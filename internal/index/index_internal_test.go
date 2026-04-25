@@ -11,7 +11,6 @@ import (
 )
 
 // withGobEncodeFunc swaps gobEncodeFunc for the duration of a test.
-// White-box only — production never reassigns it.
 func withGobEncodeFunc(t *testing.T, fn func(w io.Writer, v any) error) {
 	t.Helper()
 	prev := gobEncodeFunc
@@ -20,7 +19,6 @@ func withGobEncodeFunc(t *testing.T, fn func(w io.Writer, v any) error) {
 }
 
 // withChmodFunc swaps chmodFunc for the duration of a test.
-// White-box only — production never reassigns it.
 func withChmodFunc(t *testing.T, fn func(name string, mode os.FileMode) error) {
 	t.Helper()
 	prev := chmodFunc
@@ -29,7 +27,6 @@ func withChmodFunc(t *testing.T, fn func(name string, mode os.FileMode) error) {
 }
 
 // withDBUpdateFunc swaps dbUpdateFunc for the duration of a test.
-// White-box only — production never reassigns it.
 func withDBUpdateFunc(t *testing.T, fn func(db *bbolt.DB, fn func(*bbolt.Tx) error) error) {
 	t.Helper()
 	prev := dbUpdateFunc
@@ -37,11 +34,7 @@ func withDBUpdateFunc(t *testing.T, fn func(db *bbolt.DB, fn func(*bbolt.Tx) err
 	t.Cleanup(func() { dbUpdateFunc = prev })
 }
 
-// TestPut_EncodeFailure exercises the gob-encode error wrap in Put.
-// FileEntry's fields (string, [][]byte, [32]byte, int64) are all
-// gob-safe in practice, so the real encoder cannot fail — only the
-// seam reaches this branch. Same pattern as the randReader seam in
-// internal/crypto and the createTempFunc seam in internal/store.
+// TestPut_EncodeFailure asserts a gob-encode failure surfaces from Put wrapped.
 func TestPut_EncodeFailure(t *testing.T) {
 	ix := openTestIndex(t)
 
@@ -59,11 +52,7 @@ func TestPut_EncodeFailure(t *testing.T) {
 	}
 }
 
-// TestGet_DecodeFailure covers the decode-error wrap in Get. A valid
-// entry is replaced with junk bytes directly in the bucket so the
-// gob.NewDecoder call fails; this is the shape a corrupted on-disk
-// index would take, and the error path must surface (not silently
-// return an empty FileEntry).
+// TestGet_DecodeFailure asserts a decode failure surfaces from Get rather than returning an empty FileEntry.
 func TestGet_DecodeFailure(t *testing.T) {
 	ix := openTestIndex(t)
 
@@ -78,10 +67,7 @@ func TestGet_DecodeFailure(t *testing.T) {
 	}
 }
 
-// TestList_DecodeFailure covers the same decode-error branch inside
-// List's ForEach. One bad entry aborts the iteration and the error is
-// propagated — callers of List are meant to treat a decode failure as
-// index corruption, not as an empty index.
+// TestList_DecodeFailure asserts a decode failure aborts List and propagates the error.
 func TestList_DecodeFailure(t *testing.T) {
 	ix := openTestIndex(t)
 
@@ -93,10 +79,7 @@ func TestList_DecodeFailure(t *testing.T) {
 	}
 }
 
-// TestOpen_ChmodFailure exercises the os.Chmod error wrap in Open.
-// bbolt.Open has just successfully opened the file, so a real Chmod
-// failure is a stdlib invariant violation — only the seam reaches this
-// branch. Same pattern as the createTempFunc seam in internal/store.
+// TestOpen_ChmodFailure asserts an os.Chmod failure surfaces from Open wrapped.
 func TestOpen_ChmodFailure(t *testing.T) {
 	sentinel := errors.New("forced chmod failure")
 	withChmodFunc(t, func(name string, mode os.FileMode) error {
@@ -112,10 +95,7 @@ func TestOpen_ChmodFailure(t *testing.T) {
 	}
 }
 
-// TestOpen_BucketCreateFailure exercises the db.Update error wrap in
-// Open. CreateBucketIfNotExists on a freshly-opened healthy db with a
-// non-empty bucket name cannot fail in normal operation — only the
-// seam reaches this branch.
+// TestOpen_BucketCreateFailure asserts a db.Update failure surfaces from Open wrapped.
 func TestOpen_BucketCreateFailure(t *testing.T) {
 	sentinel := errors.New("forced update failure")
 	withDBUpdateFunc(t, func(db *bbolt.DB, fn func(*bbolt.Tx) error) error {
@@ -141,9 +121,7 @@ func openTestIndex(t *testing.T) *Index {
 	return ix
 }
 
-// writeRawValue inserts a non-gob-encoded value under key directly in
-// the bucket, bypassing Put. Used to stage corrupted-on-disk scenarios
-// that Put itself could never produce.
+// writeRawValue inserts a non-gob-encoded value under key directly in the bucket.
 func writeRawValue(t *testing.T, ix *Index, key string, value []byte) {
 	t.Helper()
 	err := ix.db.Update(func(tx *bbolt.Tx) error {

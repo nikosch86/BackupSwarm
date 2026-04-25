@@ -36,11 +36,7 @@ func TestJoinCmd_RejectsMalformedToken(t *testing.T) {
 	}
 }
 
-// TestJoinCmd_WrongPubkeyDoesNotPersist asserts the TLS pin protects the
-// peer store from tokens that decode fine but point at the wrong pubkey.
-// We start a listener under a real introducer key, craft a token with
-// the right addr but a different pubkey, and assert `join` fails AND
-// leaves the peer store empty.
+// TestJoinCmd_WrongPubkeyDoesNotPersist asserts a token with a wrong pubkey makes join fail and leaves the peer store empty.
 func TestJoinCmd_WrongPubkeyDoesNotPersist(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "joiner")
 
@@ -48,10 +44,6 @@ func TestJoinCmd_WrongPubkeyDoesNotPersist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
 	}
-	// Point at an addr that resolves but pin a fake pubkey — should fail
-	// dial (no listener) OR fail TLS (if listener happens to exist). We
-	// use an arbitrary unused port so the fail mode is "cannot dial",
-	// which still exercises "does not persist on failure."
 	tokStr, err := token.Encode("127.0.0.1:1", wrongPub)
 	if err != nil {
 		t.Fatalf("token.Encode: %v", err)
@@ -72,7 +64,6 @@ func TestJoinCmd_WrongPubkeyDoesNotPersist(t *testing.T) {
 		t.Error("join succeeded against a dead address")
 	}
 
-	// Peer store should not have been mutated.
 	storePath := filepath.Join(dataDir, "peers.db")
 	if store, err := peers.Open(storePath); err == nil {
 		list, _ := store.List()
@@ -81,12 +72,9 @@ func TestJoinCmd_WrongPubkeyDoesNotPersist(t *testing.T) {
 			t.Errorf("failed join left %d peers in store, want 0", len(list))
 		}
 	}
-	// If the file doesn't exist yet, that's also fine — means the
-	// command bailed early enough not to open peers.db at all.
 }
 
-// TestJoinCmd_TokenFileAndArgConflict rejects combinations that would
-// leave it ambiguous where the token should come from.
+// TestJoinCmd_TokenFileAndArgConflict asserts join rejects combining --token-file with a positional token.
 func TestJoinCmd_TokenFileAndArgConflict(t *testing.T) {
 	root := NewRootCmd()
 	root.SetOut(&bytes.Buffer{})
@@ -106,9 +94,7 @@ func TestJoinCmd_TokenFileAndArgConflict(t *testing.T) {
 	}
 }
 
-// TestJoinCmd_TokenFileMissingTimesOut exercises the polling path when
-// the file never appears — must return a timeout-wrapped context error
-// rather than looping forever.
+// TestJoinCmd_TokenFileMissingTimesOut asserts a never-appearing token file surfaces as a DeadlineExceeded error.
 func TestJoinCmd_TokenFileMissingTimesOut(t *testing.T) {
 	root := NewRootCmd()
 	root.SetOut(&bytes.Buffer{})
@@ -128,18 +114,11 @@ func TestJoinCmd_TokenFileMissingTimesOut(t *testing.T) {
 	}
 }
 
-// TestJoinCmd_TokenFileLateArrival asserts that join waits for the
-// file to appear mid-poll instead of failing when it's missing at
-// startup. This is the docker-compose orchestration case.
+// TestJoinCmd_TokenFileLateArrival asserts join waits for a late-arriving token file before erroring on dial.
 func TestJoinCmd_TokenFileLateArrival(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "joiner")
 	tokenPath := filepath.Join(t.TempDir(), "token.txt")
 
-	// Craft a malformed-but-decodable-looking token first to prove
-	// partial contents are tolerated. We later overwrite it with a
-	// well-formed (but pointing-nowhere) token so DoJoin fails on
-	// dial — the assertion is that we got *past* the polling stage,
-	// not that the handshake succeeds.
 	_, pub, err := ed25519Gen()
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
@@ -148,7 +127,6 @@ func TestJoinCmd_TokenFileLateArrival(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode token: %v", err)
 	}
-	// Land the file ~150 ms after the command starts (two poll ticks).
 	go func() {
 		time.Sleep(150 * time.Millisecond)
 		_ = os.WriteFile(tokenPath, []byte(goodTok+"\n"), 0o600)
@@ -164,8 +142,6 @@ func TestJoinCmd_TokenFileLateArrival(t *testing.T) {
 		"--timeout", "2s",
 	})
 	err = root.Execute()
-	// We expect a dial failure (target port isn't serving QUIC) — the
-	// important bit is we didn't error on "file not found" before then.
 	if err == nil {
 		t.Fatal("expected join to fail on dial after successfully reading the late-arriving token file")
 	}

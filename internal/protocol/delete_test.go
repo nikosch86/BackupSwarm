@@ -59,15 +59,11 @@ func TestWriteReadDeleteChunkRequest_RoundTrip(t *testing.T) {
 }
 
 func TestReadDeleteChunkRequest_RejectsTruncated(t *testing.T) {
-	// Only 5 of the 32 bytes of hash.
 	_, err := protocol.ReadDeleteChunkRequest(bytes.NewReader(bytes.Repeat([]byte{0xaa}, 5)))
 	if err == nil {
 		t.Error("ReadDeleteChunkRequest accepted truncated hash")
 	}
 	if errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		// io.ReadFull returns ErrUnexpectedEOF on partial reads; plain EOF
-		// would mean "no bytes at all." The reader should surface some form
-		// of short-read error either way.
 	}
 }
 
@@ -126,7 +122,6 @@ func TestReadDeleteChunkResponse_RejectsTruncated(t *testing.T) {
 	if _, err := protocol.ReadDeleteChunkResponse(bytes.NewReader(nil)); err == nil {
 		t.Error("ReadDeleteChunkResponse accepted empty stream")
 	}
-	// Error status, truncated length prefix.
 	if _, err := protocol.ReadDeleteChunkResponse(bytes.NewReader([]byte{1, 0x00, 0x00})); err == nil {
 		t.Error("ReadDeleteChunkResponse accepted truncated length prefix")
 	}
@@ -140,13 +135,11 @@ func TestReadDeleteChunkResponse_RejectsOversizedErrorMessage(t *testing.T) {
 }
 
 func TestWriteDeleteChunkResponse_PropagatesAllWriteErrors(t *testing.T) {
-	// Success path: single status byte write (stage 0).
 	sentinel := errors.New("status boom")
 	w := &errWriter{failAt: 0, err: sentinel}
 	if err := protocol.WriteDeleteChunkResponse(w, ""); !errors.Is(err, sentinel) {
 		t.Errorf("success-status err = %v, want wraps sentinel", err)
 	}
-	// Error path: status (0), length (1), body (2).
 	for i, name := range []string{"status", "length", "body"} {
 		sentinel := errors.New(name + " err boom")
 		w := &errWriter{failAt: i, err: sentinel}

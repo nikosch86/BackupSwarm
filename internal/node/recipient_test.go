@@ -101,8 +101,6 @@ func TestLoadRecipient_MissingFiles(t *testing.T) {
 
 func TestLoadRecipient_PublicKeyMissing(t *testing.T) {
 	dir := t.TempDir()
-	// Valid-size private recipient key, no public: second stat should trigger
-	// ErrRecipientNotFound (separate branch from the private-missing case).
 	if err := os.WriteFile(filepath.Join(dir, recipientPrivateKeyFile), make([]byte, RecipientKeySize), privateKeyPerm); err != nil {
 		t.Fatalf("write private key: %v", err)
 	}
@@ -178,8 +176,6 @@ func TestEnsureRecipient_LoadsWhenPresent(t *testing.T) {
 
 func TestEnsureRecipient_PropagatesNonNotFoundLoadError(t *testing.T) {
 	dir := t.TempDir()
-	// Private recipient key as a directory: Load returns a read error
-	// (not ErrRecipientNotFound), so Ensure must propagate.
 	if err := os.Mkdir(filepath.Join(dir, recipientPrivateKeyFile), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -256,18 +252,13 @@ func TestSaveRecipient_FailsWhenParentIsFile(t *testing.T) {
 	}
 }
 
-// TestLoadRecipient_PrivateKeyStatNonNotFoundError covers the non-ENOENT
-// stat-error branch for the private key path (recipient.go line 79:
-// `return nil, fmt.Errorf("stat recipient private key: %w", err)`). Mirror
-// of TestLoad_PublicKeyStatNonNotFoundError for the Ed25519 identity.
+// TestLoadRecipient_PrivateKeyStatNonNotFoundError asserts a non-ENOENT stat error on the private key path surfaces from LoadRecipient.
 func TestLoadRecipient_PrivateKeyStatNonNotFoundError(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink loop behavior not portable to Windows")
 	}
 	dir := t.TempDir()
 	privPath := filepath.Join(dir, recipientPrivateKeyFile)
-	// Self-referential symlink: os.Stat follows links, fails with ELOOP,
-	// which does not wrap os.ErrNotExist.
 	if err := os.Symlink(privPath, privPath); err != nil {
 		t.Fatalf("create self-symlink: %v", err)
 	}
@@ -280,14 +271,9 @@ func TestLoadRecipient_PrivateKeyStatNonNotFoundError(t *testing.T) {
 	}
 }
 
-// TestEnsureRecipient_PropagatesSaveErrorAfterLoadNotFound exercises the
-// Save-error branch of EnsureRecipient (recipient.go lines 131-133).
-// LoadRecipient cleanly returns ErrRecipientNotFound; SaveRecipient then
-// fails because node.xpub is pre-squatted by a directory, forcing the
-// inner WriteFile to error.
+// TestEnsureRecipient_PropagatesSaveErrorAfterLoadNotFound asserts a SaveRecipient failure surfaces from EnsureRecipient when Load returned ErrRecipientNotFound.
 func TestEnsureRecipient_PropagatesSaveErrorAfterLoadNotFound(t *testing.T) {
 	dir := t.TempDir()
-	// Block node.xpub by pre-creating it as a directory so WriteFile fails.
 	if err := os.Mkdir(filepath.Join(dir, recipientPublicKeyFile), dirPerm); err != nil {
 		t.Fatalf("mkdir blocker: %v", err)
 	}

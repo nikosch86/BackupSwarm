@@ -55,8 +55,6 @@ func TestResolveDataDir_ErrorsWhenAllUnset(t *testing.T) {
 	t.Setenv("BACKUPSWARM_DATA_DIR", "")
 	t.Setenv("XDG_DATA_HOME", "")
 	t.Setenv("HOME", "")
-	// UserHomeDir also reads XDG_CONFIG_HOME-style fallbacks on non-Linux,
-	// but on the primary Linux target an empty HOME produces an error.
 	if _, err := resolveDataDir(""); err == nil {
 		t.Error("resolveDataDir returned nil error when no inputs set")
 	}

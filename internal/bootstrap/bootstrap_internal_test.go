@@ -17,9 +17,7 @@ import (
 	"backupswarm/pkg/token"
 )
 
-// TestEd25519PubCopy_Nil exercises the nil-input branch, which returns
-// nil without allocating. Non-nil inputs are covered transitively by the
-// end-to-end tests.
+// TestEd25519PubCopy_Nil asserts ed25519PubCopy(nil) returns nil.
 func TestEd25519PubCopy_Nil(t *testing.T) {
 	if got := ed25519PubCopy(nil); got != nil {
 		t.Errorf("ed25519PubCopy(nil) = %v, want nil", got)
@@ -27,7 +25,6 @@ func TestEd25519PubCopy_Nil(t *testing.T) {
 }
 
 // withWriteJoinAckFunc swaps writeJoinAckFunc for the duration of a test.
-// White-box only — production never reassigns it.
 func withWriteJoinAckFunc(t *testing.T, fn func(w io.Writer, appErr string) error) {
 	t.Helper()
 	prev := writeJoinAckFunc
@@ -36,7 +33,6 @@ func withWriteJoinAckFunc(t *testing.T, fn func(w io.Writer, appErr string) erro
 }
 
 // withWriteJoinHelloFunc swaps writeJoinHelloFunc for the duration of a test.
-// White-box only — production never reassigns it.
 func withWriteJoinHelloFunc(t *testing.T, fn func(w io.Writer, listenAddr string) error) {
 	t.Helper()
 	prev := writeJoinHelloFunc
@@ -45,7 +41,6 @@ func withWriteJoinHelloFunc(t *testing.T, fn func(w io.Writer, listenAddr string
 }
 
 // withStreamCloseFunc swaps streamCloseFunc for the duration of a test.
-// White-box only — production never reassigns it.
 func withStreamCloseFunc(t *testing.T, fn func(s io.Closer) error) {
 	t.Helper()
 	prev := streamCloseFunc
@@ -95,23 +90,17 @@ func newInternalRig(t *testing.T) *internalRig {
 	}
 }
 
-// TestAcceptJoin_WriteJoinAckFailure exercises the success-path
-// WriteJoinAck error wrap in AcceptJoin. writeJoinAckFunc is forced to
-// return a sentinel error after the peer has been Add'd, so AcceptJoin
-// reports "write ack: <sentinel>".
+// TestAcceptJoin_WriteJoinAckFailure asserts AcceptJoin wraps a WriteJoinAck failure as "write ack".
 func TestAcceptJoin_WriteJoinAckFailure(t *testing.T) {
 	rig := newInternalRig(t)
 	sentinel := errors.New("forced ack write failure")
 	withWriteJoinAckFunc(t, func(w io.Writer, appErr string) error {
 		if appErr == "" {
-			// Close the stream so the joiner's ReadJoinAck unblocks
-			// immediately instead of waiting for the QUIC idle timeout.
 			if c, ok := w.(io.Closer); ok {
 				_ = c.Close()
 			}
 			return sentinel
 		}
-		// preserve real behaviour on the error-path (not exercised here)
 		return protocol.WriteJoinAck(w, appErr)
 	})
 
@@ -130,8 +119,6 @@ func TestAcceptJoin_WriteJoinAckFailure(t *testing.T) {
 		_, acceptErr = AcceptJoin(ctx, rig.listener, rig.introStore)
 	}()
 
-	// DoJoin's ReadJoinAck is unblocked by the seam's stream.Close() call
-	// above; no further ctx-cancel tricks required.
 	_, _ = DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerStore)
 
 	wg.Wait()
@@ -143,9 +130,7 @@ func TestAcceptJoin_WriteJoinAckFailure(t *testing.T) {
 	}
 }
 
-// TestDoJoin_WriteJoinHelloFailure exercises the WriteJoinHello error
-// wrap in DoJoin. writeJoinHelloFunc is forced to fail so DoJoin reports
-// "write hello: <sentinel>" before any ack is read.
+// TestDoJoin_WriteJoinHelloFailure asserts DoJoin wraps a WriteJoinHello failure as "write hello".
 func TestDoJoin_WriteJoinHelloFailure(t *testing.T) {
 	rig := newInternalRig(t)
 	sentinel := errors.New("forced hello write failure")
@@ -160,7 +145,6 @@ func TestDoJoin_WriteJoinHelloFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// An AcceptJoin goroutine so the dial succeeds.
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -175,15 +159,11 @@ func TestDoJoin_WriteJoinHelloFailure(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Errorf("DoJoin err = %v, want wraps sentinel", err)
 	}
-	// The listener-side goroutine is blocked reading the (never-sent)
-	// hello — cancel the accept ctx to unblock it cleanly.
 	cancel()
 	wg.Wait()
 }
 
-// TestDoJoin_StreamCloseFailure exercises the half-close error wrap in
-// DoJoin. streamCloseFunc is forced to fail so DoJoin reports
-// "close hello send: <sentinel>" before reading the ack.
+// TestDoJoin_StreamCloseFailure asserts DoJoin wraps a half-close failure as "close hello send".
 func TestDoJoin_StreamCloseFailure(t *testing.T) {
 	rig := newInternalRig(t)
 	sentinel := errors.New("forced stream close failure")
@@ -198,8 +178,6 @@ func TestDoJoin_StreamCloseFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// Short-lived accept ctx so the listener-side goroutine exits promptly
-	// when the joiner bails early on an injected failure.
 	acceptCtx, acceptCancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer acceptCancel()
 	var wg sync.WaitGroup

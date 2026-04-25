@@ -127,9 +127,6 @@ func TestBackupDirHasRegularFiles_OnlySymlinks(t *testing.T) {
 }
 
 func TestBackupDirHasRegularFiles_MissingDir(t *testing.T) {
-	// Missing backup dir is an error, not "empty": the daemon should
-	// fail loudly rather than silently treat "wrong path" as "nothing
-	// to back up."
 	_, err := daemon.BackupDirHasRegularFiles(filepath.Join(t.TempDir(), "does-not-exist"))
 	if err == nil {
 		t.Fatal("BackupDirHasRegularFiles accepted missing path")

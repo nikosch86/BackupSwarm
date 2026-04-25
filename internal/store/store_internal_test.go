@@ -12,7 +12,6 @@ import (
 )
 
 // withCreateTempFunc swaps createTempFunc for the duration of a test.
-// White-box only — production never reassigns it.
 func withCreateTempFunc(t *testing.T, fn func(dir, pattern string) (tempFile, error)) {
 	t.Helper()
 	prev := createTempFunc
@@ -35,7 +34,6 @@ func withReadAllFunc(t *testing.T, fn func(r io.Reader) ([]byte, error)) {
 }
 
 // withChmodFunc swaps chmodFunc for the duration of a test.
-// White-box only — production never reassigns it.
 func withChmodFunc(t *testing.T, fn func(name string, mode os.FileMode) error) {
 	t.Helper()
 	prev := chmodFunc
@@ -44,7 +42,6 @@ func withChmodFunc(t *testing.T, fn func(name string, mode os.FileMode) error) {
 }
 
 // withDBUpdateFunc swaps dbUpdateFunc for the duration of a test.
-// White-box only — production never reassigns it.
 func withDBUpdateFunc(t *testing.T, fn func(db *bbolt.DB, fn func(*bbolt.Tx) error) error) {
 	t.Helper()
 	prev := dbUpdateFunc
@@ -52,9 +49,7 @@ func withDBUpdateFunc(t *testing.T, fn func(db *bbolt.DB, fn func(*bbolt.Tx) err
 	t.Cleanup(func() { dbUpdateFunc = prev })
 }
 
-// fakeTempFile wraps a real *os.File so we still get a valid tmp path on
-// disk (for the defer-cleanup to remove) but can inject Write/Close
-// failures at will.
+// fakeTempFile wraps a real *os.File and lets tests inject Write or Close failures.
 type fakeTempFile struct {
 	real     *os.File
 	writeErr error
@@ -71,8 +66,6 @@ func (f *fakeTempFile) Write(p []byte) (int, error) {
 }
 
 func (f *fakeTempFile) Close() error {
-	// Always close the real file so the fd isn't leaked, but report the
-	// injected error to the caller when one is set.
 	realErr := f.real.Close()
 	if f.closeErr != nil {
 		return f.closeErr
@@ -80,11 +73,7 @@ func (f *fakeTempFile) Close() error {
 	return realErr
 }
 
-// TestPut_RenameFailure_CleansUpTempFile covers the os.Rename error wrap
-// in Put plus the committed==false defer cleanup that removes the leaked
-// temp file. Both branches are otherwise unreachable without fault
-// injection — os.Rename between two paths in the same directory on the
-// same filesystem doesn't fail in normal operation.
+// TestPut_RenameFailure_CleansUpTempFile injects an os.Rename failure and asserts Put errors and removes the temp file.
 func TestPut_RenameFailure_CleansUpTempFile(t *testing.T) {
 	s, err := New(t.TempDir())
 	if err != nil {
@@ -108,16 +97,12 @@ func TestPut_RenameFailure_CleansUpTempFile(t *testing.T) {
 	if capturedTmp == "" {
 		t.Fatal("rename hook never fired — Put did not reach the rename step")
 	}
-	// Defer cleanup must have removed the orphan temp file.
 	if _, statErr := os.Stat(capturedTmp); !errors.Is(statErr, os.ErrNotExist) {
 		t.Errorf("temp file %s was not cleaned up after rename failure (stat err=%v)", capturedTmp, statErr)
 	}
 }
 
-// TestPut_WriteFailure exercises the tmp.Write error wrap. The real
-// *os.File only fails Write on ENOSPC, EIO, or a closed fd — none of
-// which we can cause portably. The seam lets us assert the branch is
-// hit and the fake temp file is properly closed on the error path.
+// TestPut_WriteFailure injects a Write failure and asserts Put errors and removes the temp file.
 func TestPut_WriteFailure(t *testing.T) {
 	root := t.TempDir()
 	s, err := New(root)
@@ -143,7 +128,6 @@ func TestPut_WriteFailure(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Errorf("Put err = %v, want wraps sentinel", err)
 	}
-	// Defer cleanup must still run after a write failure.
 	if capturedTmp == "" {
 		t.Fatal("CreateTemp hook never fired")
 	}
@@ -152,9 +136,7 @@ func TestPut_WriteFailure(t *testing.T) {
 	}
 }
 
-// TestPut_CloseFailure exercises the tmp.Close error wrap. Close errors
-// from *os.File are rare (deferred write flush failure); only reachable
-// in tests via the seam.
+// TestPut_CloseFailure injects a temp-file Close failure and asserts Put errors and removes the temp file.
 func TestPut_CloseFailure(t *testing.T) {
 	root := t.TempDir()
 	s, err := New(root)
@@ -188,10 +170,7 @@ func TestPut_CloseFailure(t *testing.T) {
 	}
 }
 
-// TestGet_ReadAllFailure exercises the io.ReadAll mid-read error wrap
-// in Get. A successfully-opened file failing part-way through a ReadAll
-// requires a disk-level IO error — not reproducible on a normal tmpfs,
-// so the seam carries the branch.
+// TestGet_ReadAllFailure injects an io.ReadAll failure and asserts Get returns the wrapped error without ErrChunkNotFound.
 func TestGet_ReadAllFailure(t *testing.T) {
 	root := t.TempDir()
 	s, err := New(root)
@@ -220,11 +199,7 @@ func TestGet_ReadAllFailure(t *testing.T) {
 	}
 }
 
-// TestEnsureOwnersDB_ChmodFailure exercises the os.Chmod error wrap
-// inside ensureOwnersDB. bbolt.Open has just successfully opened the
-// file, so a real Chmod failure is a stdlib invariant violation —
-// only the seam reaches this branch. Same pattern as the chmodFunc
-// seam in internal/index / internal/peers.
+// TestEnsureOwnersDB_ChmodFailure injects an os.Chmod failure and asserts PutOwned wraps it as "chmod owners db".
 func TestEnsureOwnersDB_ChmodFailure(t *testing.T) {
 	s, err := New(t.TempDir())
 	if err != nil {
@@ -237,9 +212,6 @@ func TestEnsureOwnersDB_ChmodFailure(t *testing.T) {
 		return sentinel
 	})
 
-	// PutOwned is the shortest path to ensureOwnersDB from the exported
-	// API; Put would skip it. The recorded error must wrap the sentinel
-	// and mention the chmod stage.
 	_, err = s.PutOwned([]byte("owned"), []byte("alice"))
 	if err == nil {
 		t.Fatal("PutOwned succeeded despite injected chmod failure")
@@ -252,10 +224,7 @@ func TestEnsureOwnersDB_ChmodFailure(t *testing.T) {
 	}
 }
 
-// TestEnsureOwnersDB_BucketCreateFailure exercises the db.Update error
-// wrap inside ensureOwnersDB. CreateBucketIfNotExists on a healthy
-// freshly-opened db with a non-empty bucket name cannot fail in normal
-// operation — only the seam reaches this branch.
+// TestEnsureOwnersDB_BucketCreateFailure injects a db.Update failure and asserts PutOwned wraps it as "create owners bucket".
 func TestEnsureOwnersDB_BucketCreateFailure(t *testing.T) {
 	s, err := New(t.TempDir())
 	if err != nil {
@@ -280,8 +249,7 @@ func TestEnsureOwnersDB_BucketCreateFailure(t *testing.T) {
 	}
 }
 
-// containsSubstr is a trivial substring helper used by the tests above
-// to avoid importing strings into this white-box test file.
+// containsSubstr reports whether s contains sub.
 func containsSubstr(s, sub string) bool {
 	if len(sub) > len(s) {
 		return false
@@ -294,9 +262,7 @@ func containsSubstr(s, sub string) bool {
 	return false
 }
 
-// Sanity check: the sharded path helper is what determines where a
-// committed blob lands on disk. Keeps the internal helper from quietly
-// drifting away from the Put/Get invariants.
+// TestPathFor_UsesFirstByteShardAndFullHexName asserts pathFor places the blob under the first-byte shard with a full-hex filename.
 func TestPathFor_UsesFirstByteShardAndFullHexName(t *testing.T) {
 	s, err := New(t.TempDir())
 	if err != nil {

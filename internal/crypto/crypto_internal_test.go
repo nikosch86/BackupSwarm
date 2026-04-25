@@ -13,8 +13,7 @@ var errFakeRand = errors.New("fake rng failure")
 
 func (failingReader) Read(_ []byte) (int, error) { return 0, errFakeRand }
 
-// limitedReader yields n bytes of zeroes, then errFakeRand. Lets us fail a
-// specific call (e.g. the nonce read) after earlier reads have succeeded.
+// limitedReader yields n bytes of zeroes, then errFakeRand.
 type limitedReader struct{ remaining int }
 
 func (l *limitedReader) Read(p []byte) (int, error) {
@@ -55,7 +54,6 @@ func TestGenerateRecipientKey_RandomnessFailure(t *testing.T) {
 }
 
 func TestEncrypt_KeyGenerationFailure(t *testing.T) {
-	// Need a valid recipient first, while real randomness still works.
 	pub, _, err := GenerateRecipientKey()
 	if err != nil {
 		t.Fatalf("setup: %v", err)
@@ -81,7 +79,6 @@ func TestEncrypt_NonceGenerationFailure(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	// Allow the symmetric key read (32 bytes), then fail on the nonce read.
 	withRandReader(t, &limitedReader{remaining: SymmetricKeySize})
 
 	ec, err := Encrypt([]byte("payload"), pub)
@@ -102,8 +99,6 @@ func TestEncrypt_WrapKeyFailure(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	// Allow symmetric key + nonce reads (32 + 24 = 56 bytes), then fail
-	// when box.SealAnonymous tries to draw its ephemeral key.
 	withRandReader(t, &limitedReader{remaining: SymmetricKeySize + NonceSize})
 
 	ec, err := Encrypt([]byte("payload"), pub)
@@ -113,9 +108,6 @@ func TestEncrypt_WrapKeyFailure(t *testing.T) {
 	if ec != nil {
 		t.Fatal("expected nil chunk on failure")
 	}
-	// box.SealAnonymous wraps the rng error; we don't require errors.Is here
-	// because the nacl/box wrapping is opaque, but the message must mention
-	// the wrap step.
 	if got := err.Error(); got == "" {
 		t.Fatalf("expected non-empty error, got %q", got)
 	}

@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-const testChunkSize = MinChunkSize // 1 MiB — smallest valid size
+const testChunkSize = MinChunkSize
 
 func TestSplit_EmptyInput(t *testing.T) {
 	chunks, err := Split(bytes.NewReader(nil), testChunkSize)
@@ -121,8 +121,6 @@ func TestSplit_PropagatesReaderError(t *testing.T) {
 }
 
 func TestSplit_DoesNotAliasBuffer(t *testing.T) {
-	// If Split returned slices into a shared internal buffer, mutating one
-	// chunk's Data would corrupt another — verify each chunk owns its bytes.
 	data := makeRandomBytes(t, testChunkSize*2)
 	chunks, err := Split(bytes.NewReader(data), testChunkSize)
 	if err != nil {
@@ -188,7 +186,7 @@ func TestJoin_MissingIndexFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Split: %v", err)
 	}
-	gapped := []Chunk{chunks[0], chunks[2]} // drop middle
+	gapped := []Chunk{chunks[0], chunks[2]}
 	var buf bytes.Buffer
 	err = Join(gapped, &buf)
 	if err == nil {
@@ -219,7 +217,7 @@ func TestJoin_FirstIndexNonZeroFails(t *testing.T) {
 		t.Fatalf("Split: %v", err)
 	}
 	for i := range chunks {
-		chunks[i].Index++ // shift to 1..n, no index 0
+		chunks[i].Index++
 	}
 	var buf bytes.Buffer
 	if err := Join(chunks, &buf); err == nil {

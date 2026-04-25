@@ -13,11 +13,7 @@ import (
 	"time"
 )
 
-// TestE2E_BackupAndRestoreRoundTrip is the M1.11 end-to-end check: two
-// in-process nodes wired through the real cobra CLI form a swarm, ship
-// a directory of files through the chunk → encrypt → transport → store
-// pipeline, and restore it to a fresh location. Final tree is compared
-// byte-for-byte against the source.
+// TestE2E_BackupAndRestoreRoundTrip drives two in-process nodes through invite, join, backup, and restore and compares the final tree byte-for-byte.
 func TestE2E_BackupAndRestoreRoundTrip(t *testing.T) {
 	dataA := filepath.Join(t.TempDir(), "node-a")
 	dataB := filepath.Join(t.TempDir(), "node-b")
@@ -27,16 +23,13 @@ func TestE2E_BackupAndRestoreRoundTrip(t *testing.T) {
 	if err := os.MkdirAll(srcDir, 0o700); err != nil {
 		t.Fatalf("mkdir src: %v", err)
 	}
-	// Fixture spans the interesting chunking cases at the 1 MiB minimum
-	// chunk size: tiny single-chunk files plus one file that splits into
-	// multiple chunks.
 	fixtures := []struct {
 		rel  string
 		body []byte
 	}{
 		{"hello.txt", []byte("hello world\n")},
 		{"nested/greet.txt", []byte("hi there\n")},
-		{"nested/sub/big.bin", bytes.Repeat([]byte{0xab}, 3<<20)}, // 3 MiB -> 3 chunks
+		{"nested/sub/big.bin", bytes.Repeat([]byte{0xab}, 3<<20)},
 	}
 	for _, f := range fixtures {
 		full := filepath.Join(srcDir, f.rel)
@@ -49,8 +42,6 @@ func TestE2E_BackupAndRestoreRoundTrip(t *testing.T) {
 	}
 	expectedBlobs := 1 + 1 + 3
 
-	// Stable UDP port for B — invite and run both bind here so the peer
-	// record A persists during `join` stays valid into phase 2.
 	addrB := reserveLocalUDPAddr(t)
 
 	overallCtx, cancelOverall := context.WithTimeout(context.Background(), 45*time.Second)
@@ -76,9 +67,6 @@ func TestE2E_BackupAndRestoreRoundTrip(t *testing.T) {
 	}()
 	tokStr := waitForToken(t, inviteOut, 5*time.Second)
 
-	// --listen omitted so A advertises no return address; B's peers.db
-	// ends up with {addr:"", pub:A_pub}, which pickStoragePeer filters
-	// out. That keeps B in storage-only mode after `invite` exits.
 	joinCmd := NewRootCmd()
 	joinCmd.SetOut(io.Discard)
 	joinCmd.SetErr(io.Discard)
@@ -117,25 +105,18 @@ func TestE2E_BackupAndRestoreRoundTrip(t *testing.T) {
 	})
 	go func() { aDone <- aRunCmd.ExecuteContext(aCtx) }()
 
-	// Wait for the index to record every file. `backupFile` writes
-	// "backed up <path> (N chunks)\n" only *after* Index.Put commits, so
-	// observing that line per fixture proves the index is consistent
-	// with what's on the peer. Watching B's blob count alone races the
-	// index write for multi-chunk files.
 	waitForBlobs(t, filepath.Join(dataB, "chunks"), expectedBlobs, 20*time.Second)
 	for _, f := range fixtures {
 		line := "backed up " + filepath.Join(srcDir, f.rel)
 		waitForSubstring(t, aStdout, line, 20*time.Second)
 	}
 
-	// Stop A, keep B up so restore can fetch.
 	cancelA()
 	if err := awaitDone(aDone, 10*time.Second); err != nil {
 		t.Fatalf("node A run: %v", err)
 	}
 
-	// Phase 4: restore to a fresh tree. Files land at
-	// <restoreRoot><original-abs-path> (M1.10 restore layout).
+	// Phase 4: restore to a fresh tree.
 	restoreCmd := NewRootCmd()
 	restoreCmd.SetOut(io.Discard)
 	restoreCmd.SetErr(io.Discard)
@@ -153,11 +134,7 @@ func TestE2E_BackupAndRestoreRoundTrip(t *testing.T) {
 	assertTreesEqual(t, srcDir, filepath.Join(restoreRoot, srcDir))
 }
 
-// TestE2E_ThenRunFlags_BackupAndRestoreRoundTrip covers the docker-compose-
-// style flow: both invite and join transition into the sync daemon
-// after the handshake, and the token is exchanged via a shared file
-// rather than a copy-pasted stdout line. Same verification as the base
-// e2e test (byte-for-byte tree equality post-restore).
+// TestE2E_ThenRunFlags_BackupAndRestoreRoundTrip drives the --then-run flow with a token exchanged via a shared file and asserts byte-for-byte tree equality after restore.
 func TestE2E_ThenRunFlags_BackupAndRestoreRoundTrip(t *testing.T) {
 	dataA := filepath.Join(t.TempDir(), "node-a")
 	dataB := filepath.Join(t.TempDir(), "node-b")
@@ -194,9 +171,6 @@ func TestE2E_ThenRunFlags_BackupAndRestoreRoundTrip(t *testing.T) {
 	overallCtx, cancelOverall := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancelOverall()
 
-	// B: `invite --then-run` stays alive as a storage peer after the
-	// join handshake. --token-out drops the token into the shared dir
-	// for A to pick up.
 	bCtx, cancelB := context.WithCancel(overallCtx)
 	bDone := make(chan error, 1)
 	bCmd := NewRootCmd()
@@ -212,8 +186,6 @@ func TestE2E_ThenRunFlags_BackupAndRestoreRoundTrip(t *testing.T) {
 	})
 	go func() { bDone <- bCmd.ExecuteContext(bCtx) }()
 
-	// A: `join --token-file --then-run` polls for the token, dials,
-	// handshakes, and continues as a backup daemon.
 	aCtx, cancelA := context.WithCancel(overallCtx)
 	aDone := make(chan error, 1)
 	aCmd := NewRootCmd()
@@ -258,10 +230,7 @@ func TestE2E_ThenRunFlags_BackupAndRestoreRoundTrip(t *testing.T) {
 	assertTreesEqual(t, srcDir, filepath.Join(restoreRoot, srcDir))
 }
 
-// reserveLocalUDPAddr binds a 127.0.0.1 UDP socket on a kernel-assigned
-// port, closes it, and returns the "host:port" string. The caller
-// re-binds the same port immediately; the window is small enough that
-// another process stealing it is not a concern in a local test run.
+// reserveLocalUDPAddr binds a 127.0.0.1 UDP socket on a kernel-assigned port and returns the "host:port" string.
 func reserveLocalUDPAddr(t *testing.T) string {
 	t.Helper()
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
@@ -273,8 +242,7 @@ func reserveLocalUDPAddr(t *testing.T) string {
 	return addr
 }
 
-// waitForSubstring polls buf until it contains needle, or fails the
-// test when the deadline elapses.
+// waitForSubstring polls buf until it contains needle, or fails when the deadline elapses.
 func waitForSubstring(t *testing.T, buf *syncBuffer, needle string, deadline time.Duration) {
 	t.Helper()
 	end := time.Now().Add(deadline)
@@ -287,8 +255,7 @@ func waitForSubstring(t *testing.T, buf *syncBuffer, needle string, deadline tim
 	t.Fatalf("substring %q not seen within %s; got:\n%s", needle, deadline, buf.String())
 }
 
-// waitForBlobs polls dir for regular files until count reaches min or
-// the deadline elapses.
+// waitForBlobs polls dir for regular files until count reaches min or the deadline elapses.
 func waitForBlobs(t *testing.T, dir string, min int, deadline time.Duration) {
 	t.Helper()
 	end := time.Now().Add(deadline)
@@ -302,8 +269,7 @@ func waitForBlobs(t *testing.T, dir string, min int, deadline time.Duration) {
 		min, dir, deadline, countRegularFiles(dir))
 }
 
-// countRegularFiles walks dir and returns the number of regular files at
-// any depth. A missing dir is treated as empty.
+// countRegularFiles walks dir and returns the number of regular files at any depth.
 func countRegularFiles(dir string) int {
 	count := 0
 	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
@@ -318,8 +284,7 @@ func countRegularFiles(dir string) int {
 	return count
 }
 
-// awaitDone waits for one message on done, returning its value, or an
-// error if nothing arrives within timeout.
+// awaitDone waits for one message on done and returns its value, or an error after timeout.
 func awaitDone(done <-chan error, timeout time.Duration) error {
 	select {
 	case err := <-done:
@@ -329,8 +294,7 @@ func awaitDone(done <-chan error, timeout time.Duration) error {
 	}
 }
 
-// assertTreesEqual walks want and got in parallel, failing on missing
-// entries, type mismatches, content mismatches, or unexpected extras.
+// assertTreesEqual walks want and got and fails on missing entries, type mismatches, content mismatches, or extras.
 func assertTreesEqual(t *testing.T, want, got string) {
 	t.Helper()
 	seen := make(map[string]struct{})
