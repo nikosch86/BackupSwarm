@@ -395,63 +395,81 @@ func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store) {
 // ownerKey is the TLS-authenticated Ed25519 pubkey of the remote peer,
 // used by put to record ownership and by delete to authorize removal.
 func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, ownerKey []byte) error {
-	_ = ctx
 	msgType, err := protocol.ReadMessageType(rw)
 	if err != nil {
 		return fmt.Errorf("read message type: %w", err)
 	}
 	switch msgType {
 	case protocol.MsgPutChunk:
-		return handlePutChunkStream(rw, st, ownerKey)
+		return handlePutChunkStream(ctx, rw, st, ownerKey)
 	case protocol.MsgDeleteChunk:
-		return handleDeleteChunkStream(rw, st, ownerKey)
+		return handleDeleteChunkStream(ctx, rw, st, ownerKey)
 	case protocol.MsgGetChunk:
-		return handleGetChunkStream(rw, st)
+		return handleGetChunkStream(ctx, rw, st)
 	default:
 		return fmt.Errorf("unknown message type %d", msgType)
 	}
 }
 
-// handlePutChunkStream stores the request blob under owner and writes
-// the response. Store errors are surfaced as application errors so the
-// owner can distinguish them from transport failures.
-func handlePutChunkStream(rw io.ReadWriter, st *store.Store, owner []byte) error {
+// errCode maps a store error to a stable on-wire short code. Sentinels
+// surface as their named code; everything else falls through to "internal".
+func errCode(err error) string {
+	switch {
+	case errors.Is(err, store.ErrChunkNotFound):
+		return "not_found"
+	case errors.Is(err, store.ErrOwnerMismatch):
+		return "owner_mismatch"
+	default:
+		return "internal"
+	}
+}
+
+// handlePutChunkStream stores the request blob under owner and writes the
+// response. Store errors map to a short code on the wire; the rich error
+// is logged via slog.WarnContext.
+func handlePutChunkStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owner []byte) error {
 	blob, err := protocol.ReadPutChunkRequest(rw, maxBlobLen)
 	if err != nil {
 		return fmt.Errorf("read request: %w", err)
 	}
 	hash, putErr := st.PutOwned(blob, owner)
 	if putErr != nil {
-		return protocol.WritePutChunkResponse(rw, [32]byte{}, putErr.Error())
+		code := errCode(putErr)
+		slog.WarnContext(ctx, "put chunk failed", "code", code, "err", putErr)
+		return protocol.WritePutChunkResponse(rw, [32]byte{}, code)
 	}
 	return protocol.WritePutChunkResponse(rw, hash, "")
 }
 
-// handleDeleteChunkStream authorizes the delete against owner (the
-// TLS-authenticated pubkey) and writes the response. Owner-mismatch and
-// chunk-not-found are surfaced as application errors.
-func handleDeleteChunkStream(rw io.ReadWriter, st *store.Store, owner []byte) error {
+// handleDeleteChunkStream authorizes the delete against owner (the TLS-
+// authenticated pubkey) and writes the response. Store errors map to a
+// short code on the wire; the rich error is logged via slog.WarnContext.
+func handleDeleteChunkStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owner []byte) error {
 	hash, err := protocol.ReadDeleteChunkRequest(rw)
 	if err != nil {
 		return fmt.Errorf("read request: %w", err)
 	}
 	if delErr := st.DeleteForOwner(hash, owner); delErr != nil {
-		return protocol.WriteDeleteChunkResponse(rw, delErr.Error())
+		code := errCode(delErr)
+		slog.WarnContext(ctx, "delete chunk failed", "code", code, "err", delErr)
+		return protocol.WriteDeleteChunkResponse(rw, code)
 	}
 	return protocol.WriteDeleteChunkResponse(rw, "")
 }
 
-// handleGetChunkStream looks up the blob by hash and writes the response.
-// Unknown-hash is an application error; no owner check is performed —
-// storage peers serve any stored chunk on an authenticated connection.
-func handleGetChunkStream(rw io.ReadWriter, st *store.Store) error {
+// handleGetChunkStream returns the blob for hash to any authenticated peer.
+// Store errors map to a short code on the wire; the rich error is logged
+// via slog.WarnContext.
+func handleGetChunkStream(ctx context.Context, rw io.ReadWriter, st *store.Store) error {
 	hash, err := protocol.ReadGetChunkRequest(rw)
 	if err != nil {
 		return fmt.Errorf("read request: %w", err)
 	}
 	blob, getErr := st.Get(hash)
 	if getErr != nil {
-		return protocol.WriteGetChunkResponse(rw, nil, getErr.Error())
+		code := errCode(getErr)
+		slog.WarnContext(ctx, "get chunk failed", "code", code, "err", getErr)
+		return protocol.WriteGetChunkResponse(rw, nil, code)
 	}
 	return protocol.WriteGetChunkResponse(rw, blob, "")
 }
