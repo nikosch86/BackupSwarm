@@ -330,7 +330,9 @@ func TestDispatchStream_RoutesPeerAnnouncement(t *testing.T) {
 	rw := &fakeStream{writeErrAt: -1, rd: body}
 
 	var got bytes.Buffer
-	announceFn := func(_ context.Context, r io.Reader) error {
+	var gotSender []byte
+	announceFn := func(_ context.Context, r io.Reader, senderPub []byte) error {
+		gotSender = append([]byte(nil), senderPub...)
 		_, err := got.ReadFrom(r)
 		return err
 	}
@@ -339,6 +341,9 @@ func TestDispatchStream_RoutesPeerAnnouncement(t *testing.T) {
 	}
 	if got.String() != "ANNOUNCEMENT_PAYLOAD" {
 		t.Errorf("announceFn body = %q, want 'ANNOUNCEMENT_PAYLOAD'", got.String())
+	}
+	if string(gotSender) != "alice" {
+		t.Errorf("announceFn senderPub = %q, want 'alice'", gotSender)
 	}
 }
 
@@ -495,7 +500,7 @@ func TestPrune_IndexDeleteError(t *testing.T) {
 
 	serveCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = Serve(serveCtx, listener, peerStore, nil) }()
+	go func() { _ = Serve(serveCtx, listener, peerStore, nil, nil) }()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer dialCancel()
@@ -930,7 +935,7 @@ func TestServeConn_BoundsConcurrentDispatchers(t *testing.T) {
 	serveCtx, cancel := context.WithCancel(context.Background())
 	serveDone := make(chan struct{})
 	go func() {
-		_ = Serve(serveCtx, listener, nil, nil)
+		_ = Serve(serveCtx, listener, nil, nil, nil)
 		close(serveDone)
 	}()
 	// Registered after withDispatchStreamFunc so LIFO drains all
@@ -1025,7 +1030,7 @@ func TestServeConn_LogsDispatchError(t *testing.T) {
 
 	serveCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = Serve(serveCtx, listener, nil, nil) }()
+	go func() { _ = Serve(serveCtx, listener, nil, nil, nil) }()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(dialCancel)
@@ -1048,6 +1053,67 @@ func TestServeConn_LogsDispatchError(t *testing.T) {
 	case <-dispatchDone:
 	case <-time.After(3 * time.Second):
 		t.Fatal("dispatcher stub never invoked")
+	}
+}
+
+// TestServe_ConnObserverFiresOnAcceptAndClose asserts the ConnObserver
+// callbacks fire before and after each conn is served.
+func TestServe_ConnObserverFiresOnAcceptAndClose(t *testing.T) {
+	serverPub, serverPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("server key: %v", err)
+	}
+	_, clientPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("client key: %v", err)
+	}
+
+	listener, err := bsquic.Listen("127.0.0.1:0", serverPriv, nil, nil)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	acceptCh := make(chan *bsquic.Conn, 1)
+	closeCh := make(chan *bsquic.Conn, 1)
+	obs := &ConnObserver{
+		OnAccept: func(c *bsquic.Conn) { acceptCh <- c },
+		OnClose:  func(c *bsquic.Conn) { closeCh <- c },
+	}
+
+	serveCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = Serve(serveCtx, listener, nil, nil, obs) }()
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(dialCancel)
+	conn, err := bsquic.Dial(dialCtx, listener.Addr().String(), clientPriv, serverPub, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+
+	var accepted *bsquic.Conn
+	select {
+	case accepted = <-acceptCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("OnAccept never fired")
+	}
+	if accepted == nil {
+		t.Fatal("OnAccept fired with nil conn")
+	}
+
+	// Force the server's serveConn to return by closing client side and
+	// cancelling the serve context. OnClose must fire.
+	_ = conn.Close()
+	cancel()
+
+	select {
+	case closed := <-closeCh:
+		if closed != accepted {
+			t.Errorf("OnClose conn != OnAccept conn")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("OnClose never fired")
 	}
 }
 
@@ -1091,7 +1157,7 @@ func TestServeConn_SemaphoreAcquireCancelled(t *testing.T) {
 	serveCtx, cancel := context.WithCancel(context.Background())
 	serveDone := make(chan struct{})
 	go func() {
-		_ = Serve(serveCtx, listener, nil, nil)
+		_ = Serve(serveCtx, listener, nil, nil, nil)
 		close(serveDone)
 	}()
 

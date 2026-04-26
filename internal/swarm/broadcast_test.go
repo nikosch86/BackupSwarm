@@ -164,6 +164,58 @@ func TestBroadcastPeerJoined_FansOutToAllConns(t *testing.T) {
 	}
 }
 
+func TestBroadcastPeerJoined_FillsRandomID(t *testing.T) {
+	rig := setupQuicPair(t, 1)
+	joinerPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("joiner key: %v", err)
+	}
+	joiner := peers.Peer{
+		Addr:   "192.0.2.7:9000",
+		PubKey: joinerPub,
+		Role:   peers.RolePeer,
+	}
+
+	// Capture the announcement received over the wire across two broadcasts;
+	// IDs must be non-zero and distinct between calls.
+	receive := func() protocol.PeerAnnouncement {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s, err := rig.subSide[0].AcceptStream(ctx)
+		if err != nil {
+			t.Fatalf("AcceptStream: %v", err)
+		}
+		defer func() { _ = s.Close() }()
+		if _, err := protocol.ReadMessageType(s); err != nil {
+			t.Fatalf("ReadMessageType: %v", err)
+		}
+		ann, err := protocol.ReadPeerAnnouncement(s, 1<<10)
+		if err != nil {
+			t.Fatalf("ReadPeerAnnouncement: %v", err)
+		}
+		return ann
+	}
+
+	got := make([]protocol.PeerAnnouncement, 2)
+	for i := range got {
+		ch := make(chan protocol.PeerAnnouncement, 1)
+		go func() { ch <- receive() }()
+		if err := swarm.BroadcastPeerJoined(context.Background(), rig.introSide, joiner); err != nil {
+			t.Fatalf("BroadcastPeerJoined %d: %v", i, err)
+		}
+		got[i] = <-ch
+	}
+	for i, ann := range got {
+		var zero [protocol.AnnouncementIDSize]byte
+		if ann.ID == zero {
+			t.Errorf("broadcast %d: ID is zero", i)
+		}
+	}
+	if got[0].ID == got[1].ID {
+		t.Error("two broadcasts emitted the same ID")
+	}
+}
+
 func TestBroadcastPeerJoined_ContinuesPastDeadConn(t *testing.T) {
 	rig := setupQuicPair(t, 2)
 	joinerPub, _, err := ed25519.GenerateKey(rand.Reader)

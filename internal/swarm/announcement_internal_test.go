@@ -40,6 +40,34 @@ func withWriteAnnouncementFrame(t *testing.T, fn func(io.Writer, protocol.PeerAn
 	t.Cleanup(func() { writeAnnouncementFrame = prev })
 }
 
+// withRandReadFunc swaps randReadFunc for the duration of a test.
+func withRandReadFunc(t *testing.T, fn func([]byte) (int, error)) {
+	t.Helper()
+	prev := randReadFunc
+	randReadFunc = fn
+	t.Cleanup(func() { randReadFunc = prev })
+}
+
+// TestBroadcastPeerJoined_RandReadErrorSurfacesWrapped exercises the
+// rand.Read failure branch.
+func TestBroadcastPeerJoined_RandReadErrorSurfacesWrapped(t *testing.T) {
+	sentinel := errors.New("forced rand failure")
+	withRandReadFunc(t, func([]byte) (int, error) { return 0, sentinel })
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+	joiner := peers.Peer{Addr: "192.0.2.7:9000", PubKey: pub, Role: peers.RolePeer}
+	gotErr := BroadcastPeerJoined(context.Background(), nil, joiner)
+	if gotErr == nil {
+		t.Fatal("BroadcastPeerJoined succeeded despite injected rand failure")
+	}
+	if !errors.Is(gotErr, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", gotErr)
+	}
+}
+
 func openInternalStore(t *testing.T) *peers.Store {
 	t.Helper()
 	s, err := peers.Open(filepath.Join(t.TempDir(), "peers.db"))

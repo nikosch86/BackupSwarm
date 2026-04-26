@@ -72,7 +72,7 @@ func newScanRig(t *testing.T) *scanRig {
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 
-	go func() { _ = backup.Serve(ctx, listener, peerStore, nil) }()
+	go func() { _ = backup.Serve(ctx, listener, peerStore, nil, nil) }()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()
@@ -329,7 +329,7 @@ func newPeerRig(t *testing.T) *peerRig {
 	serveCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	done := make(chan error, 1)
-	go func() { done <- backup.Serve(serveCtx, listener, peerStore, nil) }()
+	go func() { done <- backup.Serve(serveCtx, listener, peerStore, nil, nil) }()
 
 	return &peerRig{
 		addr:      listener.Addr().String(),

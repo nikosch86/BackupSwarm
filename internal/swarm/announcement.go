@@ -6,6 +6,7 @@ package swarm
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -26,6 +27,7 @@ var (
 	storeAddFunc           = func(s *peers.Store, p peers.Peer) error { return s.Add(p) }
 	writeMsgTypeFunc       = protocol.WriteMessageType
 	writeAnnouncementFrame = protocol.WritePeerAnnouncement
+	randReadFunc           = rand.Read
 )
 
 // Apply commits ann to store. PeerJoined never overwrites an existing
@@ -96,8 +98,8 @@ func ServeAnnouncementStream(ctx context.Context, r io.Reader, store *peers.Stor
 }
 
 // BroadcastPeerJoined opens one MsgPeerAnnouncement stream per connection
-// and writes a PeerJoined frame for joiner. Per-conn failures are logged
-// and skipped so one dead peer cannot drop the rest of the broadcast.
+// and writes a PeerJoined frame for joiner with a fresh random ID.
+// Per-conn failures are logged and skipped.
 func BroadcastPeerJoined(ctx context.Context, conns []*bsquic.Conn, joiner peers.Peer) error {
 	if len(joiner.PubKey) != ed25519.PublicKeySize {
 		return fmt.Errorf("broadcast PeerJoined: pubkey size %d, want %d", len(joiner.PubKey), ed25519.PublicKeySize)
@@ -107,6 +109,9 @@ func BroadcastPeerJoined(ctx context.Context, conns []*bsquic.Conn, joiner peers
 	}
 	var ann protocol.PeerAnnouncement
 	ann.Kind = protocol.AnnouncePeerJoined
+	if _, err := randReadFunc(ann.ID[:]); err != nil {
+		return fmt.Errorf("broadcast PeerJoined: mint id: %w", err)
+	}
 	copy(ann.PubKey[:], joiner.PubKey)
 	ann.Role = byte(joiner.Role)
 	ann.Addr = joiner.Addr

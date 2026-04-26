@@ -336,14 +336,21 @@ func sendDeleteChunk(ctx context.Context, conn streamOpener, hash [32]byte) erro
 }
 
 // AnnouncementHandler reads one peer-announcement frame off r (the type
-// byte already consumed by the dispatcher) and applies it. A nil handler
-// rejects MsgPeerAnnouncement at dispatch time.
-type AnnouncementHandler func(ctx context.Context, r io.Reader) error
+// byte already consumed by the dispatcher). senderPub is the conn's
+// TLS-authenticated pubkey; a nil handler rejects MsgPeerAnnouncement.
+type AnnouncementHandler func(ctx context.Context, r io.Reader, senderPub []byte) error
+
+// ConnObserver receives a per-connection accept/close pair while Serve
+// runs. Either field may be nil.
+type ConnObserver struct {
+	OnAccept func(*bsquic.Conn)
+	OnClose  func(*bsquic.Conn)
+}
 
 // Serve accepts inbound QUIC connections on l and dispatches streams
-// against st. ann handles MsgPeerAnnouncement streams; nil rejects them.
-// Exits on ctx cancellation; blocks until every serveConn drains.
-func Serve(ctx context.Context, l *bsquic.Listener, st *store.Store, ann AnnouncementHandler) error {
+// against st. ann handles MsgPeerAnnouncement streams; obs is notified at
+// conn accept/close. Exits on ctx cancellation.
+func Serve(ctx context.Context, l *bsquic.Listener, st *store.Store, ann AnnouncementHandler, obs *ConnObserver) error {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	for {
@@ -357,13 +364,21 @@ func Serve(ctx context.Context, l *bsquic.Listener, st *store.Store, ann Announc
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			serveConn(ctx, conn, st, ann)
+			serveConn(ctx, conn, st, ann, obs)
 		}()
 	}
 }
 
-func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann AnnouncementHandler) {
-	defer func() { _ = conn.Close() }()
+func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann AnnouncementHandler, obs *ConnObserver) {
+	if obs != nil && obs.OnAccept != nil {
+		obs.OnAccept(conn)
+	}
+	defer func() {
+		if obs != nil && obs.OnClose != nil {
+			obs.OnClose(conn)
+		}
+		_ = conn.Close()
+	}()
 	ownerKey := append([]byte(nil), conn.RemotePub()...)
 	// sem bounds concurrent dispatcher goroutines per connection.
 	sem := make(chan struct{}, serveConnStreamCap)
@@ -415,7 +430,7 @@ func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owne
 		if ann == nil {
 			return fmt.Errorf("peer announcement received but no handler configured")
 		}
-		return ann(ctx, rw)
+		return ann(ctx, rw, ownerKey)
 	default:
 		return fmt.Errorf("unknown message type %d", msgType)
 	}

@@ -21,24 +21,32 @@ const (
 	AnnounceAddressChanged AnnouncementKind = 3
 )
 
+// AnnouncementIDSize is the length of an announcement's dedup ID in bytes.
+const AnnouncementIDSize = 16
+
 // PeerAnnouncement carries one membership event over the wire. Role is
-// opaque to this package; consumers map the byte to peers.Role.
+// opaque to this package; consumers map the byte to peers.Role. ID is a
+// random 16-byte token used by forwarders to break gossip loops.
 type PeerAnnouncement struct {
 	Kind   AnnouncementKind
+	ID     [AnnouncementIDSize]byte
 	PubKey [32]byte
 	Role   byte
 	Addr   string
 }
 
 // WritePeerAnnouncement frames ann on w as
-// [1B kind][32B pubkey][1B role][4B BE addr_len][addr]. Unusable shapes
-// (zero-role PeerJoined, empty-addr AddressChanged) are rejected.
+// [1B kind][16B id][32B pubkey][1B role][4B BE addr_len][addr]. Unusable
+// shapes (zero-role PeerJoined, empty-addr AddressChanged) are rejected.
 func WritePeerAnnouncement(w io.Writer, ann PeerAnnouncement) error {
 	if err := validateAnnouncement(ann); err != nil {
 		return err
 	}
 	if _, err := w.Write([]byte{byte(ann.Kind)}); err != nil {
 		return fmt.Errorf("write announcement kind: %w", err)
+	}
+	if _, err := w.Write(ann.ID[:]); err != nil {
+		return fmt.Errorf("write announcement id: %w", err)
 	}
 	if _, err := w.Write(ann.PubKey[:]); err != nil {
 		return fmt.Errorf("write announcement pubkey: %w", err)
@@ -69,6 +77,9 @@ func ReadPeerAnnouncement(r io.Reader, maxAddrLen int) (PeerAnnouncement, error)
 		return ann, fmt.Errorf("read announcement kind: %w", err)
 	}
 	ann.Kind = AnnouncementKind(kindBuf[0])
+	if _, err := io.ReadFull(r, ann.ID[:]); err != nil {
+		return ann, fmt.Errorf("read announcement id: %w", err)
+	}
 	if _, err := io.ReadFull(r, ann.PubKey[:]); err != nil {
 		return ann, fmt.Errorf("read announcement pubkey: %w", err)
 	}

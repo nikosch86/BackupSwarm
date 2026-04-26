@@ -227,8 +227,9 @@ func TestServeAnnouncementStream_RejectsTruncatedFrame(t *testing.T) {
 
 func TestServeAnnouncementStream_RejectsUnknownKind(t *testing.T) {
 	store := openStore(t)
-	frame := append([]byte{99}, bytes.Repeat([]byte{0xaa}, 32)...)
-	frame = append(frame, 1, 0, 0, 0, 0)
+	frame := append([]byte{99}, bytes.Repeat([]byte{0x11}, 16)...) // id
+	frame = append(frame, bytes.Repeat([]byte{0xaa}, 32)...)       // pubkey
+	frame = append(frame, 1, 0, 0, 0, 0)                           // role + addr_len=0
 	if err := swarm.ServeAnnouncementStream(context.Background(), bytes.NewReader(frame), store); err == nil {
 		t.Error("ServeAnnouncementStream accepted unknown kind")
 	}

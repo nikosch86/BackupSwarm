@@ -273,11 +273,15 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer func() { _ = listener.Close() }()
 
-	serveErrCh := make(chan error, 1)
-	announceFn := func(ctx context.Context, r io.Reader) error {
-		return swarm.ServeAnnouncementStream(ctx, r, peerStore)
+	connSet := swarm.NewConnSet()
+	router := &swarm.Router{
+		Store: peerStore,
+		Dedup: swarm.NewDedupCache(swarm.DefaultDedupCapacity),
+		Conns: connSet,
 	}
-	go func() { serveErrCh <- backup.Serve(ctx, listener, st, announceFn) }()
+	obs := &backup.ConnObserver{OnAccept: connSet.Add, OnClose: connSet.Remove}
+	serveErrCh := make(chan error, 1)
+	go func() { serveErrCh <- backup.Serve(ctx, listener, st, router.HandleStream, obs) }()
 
 	// Pure storage-peer role: serve inbound chunks only, no scan loop.
 	if opts.BackupDir == "" {
@@ -314,7 +318,11 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("dial peer %q: %w", storagePeer.Addr, err)
 	}
-	defer func() { _ = peerConn.Close() }()
+	connSet.Add(peerConn)
+	defer func() {
+		connSet.Remove(peerConn)
+		_ = peerConn.Close()
+	}()
 	slog.InfoContext(ctx, "dialed storage peer",
 		"peer_addr", storagePeer.Addr,
 		"peer_pub", hex.EncodeToString(storagePeer.PubKey),
