@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"backupswarm/internal/node"
+	"backupswarm/internal/daemon"
 	"backupswarm/pkg/token"
 )
 
@@ -43,171 +44,147 @@ func (b *syncBuffer) String() string {
 
 var _ io.Writer = (*syncBuffer)(nil)
 
-func TestInviteCmd_RequiresListenFlag(t *testing.T) {
-	dataDir := filepath.Join(t.TempDir(), "node")
+// TestInviteCmd_RequiresRunningDaemon asserts `invite` against a data
+// dir with no listen.addr surfaces the daemon.ErrNoRunningDaemon
+// sentinel — a fail-fast guard against issuing tokens for an inviter
+// that nothing is listening on.
+func TestInviteCmd_RequiresRunningDaemon(t *testing.T) {
+	dataDir := t.TempDir()
 	root := NewRootCmd()
 	var stdout, stderr bytes.Buffer
 	root.SetOut(&stdout)
 	root.SetErr(&stderr)
 	root.SetArgs([]string{"--data-dir", dataDir, "invite"})
-	if err := root.Execute(); err == nil {
-		t.Error("invite without --listen returned nil error")
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("invite without running daemon returned nil error")
+	}
+	if !errors.Is(err, daemon.ErrNoRunningDaemon) {
+		t.Errorf("err = %v, want wraps daemon.ErrNoRunningDaemon", err)
 	}
 }
 
-func TestInviteCmd_TimesOutWhenNoJoinerArrives(t *testing.T) {
-	dataDir := filepath.Join(t.TempDir(), "node")
+// TestInviteCmd_AgainstRunningDaemon_PrintsToken seeds listen.addr (no
+// real daemon needed for this surface — the issuance path only needs
+// the bound addr file + a writable invites.db) and asserts the printed
+// token decodes with the embedded address.
+func TestInviteCmd_AgainstRunningDaemon_PrintsToken(t *testing.T) {
+	dataDir := t.TempDir()
+	const fakeAddr = "127.0.0.1:54321"
+	if err := daemon.WriteListenAddr(dataDir, fakeAddr); err != nil {
+		t.Fatalf("seed listen.addr: %v", err)
+	}
+
 	root := NewRootCmd()
-	var stdout, stderr bytes.Buffer
-	root.SetOut(&stdout)
-	root.SetErr(&stderr)
-	root.SetArgs([]string{
-		"--data-dir", dataDir,
-		"invite",
-		"--listen", "127.0.0.1:0",
-		"--timeout", "200ms",
-	})
-	if err := root.Execute(); err == nil {
-		t.Error("invite returned nil error on timeout")
+	stdout := &syncBuffer{}
+	root.SetOut(stdout)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"--data-dir", dataDir, "invite"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("invite: %v", err)
 	}
 
 	tokStr := strings.TrimSpace(stdout.String())
 	if tokStr == "" {
-		t.Error("invite did not print a token before the timeout")
+		t.Fatal("invite printed no token")
 	}
-	if _, err := token.Decode(tokStr); err != nil {
-		t.Errorf("printed token did not decode: %v", err)
+	tok, err := token.Decode(tokStr)
+	if err != nil {
+		t.Fatalf("printed token did not decode: %v", err)
 	}
-
-	if _, err := node.Load(dataDir); err != nil {
-		t.Errorf("invite should have created identity: %v", err)
+	if tok.Addr != fakeAddr {
+		t.Errorf("token addr = %q, want %q", tok.Addr, fakeAddr)
 	}
 }
 
-// TestInviteJoin_HappyPath runs invite and join in parallel and asserts both sides' peer stores end up populated.
-func TestInviteJoin_HappyPath(t *testing.T) {
-	inviterDir := filepath.Join(t.TempDir(), "inviter")
-	joinerDir := filepath.Join(t.TempDir(), "joiner")
+// TestInviteCmd_TokenOut_WritesFile asserts --token-out writes the
+// same token printed to stdout (with a trailing newline).
+func TestInviteCmd_TokenOut_WritesFile(t *testing.T) {
+	dataDir := t.TempDir()
+	const fakeAddr = "127.0.0.1:9999"
+	if err := daemon.WriteListenAddr(dataDir, fakeAddr); err != nil {
+		t.Fatalf("seed listen.addr: %v", err)
+	}
+	tokenPath := filepath.Join(t.TempDir(), "token.txt")
 
-	inviteOut := &syncBuffer{}
-	inviterCmd := NewRootCmd()
-	inviterCmd.SetOut(inviteOut)
-	inviterCmd.SetErr(&bytes.Buffer{})
-	inviterCmd.SetArgs([]string{
-		"--data-dir", inviterDir,
-		"invite",
-		"--listen", "127.0.0.1:0",
-		"--timeout", "5s",
-	})
+	root := NewRootCmd()
+	stdout := &syncBuffer{}
+	root.SetOut(stdout)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"--data-dir", dataDir, "invite", "--token-out", tokenPath})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("invite: %v", err)
+	}
+
+	data, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("read token file: %v", err)
+	}
+	gotFile := strings.TrimSpace(string(data))
+	gotStdout := strings.TrimSpace(stdout.String())
+	if gotFile != gotStdout {
+		t.Errorf("token mismatch: stdout=%q file=%q", gotStdout, gotFile)
+	}
+	if _, err := token.Decode(gotFile); err != nil {
+		t.Errorf("--token-out content did not decode: %v", err)
+	}
+}
+
+// TestInviteJoin_HappyPath drives the new split surface end-to-end:
+// `run --invite` boots a daemon and prints the founder token; `join`
+// consumes it. After both commands return, the joiner's peer store
+// must list the introducer.
+func TestInviteJoin_HappyPath(t *testing.T) {
+	inviterDir := t.TempDir()
+	joinerDir := t.TempDir()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	var wg sync.WaitGroup
-	var inviteErr, joinErr error
+	inviteOut := &syncBuffer{}
+	inviterCmd := NewRootCmd()
+	inviterCmd.SetOut(inviteOut)
+	inviterCmd.SetErr(io.Discard)
+	inviterCmd.SetArgs([]string{
+		"--data-dir", inviterDir,
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--invite",
+	})
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		inviteErr = inviterCmd.ExecuteContext(ctx)
-	}()
+	inviterCtx, inviterCancel := context.WithCancel(ctx)
+	defer inviterCancel()
+	inviterDone := make(chan error, 1)
+	go func() { inviterDone <- inviterCmd.ExecuteContext(inviterCtx) }()
 
-	tokStr := waitForToken(t, inviteOut, 3*time.Second)
+	tokStr := waitForToken(t, inviteOut, 5*time.Second)
 
 	joinerCmd := NewRootCmd()
-	joinerCmd.SetOut(&bytes.Buffer{})
-	joinerCmd.SetErr(&bytes.Buffer{})
+	joinerCmd.SetOut(io.Discard)
+	joinerCmd.SetErr(io.Discard)
 	joinerCmd.SetArgs([]string{
 		"--data-dir", joinerDir,
 		"join",
 		"--listen", "192.0.2.55:7777",
 		tokStr,
 	})
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		joinErr = joinerCmd.ExecuteContext(ctx)
-	}()
-
-	wg.Wait()
-	if inviteErr != nil {
-		t.Fatalf("invite: %v", inviteErr)
-	}
-	if joinErr != nil {
-		t.Fatalf("join: %v", joinErr)
-	}
-}
-
-// TestInviteCmd_TokenOut_WritesFile asserts --token-out writes the same token that was printed to stdout.
-func TestInviteCmd_TokenOut_WritesFile(t *testing.T) {
-	dataDir := filepath.Join(t.TempDir(), "node")
-	tokenPath := filepath.Join(t.TempDir(), "token.txt")
-	root := NewRootCmd()
-	var stdout, stderr bytes.Buffer
-	root.SetOut(&stdout)
-	root.SetErr(&stderr)
-	root.SetArgs([]string{
-		"--data-dir", dataDir,
-		"invite",
-		"--listen", "127.0.0.1:0",
-		"--timeout", "300ms",
-		"--token-out", tokenPath,
-	})
-	_ = root.Execute()
-
-	data, err := os.ReadFile(tokenPath)
-	if err != nil {
-		t.Fatalf("read token file: %v", err)
-	}
-	tokStr := strings.TrimSpace(string(data))
-	if _, err := token.Decode(tokStr); err != nil {
-		t.Errorf("--token-out content did not decode: %v (contents=%q)", err, tokStr)
-	}
-	stdoutTok := strings.TrimSpace(stdout.String())
-	if stdoutTok != tokStr {
-		t.Errorf("token mismatch: stdout=%q file=%q", stdoutTok, tokStr)
-	}
-}
-
-// TestWriteTokenFile_CreateTempFails asserts a missing target directory surfaces as a "create temp" error.
-func TestWriteTokenFile_CreateTempFails(t *testing.T) {
-	err := writeTokenFile(filepath.Join(t.TempDir(), "missing-dir", "token.txt"), "tok")
-	if err == nil {
-		t.Fatal("expected error when target directory does not exist")
-	}
-	if !strings.Contains(err.Error(), "create temp") {
-		t.Errorf("expected 'create temp' in error, got: %v", err)
-	}
-}
-
-// TestWriteTokenFile_RenameFails asserts a rename failure surfaces as "rename" and removes the temp file.
-func TestWriteTokenFile_RenameFails(t *testing.T) {
-	dir := t.TempDir()
-	target := filepath.Join(dir, "target-is-a-dir")
-	if err := os.Mkdir(target, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
+	if err := joinerCmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("join: %v", err)
 	}
 
-	err := writeTokenFile(target, "tok")
-	if err == nil {
-		t.Fatal("expected error when target is an existing directory")
-	}
-	if !strings.Contains(err.Error(), "rename") {
-		t.Errorf("expected 'rename' in error, got: %v", err)
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("readdir: %v", err)
-	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".token-") {
-			t.Errorf("orphaned temp file left behind: %q", e.Name())
+	inviterCancel()
+	select {
+	case err := <-inviterDone:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("inviter run --invite: %v", err)
 		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("inviter did not exit within 5s of cancel")
 	}
 }
 
-// waitForToken polls a syncBuffer until it contains a newline-terminated decodable token or the deadline expires.
+// waitForToken polls a syncBuffer until it contains a newline-terminated
+// decodable token or the deadline expires.
 func waitForToken(t *testing.T, buf *syncBuffer, deadline time.Duration) string {
 	t.Helper()
 	end := time.Now().Add(deadline)
@@ -221,6 +198,6 @@ func waitForToken(t *testing.T, buf *syncBuffer, deadline time.Duration) string 
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatalf("token did not appear on invite stdout within %s; got: %q", deadline, buf.String())
+	t.Fatalf("token did not appear within %s; got: %q", deadline, buf.String())
 	return ""
 }

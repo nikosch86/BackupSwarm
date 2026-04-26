@@ -75,7 +75,7 @@ func TestRestoreCmd_EndToEnd(t *testing.T) {
 
 	serveCtx, serveCancel := context.WithCancel(context.Background())
 	t.Cleanup(serveCancel)
-	go func() { _ = backup.Serve(serveCtx, listener, peerStore, nil, nil) }()
+	go func() { _ = backup.Serve(serveCtx, listener, peerStore, nil, nil, nil) }()
 
 	dataDir := t.TempDir()
 	id, _, err := node.Ensure(dataDir)

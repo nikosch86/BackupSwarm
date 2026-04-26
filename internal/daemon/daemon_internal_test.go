@@ -14,6 +14,7 @@ import (
 
 	"backupswarm/internal/backup"
 	"backupswarm/internal/index"
+	"backupswarm/internal/invites"
 	"backupswarm/internal/peers"
 	bsquic "backupswarm/internal/quic"
 	"backupswarm/internal/store"
@@ -38,6 +39,119 @@ func mustGenPub(t *testing.T) ed25519.PublicKey {
 		t.Fatalf("gen key: %v", err)
 	}
 	return pub
+}
+
+// TestPollPendingInvites_TracksIssueAndConsume runs the poll loop with
+// a tight interval, then issues + consumes an invite via a separate
+// Open and asserts the cache reflects each transition within a few
+// poll ticks.
+func TestPollPendingInvites_TracksIssueAndConsume(t *testing.T) {
+	dir := t.TempDir()
+	pc := &pendingCache{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const tick = 50 * time.Millisecond
+	pollDone := make(chan struct{})
+	go func() {
+		defer close(pollDone)
+		pollPendingInvites(ctx, dir, pc, tick)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-pollDone:
+		case <-time.After(2 * time.Second):
+			t.Error("poll loop did not exit within 2s of cancel")
+		}
+	})
+
+	// Initial state: empty file → cache settles at 0.
+	if got := pc.n.Load(); got != 0 {
+		t.Errorf("initial cache = %d, want 0", got)
+	}
+
+	// Issue one invite via a separate Open (the poll loop briefly
+	// releases the flock between ticks).
+	openInvites := func() *invites.Store {
+		s, err := invites.Open(filepath.Join(dir, invites.DefaultFilename))
+		if err != nil {
+			t.Fatalf("invites.Open: %v", err)
+		}
+		return s
+	}
+	store := openInvites()
+	var secret, swarmID [32]byte
+	if _, err := rand.Read(secret[:]); err != nil {
+		t.Fatalf("rand secret: %v", err)
+	}
+	if _, err := rand.Read(swarmID[:]); err != nil {
+		t.Fatalf("rand swarmID: %v", err)
+	}
+	if err := store.Issue(secret, swarmID); err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	_ = store.Close()
+
+	waitFor := func(want int32, deadline time.Duration) {
+		end := time.Now().Add(deadline)
+		for time.Now().Before(end) {
+			if pc.n.Load() == want {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("cache never reached %d (last %d)", want, pc.n.Load())
+	}
+	waitFor(1, 3*time.Second)
+
+	store2 := openInvites()
+	if _, err := store2.Consume(secret); err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+	_ = store2.Close()
+	waitFor(0, 3*time.Second)
+}
+
+// TestMakeVerifyPeer_KnownMemberAdmitted asserts a peer already in
+// peers.db passes the predicate even with zero pending invites.
+func TestMakeVerifyPeer_KnownMemberAdmitted(t *testing.T) {
+	ps := openPickStoragePeerStore(t)
+	pub := mustGenPub(t)
+	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:1", PubKey: pub, Role: peers.RolePeer}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	pc := &pendingCache{}
+	verify := makeVerifyPeer(ps, pc)
+	if err := verify(pub); err != nil {
+		t.Errorf("known member rejected: %v", err)
+	}
+}
+
+// TestMakeVerifyPeer_StrangerNoPending_Rejected asserts a peer absent
+// from peers.db is rejected when the pending cache reads zero.
+func TestMakeVerifyPeer_StrangerNoPending_Rejected(t *testing.T) {
+	ps := openPickStoragePeerStore(t)
+	stranger := mustGenPub(t)
+	pc := &pendingCache{}
+	verify := makeVerifyPeer(ps, pc)
+	if err := verify(stranger); err == nil {
+		t.Fatal("stranger admitted with no pending invites")
+	}
+}
+
+// TestMakeVerifyPeer_StrangerWithPending_Admitted asserts a stranger is
+// admitted while at least one invite is pending — the join window lets
+// an unknown pubkey complete the TLS handshake to consume its secret.
+func TestMakeVerifyPeer_StrangerWithPending_Admitted(t *testing.T) {
+	ps := openPickStoragePeerStore(t)
+	stranger := mustGenPub(t)
+	pc := &pendingCache{}
+	pc.n.Store(1)
+	verify := makeVerifyPeer(ps, pc)
+	if err := verify(stranger); err != nil {
+		t.Errorf("stranger rejected during pending window: %v", err)
+	}
 }
 
 // TestPickStoragePeer_SkipsRolePeer asserts a RolePeer record with a
@@ -255,7 +369,7 @@ func TestPurgeAll_PruneFailurePropagates(t *testing.T) {
 
 	serveCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = backup.Serve(serveCtx, listener, peerStore, nil, nil) }()
+	go func() { _ = backup.Serve(serveCtx, listener, peerStore, nil, nil, nil) }()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer dialCancel()

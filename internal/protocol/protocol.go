@@ -27,6 +27,9 @@ const (
 	MsgGetChunk MessageType = 0x03
 	// MsgPeerAnnouncement prefixes a PeerAnnouncement body.
 	MsgPeerAnnouncement MessageType = 0x04
+	// MsgJoinRequest prefixes a JoinRequest body. Lets the daemon's
+	// dispatcher route join handshakes alongside backup traffic.
+	MsgJoinRequest MessageType = 0x05
 )
 
 // WriteMessageType writes t as a single byte.

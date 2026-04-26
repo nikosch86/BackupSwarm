@@ -84,7 +84,7 @@ func seedRig(t *testing.T) Options {
 		t.Fatalf("Listen: %v", err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	go func() { _ = backup.Serve(ctx, listener, peerStore, nil, nil) }()
+	go func() { _ = backup.Serve(ctx, listener, peerStore, nil, nil, nil) }()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer dialCancel()

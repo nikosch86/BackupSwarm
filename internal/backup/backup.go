@@ -33,7 +33,7 @@ var (
 		return idx.Delete(path)
 	}
 	// dispatchStreamFunc routes each accepted stream to a handler.
-	dispatchStreamFunc func(ctx context.Context, rw io.ReadWriter, st *store.Store, ownerKey []byte, ann AnnouncementHandler) error = dispatchStream
+	dispatchStreamFunc func(ctx context.Context, rw io.ReadWriter, st *store.Store, ownerKey []byte, ann AnnouncementHandler, join JoinHandler) error = dispatchStream
 	// serveConnStreamCap is the per-connection handler-goroutine cap,
 	// matched to bsquic.MaxIncomingStreamsPerConn.
 	serveConnStreamCap = int(bsquic.MaxIncomingStreamsPerConn)
@@ -340,6 +340,11 @@ func sendDeleteChunk(ctx context.Context, conn streamOpener, hash [32]byte) erro
 // TLS-authenticated pubkey; a nil handler rejects MsgPeerAnnouncement.
 type AnnouncementHandler func(ctx context.Context, r io.Reader, senderPub []byte) error
 
+// JoinHandler reads one JoinRequest body off rw (type byte already
+// consumed) and writes the response. joinerPub is the conn's
+// TLS-authenticated pubkey; a nil handler rejects MsgJoinRequest.
+type JoinHandler func(ctx context.Context, rw io.ReadWriter, joinerPub []byte) error
+
 // ConnObserver receives a per-connection accept/close pair while Serve
 // runs. Either field may be nil.
 type ConnObserver struct {
@@ -348,9 +353,10 @@ type ConnObserver struct {
 }
 
 // Serve accepts inbound QUIC connections on l and dispatches streams
-// against st. ann handles MsgPeerAnnouncement streams; obs is notified at
-// conn accept/close. Exits on ctx cancellation.
-func Serve(ctx context.Context, l *bsquic.Listener, st *store.Store, ann AnnouncementHandler, obs *ConnObserver) error {
+// against st. ann handles MsgPeerAnnouncement, join handles
+// MsgJoinRequest; obs is notified at conn accept/close. Exits on ctx
+// cancellation.
+func Serve(ctx context.Context, l *bsquic.Listener, st *store.Store, ann AnnouncementHandler, join JoinHandler, obs *ConnObserver) error {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	for {
@@ -364,12 +370,12 @@ func Serve(ctx context.Context, l *bsquic.Listener, st *store.Store, ann Announc
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			serveConn(ctx, conn, st, ann, obs)
+			serveConn(ctx, conn, st, ann, join, obs)
 		}()
 	}
 }
 
-func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann AnnouncementHandler, obs *ConnObserver) {
+func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann AnnouncementHandler, join JoinHandler, obs *ConnObserver) {
 	if obs != nil && obs.OnAccept != nil {
 		obs.OnAccept(conn)
 	}
@@ -379,6 +385,12 @@ func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann Anno
 		}
 		_ = conn.Close()
 	}()
+	AcceptStreams(ctx, conn, st, ann, join)
+}
+
+// AcceptStreams runs the dispatch loop on conn until conn closes or
+// ctx cancels. Caller owns the conn lifecycle.
+func AcceptStreams(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann AnnouncementHandler, join JoinHandler) {
 	ownerKey := append([]byte(nil), conn.RemotePub()...)
 	// sem bounds concurrent dispatcher goroutines per connection.
 	sem := make(chan struct{}, serveConnStreamCap)
@@ -404,7 +416,7 @@ func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann Anno
 				<-sem
 				_ = stream.Close()
 			}()
-			if err := dispatchStreamFunc(ctx, stream, st, ownerKey, ann); err != nil {
+			if err := dispatchStreamFunc(ctx, stream, st, ownerKey, ann, join); err != nil {
 				slog.WarnContext(ctx, "dispatch stream", "err", err)
 			}
 		}(s)
@@ -413,8 +425,8 @@ func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann Anno
 
 // dispatchStream routes each inbound stream on its leading MessageType byte.
 // ownerKey is the TLS-authenticated Ed25519 pubkey of the remote peer.
-// A nil ann rejects MsgPeerAnnouncement at the message-type switch.
-func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, ownerKey []byte, ann AnnouncementHandler) error {
+// A nil ann rejects MsgPeerAnnouncement; a nil join rejects MsgJoinRequest.
+func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, ownerKey []byte, ann AnnouncementHandler, join JoinHandler) error {
 	msgType, err := protocol.ReadMessageType(rw)
 	if err != nil {
 		return fmt.Errorf("read message type: %w", err)
@@ -431,6 +443,11 @@ func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owne
 			return fmt.Errorf("peer announcement received but no handler configured")
 		}
 		return ann(ctx, rw, ownerKey)
+	case protocol.MsgJoinRequest:
+		if join == nil {
+			return fmt.Errorf("join request received but no handler configured")
+		}
+		return join(ctx, rw, ownerKey)
 	default:
 		return fmt.Errorf("unknown message type %d", msgType)
 	}

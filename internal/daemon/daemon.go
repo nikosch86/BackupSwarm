@@ -8,7 +8,6 @@ package daemon
 
 import (
 	"context"
-	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"backupswarm/internal/backup"
+	"backupswarm/internal/ca"
 	"backupswarm/internal/crypto"
 	"backupswarm/internal/index"
 	"backupswarm/internal/node"
@@ -163,6 +163,15 @@ type Options struct {
 	// DialTimeout bounds the initial dial to the storage peer. Zero
 	// uses 30s.
 	DialTimeout time.Duration
+	// IssueInitialInvite issues a token at startup, prints it to
+	// Progress, and optionally writes it to InitialInviteOut.
+	IssueInitialInvite bool
+	// InitialInviteOut is the file path the initial invite token is
+	// atomically written to. Only consulted when IssueInitialInvite.
+	InitialInviteOut string
+	// NoCA opts the founder into pin-mode trust. Only consulted when
+	// IssueInitialInvite; rejected on a CA-mode swarm.
+	NoCA bool
 	// Progress receives daemon-level progress lines (scan starts,
 	// mode transitions). nil is treated as io.Discard.
 	Progress io.Writer
@@ -248,14 +257,10 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
-	// Membership-check predicate: an inbound handshake is only admitted
-	// if the peer's pubkey is already in peers.db.
-	verifyMember := func(pub ed25519.PublicKey) error {
-		if _, err := peerStore.Get(pub); err != nil {
-			return fmt.Errorf("unknown peer %x: %w", pub[:8], err)
-		}
-		return nil
-	}
+	// Admits a peer if its pubkey is in peers.db OR if at least one
+	// invite is pending in the cache.
+	pendingInvites := &pendingCache{}
+	verifyMember := makeVerifyPeer(peerStore, pendingInvites)
 
 	listener := opts.Listener
 	if listener == nil {
@@ -264,14 +269,55 @@ func Run(ctx context.Context, opts Options) error {
 			return fmt.Errorf("listen on %q: %w", opts.ListenAddr, err)
 		}
 	} else {
-		// Handed-off listener (from `invite --then-run`): it was bound
-		// in bootstrap mode (nil predicate) so AcceptJoin could admit
-		// the joiner before they existed in peers.db. Flip to the
-		// membership check now, before Serve starts, so steady-state
-		// handshakes enforce swarm membership.
+		// Handed-off listener flips its predicate to the membership
+		// check before Serve starts.
 		listener.SetVerifyPeer(verifyMember)
 	}
 	defer func() { _ = listener.Close() }()
+
+	// Publishes the bound address for an `invite` CLI in another
+	// process to read.
+	if err := WriteListenAddr(opts.DataDir, listener.Addr().String()); err != nil {
+		return fmt.Errorf("write listen.addr: %w", err)
+	}
+	defer func() { _ = RemoveListenAddr(opts.DataDir) }()
+
+	// Shared *ca.CA (or nil for pin mode) for the initial-invite
+	// issuer and the dispatchStream join handler.
+	var swarmCA *ca.CA
+	if opts.IssueInitialInvite {
+		swarmCA, err = ResolveSwarmCA(ctx, opts.DataDir, opts.NoCA)
+		if err != nil {
+			return fmt.Errorf("resolve swarm ca: %w", err)
+		}
+	} else {
+		swarmCA, err = loadSwarmCAIfPresent(opts.DataDir)
+		if err != nil {
+			return fmt.Errorf("load swarm ca: %w", err)
+		}
+	}
+
+	if opts.IssueInitialInvite {
+		var caCertDER []byte
+		if swarmCA != nil {
+			caCertDER = swarmCA.CertDER
+		}
+		tokStr, issueErr := IssueInvite(opts.DataDir, listener.Addr().String(), id.PublicKey, caCertDER)
+		if issueErr != nil {
+			return fmt.Errorf("issue initial invite: %w", issueErr)
+		}
+		fmt.Fprintln(opts.Progress, tokStr)
+		if opts.InitialInviteOut != "" {
+			if err := writeAtomicFile(opts.InitialInviteOut, tokStr+"\n"); err != nil {
+				return fmt.Errorf("write initial invite token: %w", err)
+			}
+		}
+	}
+
+	// Synchronous first refresh warms the cache before Serve accepts;
+	// the goroutine then refreshes on each tick.
+	refreshPendingInvites(ctx, opts.DataDir, pendingInvites)
+	go pollPendingInvites(ctx, opts.DataDir, pendingInvites, defaultInviteWatchInterval)
 
 	connSet := swarm.NewConnSet()
 	router := &swarm.Router{
@@ -280,8 +326,10 @@ func Run(ctx context.Context, opts Options) error {
 		Conns: connSet,
 	}
 	obs := &backup.ConnObserver{OnAccept: connSet.Add, OnClose: connSet.Remove}
+	joinHandler := makeJoinHandler(opts.DataDir, peerStore, swarmCA, connSet)
+
 	serveErrCh := make(chan error, 1)
-	go func() { serveErrCh <- backup.Serve(ctx, listener, st, router.HandleStream, obs) }()
+	go func() { serveErrCh <- backup.Serve(ctx, listener, st, router.HandleStream, joinHandler, obs) }()
 
 	// Pure storage-peer role: serve inbound chunks only, no scan loop.
 	if opts.BackupDir == "" {
@@ -319,6 +367,9 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("dial peer %q: %w", storagePeer.Addr, err)
 	}
 	connSet.Add(peerConn)
+	// Accepts streams the storage peer opens on this outbound conn
+	// (e.g. forwarded PeerAnnouncements). Exits when peerConn closes.
+	go backup.AcceptStreams(ctx, peerConn, st, router.HandleStream, joinHandler)
 	defer func() {
 		connSet.Remove(peerConn)
 		_ = peerConn.Close()

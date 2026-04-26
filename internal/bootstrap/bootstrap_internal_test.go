@@ -265,6 +265,107 @@ func TestDoJoin_WriteRequestFailure(t *testing.T) {
 	wg.Wait()
 }
 
+// TestHandleJoinStream_PostTypeByte_RoundTrip exercises HandleJoinStream
+// directly with a pre-built JoinRequest body (no MsgJoinRequest type byte
+// — the dispatcher consumes it before calling the handler) and asserts
+// the persisted peer carries the joiner's pubkey, addr, and RolePeer.
+func TestHandleJoinStream_PostTypeByte_RoundTrip(t *testing.T) {
+	rig := newInternalRig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	type result struct {
+		peer peers.Peer
+		err  error
+	}
+	out := make(chan result, 1)
+	go func() {
+		conn, err := rig.listener.Accept(ctx)
+		if err != nil {
+			out <- result{err: err}
+			return
+		}
+		stream, err := conn.AcceptStream(ctx)
+		if err != nil {
+			out <- result{err: err}
+			return
+		}
+		// Drop the type byte so HandleJoinStream sees only the body.
+		var b [1]byte
+		if _, err := io.ReadFull(stream, b[:]); err != nil {
+			out <- result{err: err}
+			return
+		}
+		if b[0] != byte(protocol.MsgJoinRequest) {
+			out <- result{err: errors.New("unexpected message type")}
+			return
+		}
+		peer, err := HandleJoinStream(ctx, stream, conn.RemotePub(), rig.introStore, rig.validator(), nil)
+		out <- result{peer: peer, err: err}
+	}()
+
+	tok := rig.tokenStr(t)
+	if _, err := DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerStore); err != nil {
+		t.Fatalf("DoJoin: %v", err)
+	}
+	got := <-out
+	if got.err != nil {
+		t.Fatalf("HandleJoinStream: %v", got.err)
+	}
+	if !got.peer.PubKey.Equal(rig.joinerPub) {
+		t.Errorf("joiner pubkey mismatch")
+	}
+	if got.peer.Addr != "192.0.2.1:9000" {
+		t.Errorf("addr = %q, want %q", got.peer.Addr, "192.0.2.1:9000")
+	}
+	if got.peer.Role != peers.RolePeer {
+		t.Errorf("role = %v, want RolePeer", got.peer.Role)
+	}
+}
+
+// TestAcceptJoin_RejectsWrongMessageType opens a stream against the
+// introducer's listener and writes the wrong leading type byte. AcceptJoin
+// must reject without persisting anything.
+func TestAcceptJoin_RejectsWrongMessageType(t *testing.T) {
+	rig := newInternalRig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	var acceptErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, acceptErr = AcceptJoin(ctx, rig.listener, rig.introStore, rig.validator(), nil)
+	}()
+
+	conn, err := bsquic.Dial(ctx, rig.listener.Addr().String(), rig.joinerPriv, rig.introPub, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	stream, err := conn.OpenStream(ctx)
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	// Write a non-MsgJoinRequest type byte (MsgPutChunk = 0x01) and an
+	// empty-ish body so AcceptJoin tries to read a join request from
+	// non-join bytes.
+	if _, err := stream.Write([]byte{byte(protocol.MsgPutChunk)}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	_ = stream.Close()
+
+	wg.Wait()
+	if acceptErr == nil {
+		t.Fatal("AcceptJoin returned nil despite wrong message-type byte")
+	}
+	list, _ := rig.introStore.List()
+	if len(list) != 0 {
+		t.Errorf("introducer peer list mutated on bad type byte: %d entries", len(list))
+	}
+}
+
 // TestSignJoinerCSRIfCA_SignFailureWraps feeds garbage CSR bytes so
 // ca.SignNodeCert errors at parse-time; the wrapped error must mention
 // "sign joiner csr".

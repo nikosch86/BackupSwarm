@@ -86,9 +86,9 @@ type JoinResult struct {
 	SignedCert []byte
 }
 
-// AcceptJoin blocks for one inbound join, validates the request via
-// validate, signs the joiner's CSR with swarmCA when non-nil, sends the
-// peer list, and persists the joiner. swarmCA nil = pubkey-pin mode.
+// AcceptJoin blocks for one inbound join on l, reads the
+// MsgJoinRequest type byte, and dispatches to HandleJoinStream.
+// swarmCA nil = pubkey-pin mode.
 func AcceptJoin(ctx context.Context, l *bsquic.Listener, store *peers.Store, validate SecretValidator, swarmCA *ca.CA) (peers.Peer, error) {
 	conn, err := l.Accept(ctx)
 	if err != nil {
@@ -106,6 +106,28 @@ func AcceptJoin(ctx context.Context, l *bsquic.Listener, store *peers.Store, val
 		}
 	}()
 
+	msgType, err := protocol.ReadMessageType(stream)
+	if err != nil {
+		return peers.Peer{}, fmt.Errorf("read message type: %w", err)
+	}
+	if msgType != protocol.MsgJoinRequest {
+		return peers.Peer{}, fmt.Errorf("unexpected message type %d on join stream", msgType)
+	}
+
+	peer, err := HandleJoinStream(ctx, stream, conn.RemotePub(), store, validate, swarmCA)
+	if err != nil {
+		return peers.Peer{}, err
+	}
+	_ = stream.Close()
+	streamClosed = true
+	_, _ = conn.AcceptStream(ctx)
+	return peer, nil
+}
+
+// HandleJoinStream reads a JoinRequest from stream, validates the
+// secret, signs the CSR (CA mode), writes the JoinResponse + peer
+// list, and persists the joiner. Caller half-closes stream on return.
+func HandleJoinStream(ctx context.Context, stream io.ReadWriter, joinerPub ed25519.PublicKey, store *peers.Store, validate SecretValidator, swarmCA *ca.CA) (peers.Peer, error) {
 	gotSwarm, gotSecret, addr, csrDER, err := protocol.ReadJoinRequest(stream, maxAdvertisedAddrLen, maxJoinCSRLen)
 	if err != nil {
 		_ = writeJoinResponseFunc(stream, nil, "malformed request")
@@ -121,7 +143,7 @@ func AcceptJoin(ctx context.Context, l *bsquic.Listener, store *peers.Store, val
 		return peers.Peer{}, fmt.Errorf("swarm id mismatch")
 	}
 
-	signedCertDER, err := signJoinerCSRIfCA(ctx, swarmCA, csrDER, conn.RemotePub())
+	signedCertDER, err := signJoinerCSRIfCA(ctx, swarmCA, csrDER, joinerPub)
 	if err != nil {
 		_ = writeJoinResponseFunc(stream, nil, wireErrInternal)
 		return peers.Peer{}, err
@@ -145,15 +167,12 @@ func AcceptJoin(ctx context.Context, l *bsquic.Listener, store *peers.Store, val
 
 	peer := peers.Peer{
 		Addr:   addr,
-		PubKey: ed25519PubCopy(conn.RemotePub()),
+		PubKey: ed25519PubCopy(joinerPub),
 		Role:   peers.RolePeer,
 	}
 	if err := store.Add(peer); err != nil {
 		return peers.Peer{}, fmt.Errorf("persist peer: %w", err)
 	}
-	_ = stream.Close()
-	streamClosed = true
-	_, _ = conn.AcceptStream(ctx)
 	return peer, nil
 }
 
@@ -181,6 +200,10 @@ func DoJoin(ctx context.Context, tokenStr string, myPriv ed25519.PrivateKey, myL
 	stream, err := conn.OpenStream(ctx)
 	if err != nil {
 		return JoinResult{}, fmt.Errorf("open stream: %w", err)
+	}
+	if err := protocol.WriteMessageType(stream, protocol.MsgJoinRequest); err != nil {
+		_ = stream.Close()
+		return JoinResult{}, fmt.Errorf("write message type: %w", err)
 	}
 	if err := writeJoinRequestFunc(stream, tok.SwarmID, tok.Secret, myListenAddr, csrDER); err != nil {
 		_ = stream.Close()

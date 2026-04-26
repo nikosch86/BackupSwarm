@@ -180,6 +180,35 @@ func TestWritePutChunkResponse_PropagatesErrorFrameWriteErrors(t *testing.T) {
 	}
 }
 
+// TestMessageType_DistinctValues asserts every MessageType has a unique
+// byte and lists them by hand so a future addition collides loudly.
+func TestMessageType_DistinctValues(t *testing.T) {
+	want := map[protocol.MessageType]string{
+		protocol.MsgPutChunk:         "MsgPutChunk",
+		protocol.MsgDeleteChunk:      "MsgDeleteChunk",
+		protocol.MsgGetChunk:         "MsgGetChunk",
+		protocol.MsgPeerAnnouncement: "MsgPeerAnnouncement",
+		protocol.MsgJoinRequest:      "MsgJoinRequest",
+	}
+	if got := len(want); got != 5 {
+		t.Errorf("expected 5 distinct message types, got %d", got)
+	}
+}
+
+func TestJoinRequestMessageType_RoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	if err := protocol.WriteMessageType(&buf, protocol.MsgJoinRequest); err != nil {
+		t.Fatalf("WriteMessageType: %v", err)
+	}
+	got, err := protocol.ReadMessageType(&buf)
+	if err != nil {
+		t.Fatalf("ReadMessageType: %v", err)
+	}
+	if got != protocol.MsgJoinRequest {
+		t.Errorf("type = %v, want MsgJoinRequest", got)
+	}
+}
+
 func TestReadPutChunkResponse_RejectsOversizedErrorMessage(t *testing.T) {
 	frame := []byte{1, 0x00, 0x10, 0x00, 0x01}
 	_, _, err := protocol.ReadPutChunkResponse(bytes.NewReader(frame))

@@ -42,7 +42,7 @@ func (r *Router) HandleStream(ctx context.Context, rd io.Reader, senderPub []byt
 			"err", err)
 		return fmt.Errorf("apply announcement: %w", err)
 	}
-	slog.DebugContext(ctx, "applied announcement",
+	slog.InfoContext(ctx, "applied announcement",
 		"kind", ann.Kind,
 		"peer_pub", hex.EncodeToString(ann.PubKey[:]),
 		"addr", ann.Addr,

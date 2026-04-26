@@ -18,17 +18,29 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		dialTimeout  time.Duration
 		restore      bool
 		purge        bool
+		invite       bool
+		tokenOut     string
+		noCA         bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run the sync daemon (serve chunks for peers and/or back up --backup-dir)",
 		Long: "Run the sync daemon. Omit --backup-dir to run as a pure storage peer " +
 			"that only serves chunks for others. The storage peer to back up to is read " +
-			"from peers.db (populated by `invite`/`join`); no --peer flag is needed. With " +
-			"no dialable peer and no --backup-dir, the daemon is a pure storage peer.",
+			"from peers.db (populated by `invite`/`join`); no --peer flag is needed. " +
+			"--invite issues an initial invite token at startup (auto-generates the " +
+			"swarm CA on a fresh data dir unless --no-ca is set); the token is printed " +
+			"to stdout and optionally written to --token-out. Subsequent invites against " +
+			"this running daemon use the standalone `invite` command.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if listenAddr == "" {
 				return fmt.Errorf("--listen is required")
+			}
+			if !invite && tokenOut != "" {
+				return fmt.Errorf("--token-out requires --invite")
+			}
+			if !invite && noCA {
+				return fmt.Errorf("--no-ca requires --invite")
 			}
 
 			dir, err := resolveDataDir(*dataDir)
@@ -36,15 +48,18 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				return err
 			}
 			return daemon.Run(cmd.Context(), daemon.Options{
-				DataDir:      dir,
-				BackupDir:    backupDir,
-				ListenAddr:   listenAddr,
-				ChunkSize:    chunkSize,
-				ScanInterval: scanInterval,
-				DialTimeout:  dialTimeout,
-				Restore:      restore,
-				Purge:        purge,
-				Progress:     cmd.OutOrStdout(),
+				DataDir:            dir,
+				BackupDir:          backupDir,
+				ListenAddr:         listenAddr,
+				ChunkSize:          chunkSize,
+				ScanInterval:       scanInterval,
+				DialTimeout:        dialTimeout,
+				Restore:            restore,
+				Purge:              purge,
+				IssueInitialInvite: invite,
+				InitialInviteOut:   tokenOut,
+				NoCA:               noCA,
+				Progress:           cmd.OutOrStdout(),
 			})
 		},
 	}
@@ -55,5 +70,8 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().DurationVar(&dialTimeout, "dial-timeout", 30*time.Second, "Timeout for the initial dial to the storage peer")
 	cmd.Flags().BoolVar(&restore, "restore", false, "Start in restore mode (required if backup-dir empty but index populated)")
 	cmd.Flags().BoolVar(&purge, "purge", false, "Clear all indexed chunks from the swarm and reset the index (required alternative to --restore when backup-dir empty)")
+	cmd.Flags().BoolVar(&invite, "invite", false, "Issue an initial invite token at startup; print it to stdout and continue into the daemon")
+	cmd.Flags().StringVar(&tokenOut, "token-out", "", "Write the initial invite token to this file (atomic); requires --invite")
+	cmd.Flags().BoolVar(&noCA, "no-ca", false, "Skip swarm CA generation; use pubkey-pin trust. Locks the swarm into pin mode for life. Requires --invite.")
 	return cmd
 }

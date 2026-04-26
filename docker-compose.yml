@@ -1,33 +1,31 @@
-# Two-node swarm that backs up a seeded directory end-to-end via a
-# simple `docker compose up -d`. No manual orchestration: node-b starts
-# `invite --then-run --token-out /shared/token.txt`, writing the token
-# into a shared tmpfs; node-a starts `join --token-file ... --then-run`,
-# which polls the shared file until the token appears, dials node-b,
-# handshakes over live QUIC, and continues as a backup source.
+# Three-node swarm exercising the M2.10a daemon-mode invite flow:
 #
-# The automated byte-for-byte verifier for the pipeline lives in
-# internal/cli/e2e_test.go (run by `make test`). This compose file is
-# the containerized sibling of that test — standing up the same flow
-# inside Docker to validate the packaged image.
+#   * node-b is the founder daemon. It runs `run --invite --token-out
+#     /shared/token-a.txt` so its first invite token lands in the
+#     shared volume for node-a to consume.
 #
-# Usage:
-#   make docker-compose-up                 # brings up seeder, node-b, node-a
-#   docker compose logs -f node-a          # watch backup progress
-#   docker compose logs node-b             # peer joined + chunks received
-#   docker compose exec node-a backupswarm --data-dir /data restore /tmp/out
-#   docker compose down -v                 # tear down and drop volumes
+#   * node-a joins via that token (`join --token-file ... --then-run`),
+#     then continues as a backup source against node-b.
 #
-# Fixed IPs on the bridge network make the listen address inside the
-# token (emitted by node-b) routable from node-a — binding to 0.0.0.0
-# would otherwise put a useless bind-all address into the token.
+#   * inviter-c is a oneshot that runs the standalone `invite` command
+#     against node-b's data dir. It writes a fresh token to
+#     /shared/token-c.txt that node-c then joins on. The invite uses
+#     `--wait` to absorb startup ordering: node-b's daemon may still be
+#     binding its listener when inviter-c fires.
+#
+# `make docker-compose-test` asserts both joiners reach node-b ("peer
+# joined" appears twice in node-b's logs) and that node-a observes the
+# forwarded PeerJoined for node-c ("applied announcement").
+#
+# Fixed IPs on the bridge network keep the `invite`-emitted listen.addr
+# routable from the joiners — binding to 0.0.0.0 would otherwise embed
+# a useless wildcard in the token.
 
 services:
-  # One-off: seed node-a's backup volume with random bytes and chown
-  # every named volume to UID 65532 (the distroless `nonroot` user our
-  # backupswarm image runs as). Without the chown step, freshly-created
-  # docker volumes land root-owned and node-b fails writing to /shared.
-  # Merged into a single prep container so `docker compose up -d`
-  # doesn't need manual setup.
+  # One-off prep: seed node-a's backup volume and chown all named
+  # volumes to UID 65532 (the distroless `nonroot` user the
+  # backupswarm image runs as). Without the chown, freshly-created
+  # docker volumes land root-owned and writes from the daemon fail.
   seeder:
     image: busybox:1.37
     volumes:
@@ -35,6 +33,7 @@ services:
       - shared-token:/shared
       - node-a-data:/data-a
       - node-b-data:/data-b
+      - node-c-data:/data-c
     command:
       - sh
       - -c
@@ -44,7 +43,7 @@ services:
         printf 'hello swarm\n' > /backup/hello.txt
         printf 'nested greeting\n' > /backup/nested/greet.txt
         dd if=/dev/urandom of=/backup/nested/sub/big.bin bs=1M count=3 status=none
-        chown -R 65532:65532 /backup /shared /data-a /data-b
+        chown -R 65532:65532 /backup /shared /data-a /data-b /data-c
         echo "prep done: seeded /backup and chowned volumes to nonroot"
     restart: "no"
 
@@ -61,14 +60,14 @@ services:
       swarm:
         ipv4_address: 172.28.0.20
     command:
-      - invite
+      - --data-dir
+      - /data
+      - run
       - --listen
       - 172.28.0.20:7777
-      - --timeout
-      - 2m
+      - --invite
       - --token-out
-      - /shared/token.txt
-      - --then-run
+      - /shared/token-a.txt
 
   node-a:
     build: .
@@ -81,14 +80,16 @@ services:
     volumes:
       - node-a-data:/data
       - backup-src:/backup:ro
-      - shared-token:/shared:ro
+      - shared-token:/shared
     networks:
       swarm:
         ipv4_address: 172.28.0.21
     command:
+      - --data-dir
+      - /data
       - join
       - --token-file
-      - /shared/token.txt
+      - /shared/token-a.txt
       - --timeout
       - 2m
       - --then-run
@@ -98,6 +99,53 @@ services:
       - 172.28.0.21:7778
       - --scan-interval
       - 5s
+
+  # Oneshot: issues a fresh invite against node-b's running daemon by
+  # opening invites.db on the shared data volume. --wait absorbs the
+  # startup race where node-b's daemon hasn't yet written listen.addr.
+  inviter-c:
+    image: backupswarm:dev
+    depends_on:
+      node-b:
+        condition: service_started
+    volumes:
+      - node-b-data:/data
+      - shared-token:/shared
+    command:
+      - --data-dir
+      - /data
+      - invite
+      - --wait
+      - 30s
+      - --token-out
+      - /shared/token-c.txt
+    restart: "no"
+
+  node-c:
+    build: .
+    image: backupswarm:dev
+    depends_on:
+      seeder:
+        condition: service_completed_successfully
+      inviter-c:
+        condition: service_completed_successfully
+    volumes:
+      - node-c-data:/data
+      - shared-token:/shared
+    networks:
+      swarm:
+        ipv4_address: 172.28.0.22
+    command:
+      - --data-dir
+      - /data
+      - join
+      - --token-file
+      - /shared/token-c.txt
+      - --timeout
+      - 2m
+      - --then-run
+      - --listen
+      - 172.28.0.22:7779
 
 networks:
   swarm:
@@ -109,5 +157,6 @@ networks:
 volumes:
   node-a-data:
   node-b-data:
+  node-c-data:
   backup-src:
   shared-token:

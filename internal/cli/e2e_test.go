@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 )
@@ -47,25 +46,24 @@ func TestE2E_BackupAndRestoreRoundTrip(t *testing.T) {
 	overallCtx, cancelOverall := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancelOverall()
 
-	// Phase 1: B's `invite` prints a token; A's `join` consumes it.
-	inviteOut := &syncBuffer{}
-	inviteCmd := NewRootCmd()
-	inviteCmd.SetOut(inviteOut)
-	inviteCmd.SetErr(io.Discard)
-	inviteCmd.SetArgs([]string{
+	// Phase 1+2 fused: B starts the daemon with `run --invite`; the
+	// daemon prints the founder token AND keeps serving so A can both
+	// `join` and then back up against the same listener without a
+	// rebind.
+	bCtx, cancelB := context.WithCancel(overallCtx)
+	bDone := make(chan error, 1)
+	bRunCmd := NewRootCmd()
+	bOut := &syncBuffer{}
+	bRunCmd.SetOut(bOut)
+	bRunCmd.SetErr(io.Discard)
+	bRunCmd.SetArgs([]string{
 		"--data-dir", dataB,
-		"invite",
+		"run",
 		"--listen", addrB,
-		"--timeout", "20s",
+		"--invite",
 	})
-	var inviteErr error
-	var inviteWG sync.WaitGroup
-	inviteWG.Add(1)
-	go func() {
-		defer inviteWG.Done()
-		inviteErr = inviteCmd.ExecuteContext(overallCtx)
-	}()
-	tokStr := waitForToken(t, inviteOut, 5*time.Second)
+	go func() { bDone <- bRunCmd.ExecuteContext(bCtx) }()
+	tokStr := waitForToken(t, bOut, 10*time.Second)
 
 	joinCmd := NewRootCmd()
 	joinCmd.SetOut(io.Discard)
@@ -74,19 +72,6 @@ func TestE2E_BackupAndRestoreRoundTrip(t *testing.T) {
 	if err := joinCmd.ExecuteContext(overallCtx); err != nil {
 		t.Fatalf("join: %v", err)
 	}
-	inviteWG.Wait()
-	if inviteErr != nil {
-		t.Fatalf("invite returned error: %v", inviteErr)
-	}
-
-	// Phase 2: B runs as a pure storage peer on the same address.
-	bCtx, cancelB := context.WithCancel(overallCtx)
-	bDone := make(chan error, 1)
-	bRunCmd := NewRootCmd()
-	bRunCmd.SetOut(io.Discard)
-	bRunCmd.SetErr(io.Discard)
-	bRunCmd.SetArgs([]string{"--data-dir", dataB, "run", "--listen", addrB})
-	go func() { bDone <- bRunCmd.ExecuteContext(bCtx) }()
 
 	// Phase 3: A runs with --backup-dir, dials B, ships the chunks.
 	addrA := reserveLocalUDPAddr(t)
@@ -178,11 +163,10 @@ func TestE2E_ThenRunFlags_BackupAndRestoreRoundTrip(t *testing.T) {
 	bCmd.SetErr(io.Discard)
 	bCmd.SetArgs([]string{
 		"--data-dir", dataB,
-		"invite",
+		"run",
 		"--listen", addrB,
-		"--timeout", "20s",
+		"--invite",
 		"--token-out", tokenPath,
-		"--then-run",
 	})
 	go func() { bDone <- bCmd.ExecuteContext(bCtx) }()
 

@@ -101,19 +101,24 @@ docker-compose-up:
 docker-compose-down:
 	docker compose down -v
 
-## docker-compose-test: end-to-end smoke test of the containerised 2-node swarm
-# Brings up the swarm detached, waits for both nodes to join and for node-a to
-# finish at least one scan pass (asserted via log grep), then tears everything
-# down. Runs against the image built by docker-compose.
+## docker-compose-test: end-to-end smoke test of the containerised 3-node swarm
+# Brings the swarm up detached, asserts (1) node-b accepted both joiners
+# (two "peer joined" events), (2) node-a backed up the seeded tree, and
+# (3) node-a observed node-c's PeerJoined via the daemon's broadcast +
+# the dispatcher's announcement-forwarding path ("applied announcement").
 docker-compose-test:
 	docker compose up -d --build
-	@echo "waiting for node-b to accept the join handshake..."
+	@echo "waiting for node-b to accept both joiners..."
 	@for i in $$(seq 1 60); do \
-		if docker compose logs node-b 2>/dev/null | grep -q '"msg":"peer joined"'; then break; fi; \
+		count=$$(docker compose logs node-b 2>/dev/null | grep -c '"msg":"peer joined"'); \
+		if [ "$$count" -ge 2 ]; then break; fi; \
 		sleep 1; \
 	done
-	@docker compose logs node-b 2>/dev/null | grep -q '"msg":"peer joined"' || \
-		{ echo "node-b never logged 'peer joined'"; docker compose logs node-b; docker compose down -v; exit 1; }
+	@count=$$(docker compose logs node-b 2>/dev/null | grep -c '"msg":"peer joined"'); \
+	if [ "$$count" -lt 2 ]; then \
+		echo "node-b only logged $$count 'peer joined' events; want >=2"; \
+		docker compose logs node-b; docker compose down -v; exit 1; \
+	fi
 	@echo "waiting for node-a to complete at least one scan pass..."
 	@for i in $$(seq 1 60); do \
 		if docker compose logs node-a 2>/dev/null | grep -q 'backed up /backup/'; then break; fi; \
@@ -121,7 +126,15 @@ docker-compose-test:
 	done
 	@docker compose logs node-a 2>/dev/null | grep -q 'backed up /backup/' || \
 		{ echo "node-a never logged 'backed up'"; docker compose logs node-a; docker compose down -v; exit 1; }
-	@echo "docker-compose-test: swarm formed and node-a backed up the seeded tree"
+	@echo "waiting for node-a to observe the forwarded PeerJoined for node-c..."
+	@for i in $$(seq 1 60); do \
+		if docker compose logs node-a 2>/dev/null | grep -q '"msg":"applied announcement"'; then break; fi; \
+		sleep 1; \
+	done
+	@docker compose logs node-a 2>/dev/null | grep -q '"msg":"applied announcement"' || \
+		{ echo "node-a never observed an 'applied announcement' line; broadcast/forwarding broke"; \
+		  docker compose logs node-a; docker compose logs node-b; docker compose down -v; exit 1; }
+	@echo "docker-compose-test: 3-node swarm formed; node-a backed up the seeded tree and saw node-c's announcement"
 	docker compose down -v
 
 ## trivy-deps: scan source tree for vulnerable deps, secrets, and misconfigs (HIGH+CRITICAL)

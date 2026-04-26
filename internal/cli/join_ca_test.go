@@ -25,22 +25,24 @@ func TestJoinCmd_CAModePersistsSignedLeafCert(t *testing.T) {
 	defer cancel()
 
 	inviteOut := &syncBuffer{}
-	inviteCmd := NewRootCmd()
-	inviteCmd.SetOut(inviteOut)
-	inviteCmd.SetErr(io.Discard)
-	inviteCmd.SetArgs([]string{
+	inviterCmd := NewRootCmd()
+	inviterCmd.SetOut(inviteOut)
+	inviterCmd.SetErr(io.Discard)
+	inviterCmd.SetArgs([]string{
 		"--data-dir", dataInviter,
-		"invite",
+		"run",
 		"--listen", "127.0.0.1:0",
-		"--timeout", "10s",
+		"--invite",
 	})
 
+	inviterCtx, inviterCancel := context.WithCancel(overallCtx)
+	defer inviterCancel()
 	var wg sync.WaitGroup
 	var inviteErr error
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		inviteErr = inviteCmd.ExecuteContext(overallCtx)
+		inviteErr = inviterCmd.ExecuteContext(inviterCtx)
 	}()
 	tokStr := waitForToken(t, inviteOut, 5*time.Second)
 
@@ -51,9 +53,10 @@ func TestJoinCmd_CAModePersistsSignedLeafCert(t *testing.T) {
 	if err := joinCmd.ExecuteContext(overallCtx); err != nil {
 		t.Fatalf("join: %v", err)
 	}
+	inviterCancel()
 	wg.Wait()
-	if inviteErr != nil {
-		t.Fatalf("invite returned error: %v", inviteErr)
+	if inviteErr != nil && inviteErr != context.Canceled {
+		t.Fatalf("inviter returned error: %v", inviteErr)
 	}
 
 	leafDER, err := ca.LoadNodeCert(dataJoiner)
@@ -99,22 +102,24 @@ func TestJoinCmd_PinModeDoesNotPersistCert(t *testing.T) {
 	defer cancel()
 
 	inviteOut := &syncBuffer{}
-	inviteCmd := NewRootCmd()
-	inviteCmd.SetOut(inviteOut)
-	inviteCmd.SetErr(io.Discard)
-	inviteCmd.SetArgs([]string{
+	inviterCmd := NewRootCmd()
+	inviterCmd.SetOut(inviteOut)
+	inviterCmd.SetErr(io.Discard)
+	inviterCmd.SetArgs([]string{
 		"--data-dir", dataInviter,
-		"invite",
+		"run",
 		"--listen", "127.0.0.1:0",
-		"--timeout", "10s",
+		"--invite",
 		"--no-ca",
 	})
 
+	inviterCtx, inviterCancel := context.WithCancel(overallCtx)
+	defer inviterCancel()
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_ = inviteCmd.ExecuteContext(overallCtx)
+		_ = inviterCmd.ExecuteContext(inviterCtx)
 	}()
 	tokStr := waitForToken(t, inviteOut, 5*time.Second)
 
@@ -125,6 +130,7 @@ func TestJoinCmd_PinModeDoesNotPersistCert(t *testing.T) {
 	if err := joinCmd.ExecuteContext(overallCtx); err != nil {
 		t.Fatalf("join: %v", err)
 	}
+	inviterCancel()
 	wg.Wait()
 
 	if _, err := ca.LoadNodeCert(dataJoiner); err == nil {

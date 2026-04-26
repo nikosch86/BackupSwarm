@@ -30,6 +30,45 @@ func openTemp(t *testing.T) (*invites.Store, string) {
 	return s, path
 }
 
+func TestStore_PendingCount_Empty(t *testing.T) {
+	s, _ := openTemp(t)
+	got, err := s.PendingCount()
+	if err != nil {
+		t.Fatalf("PendingCount: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("empty store PendingCount = %d, want 0", got)
+	}
+}
+
+func TestStore_PendingCount_AfterIssueAndConsume(t *testing.T) {
+	s, _ := openTemp(t)
+	a, b, c := mustRandom(t), mustRandom(t), mustRandom(t)
+	swarmID := mustRandom(t)
+	for _, sec := range [][32]byte{a, b, c} {
+		if err := s.Issue(sec, swarmID); err != nil {
+			t.Fatalf("Issue: %v", err)
+		}
+	}
+	got, err := s.PendingCount()
+	if err != nil {
+		t.Fatalf("PendingCount: %v", err)
+	}
+	if got != 3 {
+		t.Errorf("after 3 issues PendingCount = %d, want 3", got)
+	}
+	if _, err := s.Consume(b); err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+	got, err = s.PendingCount()
+	if err != nil {
+		t.Fatalf("PendingCount: %v", err)
+	}
+	if got != 2 {
+		t.Errorf("after 1 consume PendingCount = %d, want 2 (consumed entries must not count)", got)
+	}
+}
+
 func TestStore_RoundTrip(t *testing.T) {
 	s, _ := openTemp(t)
 	secret := mustRandom(t)

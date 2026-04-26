@@ -125,6 +125,30 @@ func (s *Store) Consume(secret [32]byte) ([32]byte, error) {
 	return swarmID, nil
 }
 
+// PendingCount scans the bucket and returns the number of records still
+// in the pending state (i.e. issued but not yet consumed). Used by the
+// daemon's poll loop to admit unknown peers during a join window.
+func (s *Store) PendingCount() (int, error) {
+	count := 0
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(bucketName))
+		return b.ForEach(func(_, raw []byte) error {
+			status, _, decErr := decodeValue(raw)
+			if decErr != nil {
+				return fmt.Errorf("decode invites record: %w", decErr)
+			}
+			if status == statusPending {
+				count++
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // PutRawForTest seeds an arbitrary value under secret. Test-only.
 func (s *Store) PutRawForTest(secret [32]byte, raw []byte) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
