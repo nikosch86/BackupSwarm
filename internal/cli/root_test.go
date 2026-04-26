@@ -28,11 +28,13 @@ func TestRootCmd_HasDataDirFlag(t *testing.T) {
 }
 
 // TestRootCmd_NoInitSubcommand pins that no `init` subcommand exists.
+// Identity and per-swarm CA are both auto-ensured on first invite (CA by
+// default, --no-ca opts in to pubkey-pin trust).
 func TestRootCmd_NoInitSubcommand(t *testing.T) {
 	root := NewRootCmd()
 	for _, sub := range root.Commands() {
 		if sub.Name() == "init" {
-			t.Error("root command has `init` subcommand; should be dropped (identity is auto-ensured)")
+			t.Error("root command has `init` subcommand; should be dropped (auto-ensured via invite)")
 		}
 	}
 }

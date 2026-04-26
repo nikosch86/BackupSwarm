@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"backupswarm/internal/bootstrap"
+	"backupswarm/internal/ca"
 	"backupswarm/internal/daemon"
 	"backupswarm/internal/invites"
 	bsquic "backupswarm/internal/quic"
@@ -24,12 +26,16 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 		timeout    time.Duration
 		tokenOut   string
 		thenRun    bool
+		noCA       bool
 	)
 	cmd := &cobra.Command{
 		Use:   "invite",
 		Short: "Print an invite token and wait for one peer to join",
 		Long: "Generate an invite token, open a QUIC listener, and block for " +
-			"one incoming join handshake. With --then-run, transition into " +
+			"one incoming join handshake. The first invite on a fresh data dir " +
+			"auto-generates the per-swarm Ed25519 CA and embeds its cert in the " +
+			"token; --no-ca opts in to pubkey-pin trust and locks the swarm into " +
+			"pin mode for life. With --then-run, transition into " +
 			"the sync daemon (storage-peer role) after the handshake completes " +
 			"so the same command can stand up a node end-to-end. --token-out " +
 			"also writes the printed token to a file (atomic rename) for " +
@@ -81,6 +87,10 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 			if err := invitesStore.Issue(secret, swarmID); err != nil {
 				return fmt.Errorf("issue invite: %w", err)
 			}
+			caCert, err := resolveInviteCA(cmd.Context(), sess.dir, noCA)
+			if err != nil {
+				return err
+			}
 			// Use the listener's actual bound addr so ":0" (ephemeral
 			// port) still produces a usable token.
 			tokStr, err := token.Encode(token.Token{
@@ -88,6 +98,7 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 				Pub:     sess.id.PublicKey,
 				SwarmID: swarmID,
 				Secret:  secret,
+				CACert:  caCert,
 			})
 			if err != nil {
 				return fmt.Errorf("encode token: %w", err)
@@ -130,7 +141,53 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "Maximum time to wait for a joiner (0 = no timeout)")
 	cmd.Flags().StringVar(&tokenOut, "token-out", "", "Write the printed token to this file (atomic)")
 	cmd.Flags().BoolVar(&thenRun, "then-run", false, "After the handshake, transition into the sync daemon (storage-peer role)")
+	cmd.Flags().BoolVar(&noCA, "no-ca", false, "Skip swarm CA generation; use pubkey-pin trust. Locks the swarm into pin mode for life.")
 	return cmd
+}
+
+// resolveInviteCA returns the CA cert DER to embed in the invite token.
+// First invite on a fresh data dir generates+saves a CA (or writes a pin
+// marker with --no-ca); subsequent invites honor the locked-in mode.
+func resolveInviteCA(ctx context.Context, dir string, noCA bool) ([]byte, error) {
+	hasCA, err := ca.Has(dir)
+	if err != nil {
+		return nil, fmt.Errorf("check ca: %w", err)
+	}
+	pinMode, err := ca.IsPinMode(dir)
+	if err != nil {
+		return nil, fmt.Errorf("check pin mode: %w", err)
+	}
+	if noCA {
+		if hasCA {
+			return nil, fmt.Errorf("invite: swarm at %s is in CA mode; --no-ca is incompatible", dir)
+		}
+		if !pinMode {
+			if err := ca.MarkPinMode(dir); err != nil {
+				return nil, fmt.Errorf("mark pin mode: %w", err)
+			}
+		}
+		return nil, nil
+	}
+	if hasCA {
+		swarmCA, err := ca.Load(dir)
+		if err != nil {
+			return nil, fmt.Errorf("load ca: %w", err)
+		}
+		return swarmCA.CertDER, nil
+	}
+	if pinMode {
+		// Pin mode previously chosen; honor it without requiring --no-ca.
+		return nil, nil
+	}
+	swarmCA, err := ca.Generate()
+	if err != nil {
+		return nil, fmt.Errorf("generate ca: %w", err)
+	}
+	if err := ca.Save(dir, swarmCA); err != nil {
+		return nil, fmt.Errorf("save ca: %w", err)
+	}
+	slog.InfoContext(ctx, "generated swarm ca", "data_dir", dir)
+	return swarmCA.CertDER, nil
 }
 
 // newSessionIDs generates the per-invite swarm ID and single-use secret.
