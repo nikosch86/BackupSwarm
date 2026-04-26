@@ -63,7 +63,7 @@ func newTestRig(t *testing.T) *testRig {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		serveErr <- backup.Serve(ctx, listener, peerStore)
+		serveErr <- backup.Serve(ctx, listener, peerStore, nil)
 	}()
 	t.Cleanup(func() {
 		_ = listener.Close()
@@ -756,7 +756,7 @@ func TestRun_PeerErrorPropagation(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 
-	go func() { _ = backup.Serve(ctx, listener, peerStore) }()
+	go func() { _ = backup.Serve(ctx, listener, peerStore, nil) }()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()

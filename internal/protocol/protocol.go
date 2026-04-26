@@ -25,6 +25,8 @@ const (
 	MsgDeleteChunk MessageType = 0x02
 	// MsgGetChunk prefixes a GetChunkRequest body.
 	MsgGetChunk MessageType = 0x03
+	// MsgPeerAnnouncement prefixes a PeerAnnouncement body.
+	MsgPeerAnnouncement MessageType = 0x04
 )
 
 // WriteMessageType writes t as a single byte.

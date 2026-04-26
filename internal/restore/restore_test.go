@@ -60,7 +60,7 @@ func newRestoreRig(t *testing.T) *restoreRig {
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 
-	go func() { _ = backup.Serve(ctx, listener, peerStore) }()
+	go func() { _ = backup.Serve(ctx, listener, peerStore, nil) }()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()

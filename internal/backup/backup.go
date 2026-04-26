@@ -33,7 +33,7 @@ var (
 		return idx.Delete(path)
 	}
 	// dispatchStreamFunc routes each accepted stream to a handler.
-	dispatchStreamFunc = dispatchStream
+	dispatchStreamFunc func(ctx context.Context, rw io.ReadWriter, st *store.Store, ownerKey []byte, ann AnnouncementHandler) error = dispatchStream
 	// serveConnStreamCap is the per-connection handler-goroutine cap,
 	// matched to bsquic.MaxIncomingStreamsPerConn.
 	serveConnStreamCap = int(bsquic.MaxIncomingStreamsPerConn)
@@ -335,10 +335,15 @@ func sendDeleteChunk(ctx context.Context, conn streamOpener, hash [32]byte) erro
 	return nil
 }
 
+// AnnouncementHandler reads one peer-announcement frame off r (the type
+// byte already consumed by the dispatcher) and applies it. A nil handler
+// rejects MsgPeerAnnouncement at dispatch time.
+type AnnouncementHandler func(ctx context.Context, r io.Reader) error
+
 // Serve accepts inbound QUIC connections on l and dispatches streams
-// against st. Exits cleanly on ctx cancellation. Blocks until every
-// per-connection serveConn it spawned has fully drained.
-func Serve(ctx context.Context, l *bsquic.Listener, st *store.Store) error {
+// against st. ann handles MsgPeerAnnouncement streams; nil rejects them.
+// Exits on ctx cancellation; blocks until every serveConn drains.
+func Serve(ctx context.Context, l *bsquic.Listener, st *store.Store, ann AnnouncementHandler) error {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	for {
@@ -352,12 +357,12 @@ func Serve(ctx context.Context, l *bsquic.Listener, st *store.Store) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			serveConn(ctx, conn, st)
+			serveConn(ctx, conn, st, ann)
 		}()
 	}
 }
 
-func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store) {
+func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann AnnouncementHandler) {
 	defer func() { _ = conn.Close() }()
 	ownerKey := append([]byte(nil), conn.RemotePub()...)
 	// sem bounds concurrent dispatcher goroutines per connection.
@@ -384,7 +389,7 @@ func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store) {
 				<-sem
 				_ = stream.Close()
 			}()
-			if err := dispatchStreamFunc(ctx, stream, st, ownerKey); err != nil {
+			if err := dispatchStreamFunc(ctx, stream, st, ownerKey, ann); err != nil {
 				slog.WarnContext(ctx, "dispatch stream", "err", err)
 			}
 		}(s)
@@ -392,9 +397,9 @@ func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store) {
 }
 
 // dispatchStream routes each inbound stream on its leading MessageType byte.
-// ownerKey is the TLS-authenticated Ed25519 pubkey of the remote peer,
-// used by put to record ownership and by delete to authorize removal.
-func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, ownerKey []byte) error {
+// ownerKey is the TLS-authenticated Ed25519 pubkey of the remote peer.
+// A nil ann rejects MsgPeerAnnouncement at the message-type switch.
+func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, ownerKey []byte, ann AnnouncementHandler) error {
 	msgType, err := protocol.ReadMessageType(rw)
 	if err != nil {
 		return fmt.Errorf("read message type: %w", err)
@@ -406,6 +411,11 @@ func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owne
 		return handleDeleteChunkStream(ctx, rw, st, ownerKey)
 	case protocol.MsgGetChunk:
 		return handleGetChunkStream(ctx, rw, st, ownerKey)
+	case protocol.MsgPeerAnnouncement:
+		if ann == nil {
+			return fmt.Errorf("peer announcement received but no handler configured")
+		}
+		return ann(ctx, rw)
 	default:
 		return fmt.Errorf("unknown message type %d", msgType)
 	}

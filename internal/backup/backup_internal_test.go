@@ -303,7 +303,7 @@ func TestHandleDeleteChunkStream_ReadRequestError(t *testing.T) {
 // TestDispatchStream_UnknownMessageType asserts the dispatcher rejects an unrecognized message type byte.
 func TestDispatchStream_UnknownMessageType(t *testing.T) {
 	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader([]byte{0xff})}
-	err := dispatchStream(context.Background(), rw, nil, []byte{0x01})
+	err := dispatchStream(context.Background(), rw, nil, []byte{0x01}, nil)
 	if err == nil {
 		t.Fatal("dispatchStream accepted unknown message type")
 	}
@@ -314,12 +314,42 @@ func TestDispatchStream_UnknownMessageType(t *testing.T) {
 
 func TestDispatchStream_ReadTypeError(t *testing.T) {
 	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(nil)}
-	err := dispatchStream(context.Background(), rw, nil, []byte{0x01})
+	err := dispatchStream(context.Background(), rw, nil, []byte{0x01}, nil)
 	if err == nil {
 		t.Fatal("dispatchStream returned nil on empty stream")
 	}
 	if !bytes.Contains([]byte(err.Error()), []byte("read message type")) {
 		t.Errorf("err = %q, want 'read message type' prefix", err)
+	}
+}
+
+func TestDispatchStream_RoutesPeerAnnouncement(t *testing.T) {
+	body := bytes.NewBuffer(nil)
+	body.WriteByte(byte(protocol.MsgPeerAnnouncement))
+	body.Write([]byte("ANNOUNCEMENT_PAYLOAD"))
+	rw := &fakeStream{writeErrAt: -1, rd: body}
+
+	var got bytes.Buffer
+	announceFn := func(_ context.Context, r io.Reader) error {
+		_, err := got.ReadFrom(r)
+		return err
+	}
+	if err := dispatchStream(context.Background(), rw, nil, []byte("alice"), announceFn); err != nil {
+		t.Fatalf("dispatchStream: %v", err)
+	}
+	if got.String() != "ANNOUNCEMENT_PAYLOAD" {
+		t.Errorf("announceFn body = %q, want 'ANNOUNCEMENT_PAYLOAD'", got.String())
+	}
+}
+
+func TestDispatchStream_PeerAnnouncement_NoHandler(t *testing.T) {
+	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader([]byte{byte(protocol.MsgPeerAnnouncement)})}
+	err := dispatchStream(context.Background(), rw, nil, []byte("alice"), nil)
+	if err == nil {
+		t.Fatal("dispatchStream accepted MsgPeerAnnouncement with nil handler")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("announcement")) {
+		t.Errorf("err = %q, want 'announcement' substring", err)
 	}
 }
 
@@ -339,7 +369,7 @@ func TestDispatchStream_RoutesPutChunk(t *testing.T) {
 		t.Fatalf("WritePutChunkRequest: %v", err)
 	}
 	rw := &fakeStream{writeErrAt: -1, rd: &reqBuf}
-	if err := dispatchStream(context.Background(), rw, st, []byte("alice")); err != nil {
+	if err := dispatchStream(context.Background(), rw, st, []byte("alice"), nil); err != nil {
 		t.Fatalf("dispatchStream: %v", err)
 	}
 	hash, appErr, err := protocol.ReadPutChunkResponse(&rw.wbuf)
@@ -465,7 +495,7 @@ func TestPrune_IndexDeleteError(t *testing.T) {
 
 	serveCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = Serve(serveCtx, listener, peerStore) }()
+	go func() { _ = Serve(serveCtx, listener, peerStore, nil) }()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer dialCancel()
@@ -735,7 +765,7 @@ func TestDispatchStream_RoutesGetChunk(t *testing.T) {
 		t.Fatalf("WriteGetChunkRequest: %v", err)
 	}
 	rw := &fakeStream{writeErrAt: -1, rd: &reqBuf}
-	if err := dispatchStream(context.Background(), rw, st, owner); err != nil {
+	if err := dispatchStream(context.Background(), rw, st, owner, nil); err != nil {
 		t.Fatalf("dispatchStream: %v", err)
 	}
 	got, appErr, err := protocol.ReadGetChunkResponse(&rw.wbuf, 1<<20)
@@ -841,7 +871,7 @@ func TestSendGetChunk_ReadResponseError(t *testing.T) {
 }
 
 // withDispatchStreamFunc swaps dispatchStreamFunc for the duration of a test.
-func withDispatchStreamFunc(t *testing.T, fn func(context.Context, io.ReadWriter, *store.Store, []byte) error) {
+func withDispatchStreamFunc(t *testing.T, fn func(context.Context, io.ReadWriter, *store.Store, []byte, AnnouncementHandler) error) {
 	t.Helper()
 	prev := dispatchStreamFunc
 	dispatchStreamFunc = fn
@@ -876,7 +906,7 @@ func TestServeConn_BoundsConcurrentDispatchers(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 
-	withDispatchStreamFunc(t, func(_ context.Context, _ io.ReadWriter, _ *store.Store, _ []byte) error {
+	withDispatchStreamFunc(t, func(_ context.Context, _ io.ReadWriter, _ *store.Store, _ []byte, _ AnnouncementHandler) error {
 		started <- struct{}{}
 		<-release
 		return nil
@@ -900,7 +930,7 @@ func TestServeConn_BoundsConcurrentDispatchers(t *testing.T) {
 	serveCtx, cancel := context.WithCancel(context.Background())
 	serveDone := make(chan struct{})
 	go func() {
-		_ = Serve(serveCtx, listener, nil)
+		_ = Serve(serveCtx, listener, nil, nil)
 		close(serveDone)
 	}()
 	// Registered after withDispatchStreamFunc so LIFO drains all
@@ -973,7 +1003,7 @@ loop:
 // error through the warn-log branch without crashing.
 func TestServeConn_LogsDispatchError(t *testing.T) {
 	dispatchDone := make(chan struct{}, 1)
-	withDispatchStreamFunc(t, func(_ context.Context, _ io.ReadWriter, _ *store.Store, _ []byte) error {
+	withDispatchStreamFunc(t, func(_ context.Context, _ io.ReadWriter, _ *store.Store, _ []byte, _ AnnouncementHandler) error {
 		dispatchDone <- struct{}{}
 		return errors.New("dispatch boom")
 	})
@@ -995,7 +1025,7 @@ func TestServeConn_LogsDispatchError(t *testing.T) {
 
 	serveCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = Serve(serveCtx, listener, nil) }()
+	go func() { _ = Serve(serveCtx, listener, nil, nil) }()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(dialCancel)
@@ -1037,7 +1067,7 @@ func TestServeConn_SemaphoreAcquireCancelled(t *testing.T) {
 	var releaseOnce sync.Once
 	t.Cleanup(func() { releaseOnce.Do(func() { close(blockForever) }) })
 
-	withDispatchStreamFunc(t, func(_ context.Context, _ io.ReadWriter, _ *store.Store, _ []byte) error {
+	withDispatchStreamFunc(t, func(_ context.Context, _ io.ReadWriter, _ *store.Store, _ []byte, _ AnnouncementHandler) error {
 		stubEntered <- struct{}{}
 		<-blockForever
 		return nil
@@ -1061,7 +1091,7 @@ func TestServeConn_SemaphoreAcquireCancelled(t *testing.T) {
 	serveCtx, cancel := context.WithCancel(context.Background())
 	serveDone := make(chan struct{})
 	go func() {
-		_ = Serve(serveCtx, listener, nil)
+		_ = Serve(serveCtx, listener, nil, nil)
 		close(serveDone)
 	}()
 

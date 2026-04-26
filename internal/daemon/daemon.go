@@ -27,6 +27,7 @@ import (
 	bsquic "backupswarm/internal/quic"
 	"backupswarm/internal/restore"
 	"backupswarm/internal/store"
+	"backupswarm/internal/swarm"
 )
 
 // Mode is the startup classification produced by Classify.
@@ -273,7 +274,10 @@ func Run(ctx context.Context, opts Options) error {
 	defer func() { _ = listener.Close() }()
 
 	serveErrCh := make(chan error, 1)
-	go func() { serveErrCh <- backup.Serve(ctx, listener, st) }()
+	announceFn := func(ctx context.Context, r io.Reader) error {
+		return swarm.ServeAnnouncementStream(ctx, r, peerStore)
+	}
+	go func() { serveErrCh <- backup.Serve(ctx, listener, st, announceFn) }()
 
 	// Pure storage-peer role: serve inbound chunks only, no scan loop.
 	if opts.BackupDir == "" {
