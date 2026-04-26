@@ -4,6 +4,7 @@
 package bootstrap
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/subtle"
@@ -178,6 +179,17 @@ func DoJoin(ctx context.Context, tokenStr string, myPriv ed25519.PrivateKey, myL
 	introducer := peers.Peer{Addr: tok.Addr, PubKey: ed25519PubCopy(tok.Pub), Role: peers.RoleIntroducer}
 	if err := store.Add(introducer); err != nil {
 		return JoinResult{}, fmt.Errorf("persist introducer: %w", err)
+	}
+	// Entries colliding with the introducer pubkey are skipped so a
+	// downgraded peer-list role cannot overwrite the RoleIntroducer
+	// record, which IsStorageCandidate relies on.
+	for i, p := range receivedPeers {
+		if bytes.Equal(p.PubKey, introducer.PubKey) {
+			continue
+		}
+		if err := store.Add(p); err != nil {
+			return JoinResult{}, fmt.Errorf("persist peer %d: %w", i, err)
+		}
 	}
 	return JoinResult{Introducer: introducer, Peers: receivedPeers}, nil
 }

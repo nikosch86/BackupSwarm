@@ -242,6 +242,127 @@ func TestBootstrap_SendsExistingPeers(t *testing.T) {
 	}
 }
 
+// TestBootstrap_PersistsReceivedPeerList asserts received peer-list
+// entries land in the joiner's peer store with role and address
+// preserved, alongside the introducer record.
+func TestBootstrap_PersistsReceivedPeerList(t *testing.T) {
+	rig := setupTwoSides(t)
+	storagePub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("storage key: %v", err)
+	}
+	plainPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("plain key: %v", err)
+	}
+	seeded := []peers.Peer{
+		{Addr: "10.20.30.40:7777", PubKey: storagePub, Role: peers.RoleStorage},
+		{Addr: "10.20.30.41:8888", PubKey: plainPub, Role: peers.RolePeer},
+	}
+	for _, p := range seeded {
+		if err := rig.introducerPeerList.Add(p); err != nil {
+			t.Fatalf("seed peer: %v", err)
+		}
+	}
+
+	tok := rig.tokenStr(t, rig.listener.Addr().String(), rig.introducerPub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	var acceptErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator())
+	}()
+
+	if _, err := bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerPeerList); err != nil {
+		t.Fatalf("DoJoin: %v", err)
+	}
+	wg.Wait()
+	if acceptErr != nil {
+		t.Fatalf("AcceptJoin: %v", acceptErr)
+	}
+
+	gotStorage, err := rig.joinerPeerList.Get(storagePub)
+	if err != nil {
+		t.Fatalf("joiner missing storage peer: %v", err)
+	}
+	if gotStorage.Addr != "10.20.30.40:7777" {
+		t.Errorf("storage peer addr = %q, want %q", gotStorage.Addr, "10.20.30.40:7777")
+	}
+	if gotStorage.Role != peers.RoleStorage {
+		t.Errorf("storage peer role = %v, want RoleStorage", gotStorage.Role)
+	}
+
+	gotPlain, err := rig.joinerPeerList.Get(plainPub)
+	if err != nil {
+		t.Fatalf("joiner missing plain peer: %v", err)
+	}
+	if gotPlain.Addr != "10.20.30.41:8888" {
+		t.Errorf("plain peer addr = %q, want %q", gotPlain.Addr, "10.20.30.41:8888")
+	}
+	if gotPlain.Role != peers.RolePeer {
+		t.Errorf("plain peer role = %v, want RolePeer", gotPlain.Role)
+	}
+
+	gotIntro, err := rig.joinerPeerList.Get(rig.introducerPub)
+	if err != nil {
+		t.Fatalf("joiner missing introducer: %v", err)
+	}
+	if gotIntro.Role != peers.RoleIntroducer {
+		t.Errorf("introducer role = %v, want RoleIntroducer", gotIntro.Role)
+	}
+}
+
+// TestBootstrap_PeerListWithIntroducerPubkey_PreservesIntroducer asserts
+// that a peer-list entry sharing the introducer's pubkey does not
+// downgrade the introducer record on the joiner side.
+func TestBootstrap_PeerListWithIntroducerPubkey_PreservesIntroducer(t *testing.T) {
+	rig := setupTwoSides(t)
+	// The introducer's own pubkey is seeded under RolePeer so the
+	// snapshot AcceptJoin sends includes a self-entry.
+	selfEntry := peers.Peer{Addr: "spoof.example:1", PubKey: rig.introducerPub, Role: peers.RolePeer}
+	if err := rig.introducerPeerList.Add(selfEntry); err != nil {
+		t.Fatalf("seed self entry: %v", err)
+	}
+
+	tok := rig.tokenStr(t, rig.listener.Addr().String(), rig.introducerPub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	var acceptErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator())
+	}()
+
+	if _, err := bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerPeerList); err != nil {
+		t.Fatalf("DoJoin: %v", err)
+	}
+	wg.Wait()
+	if acceptErr != nil {
+		t.Fatalf("AcceptJoin: %v", acceptErr)
+	}
+
+	got, err := rig.joinerPeerList.Get(rig.introducerPub)
+	if err != nil {
+		t.Fatalf("joiner missing introducer: %v", err)
+	}
+	if got.Role != peers.RoleIntroducer {
+		t.Errorf("introducer role = %v, want RoleIntroducer (peer-list entry must not overwrite)", got.Role)
+	}
+	if got.Addr != rig.listener.Addr().String() {
+		t.Errorf("introducer addr = %q, want %q (peer-list entry must not overwrite)",
+			got.Addr, rig.listener.Addr().String())
+	}
+}
+
 func TestBootstrap_SwarmIDMismatch_RejectedByIntroducer(t *testing.T) {
 	rig := setupTwoSides(t)
 
