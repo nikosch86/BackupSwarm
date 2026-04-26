@@ -590,3 +590,67 @@ func TestMarkPinMode_FailsWhenMarkerPathIsDir(t *testing.T) {
 		t.Error("MarkPinMode() succeeded when marker path is a directory")
 	}
 }
+
+func TestLoad_PrivateKeyReadFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permissions not meaningful on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("chmod barriers do not apply to root")
+	}
+	dir := t.TempDir()
+	ca, err := Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if err := Save(dir, ca); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	privPath := filepath.Join(dir, privateKeyFile)
+	if err := os.Chmod(privPath, 0o000); err != nil {
+		t.Fatalf("chmod ca private key: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(privPath, privateKeyPerm) })
+	_, err = Load(dir)
+	if err == nil {
+		t.Fatal("Load() returned nil when ca.key is unreadable, want read error")
+	}
+	if errors.Is(err, ErrCANotFound) {
+		t.Errorf("Load() returned ErrCANotFound for EACCES; want distinct read error")
+	}
+	if !strings.Contains(err.Error(), "read ca private key") {
+		t.Errorf("Load() error = %q, want 'read ca private key' prefix", err)
+	}
+}
+
+func TestLoad_CertReadFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permissions not meaningful on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("chmod barriers do not apply to root")
+	}
+	dir := t.TempDir()
+	ca, err := Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if err := Save(dir, ca); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	certPath := filepath.Join(dir, certFile)
+	if err := os.Chmod(certPath, 0o000); err != nil {
+		t.Fatalf("chmod ca cert: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(certPath, certPerm) })
+	_, err = Load(dir)
+	if err == nil {
+		t.Fatal("Load() returned nil when ca.crt is unreadable, want read error")
+	}
+	if errors.Is(err, ErrCANotFound) {
+		t.Errorf("Load() returned ErrCANotFound for EACCES; want distinct read error")
+	}
+	if !strings.Contains(err.Error(), "read ca cert") {
+		t.Errorf("Load() error = %q, want 'read ca cert' prefix", err)
+	}
+}

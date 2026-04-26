@@ -87,9 +87,13 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 			if err := invitesStore.Issue(secret, swarmID); err != nil {
 				return fmt.Errorf("issue invite: %w", err)
 			}
-			caCert, err := resolveInviteCA(cmd.Context(), sess.dir, noCA)
+			swarmCA, err := resolveInviteCA(cmd.Context(), sess.dir, noCA)
 			if err != nil {
 				return err
+			}
+			var caCertDER []byte
+			if swarmCA != nil {
+				caCertDER = swarmCA.CertDER
 			}
 			// Use the listener's actual bound addr so ":0" (ephemeral
 			// port) still produces a usable token.
@@ -98,7 +102,7 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 				Pub:     sess.id.PublicKey,
 				SwarmID: swarmID,
 				Secret:  secret,
-				CACert:  caCert,
+				CACert:  caCertDER,
 			})
 			if err != nil {
 				return fmt.Errorf("encode token: %w", err)
@@ -112,7 +116,7 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 
 			ctx, cancel := withTimeout(cmd.Context(), timeout)
 			defer cancel()
-			peer, err := bootstrap.AcceptJoin(ctx, listener, sess.peerStore, invitesStore.Consume)
+			peer, err := bootstrap.AcceptJoin(ctx, listener, sess.peerStore, invitesStore.Consume, swarmCA)
 			if err != nil {
 				return fmt.Errorf("accept join: %w", err)
 			}
@@ -145,10 +149,10 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 	return cmd
 }
 
-// resolveInviteCA returns the CA cert DER to embed in the invite token.
-// First invite on a fresh data dir generates+saves a CA (or writes a pin
-// marker with --no-ca); subsequent invites honor the locked-in mode.
-func resolveInviteCA(ctx context.Context, dir string, noCA bool) ([]byte, error) {
+// resolveInviteCA returns the swarm CA used to sign joiner CSRs and embed
+// in invite tokens. First invite generates+saves a CA, or writes a pin
+// marker with --no-ca; subsequent invites honor the locked-in mode.
+func resolveInviteCA(ctx context.Context, dir string, noCA bool) (*ca.CA, error) {
 	hasCA, err := ca.Has(dir)
 	if err != nil {
 		return nil, fmt.Errorf("check ca: %w", err)
@@ -173,10 +177,9 @@ func resolveInviteCA(ctx context.Context, dir string, noCA bool) ([]byte, error)
 		if err != nil {
 			return nil, fmt.Errorf("load ca: %w", err)
 		}
-		return swarmCA.CertDER, nil
+		return swarmCA, nil
 	}
 	if pinMode {
-		// Pin mode previously chosen; honor it without requiring --no-ca.
 		return nil, nil
 	}
 	swarmCA, err := ca.Generate()
@@ -187,7 +190,7 @@ func resolveInviteCA(ctx context.Context, dir string, noCA bool) ([]byte, error)
 		return nil, fmt.Errorf("save ca: %w", err)
 	}
 	slog.InfoContext(ctx, "generated swarm ca", "data_dir", dir)
-	return swarmCA.CertDER, nil
+	return swarmCA, nil
 }
 
 // newSessionIDs generates the per-invite swarm ID and single-use secret.

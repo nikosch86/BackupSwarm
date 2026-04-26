@@ -8,10 +8,14 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/subtle"
+	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 
+	"backupswarm/internal/ca"
 	"backupswarm/internal/invites"
 	"backupswarm/internal/peers"
 	"backupswarm/internal/protocol"
@@ -32,6 +36,13 @@ const maxAdvertisedAddrLen = 1 << 10
 
 // maxPeerListEntries caps the inbound peer-list count.
 const maxPeerListEntries = 1 << 10
+
+// maxJoinCSRLen / maxJoinCertLen cap the CSR sent by the joiner and the
+// signed leaf cert returned by the introducer. An Ed25519 CSR/leaf is ~250 bytes.
+const (
+	maxJoinCSRLen  = 1 << 12
+	maxJoinCertLen = 1 << 12
+)
 
 // Wire vocabulary for JoinResponse application errors.
 const (
@@ -62,18 +73,23 @@ var ErrIntroducerInternal = errors.New("introducer reported internal error")
 // log; the validation must be a same-transaction read+mark-consumed.
 type SecretValidator func(secret [token.SecretSize]byte) ([token.SwarmIDSize]byte, error)
 
-// JoinResult is what DoJoin gives back: the introducer record persisted
-// locally and the peer list the introducer reported. Persistence of the
-// peer list is the caller's responsibility.
+// ErrMissingSignedCert is returned by DoJoin when the token carried a
+// CACert but the introducer's response had no signed leaf.
+var ErrMissingSignedCert = errors.New("introducer returned empty signed cert in CA-mode swarm")
+
+// JoinResult bundles the introducer record, the introducer's peer list,
+// and the joiner's CA-signed leaf cert (empty in pubkey-pin swarms).
+// Persistence of the cert and peer list is the caller's responsibility.
 type JoinResult struct {
 	Introducer peers.Peer
 	Peers      []peers.Peer
+	SignedCert []byte
 }
 
 // AcceptJoin blocks for one inbound join, validates the request via
-// validate, sends the introducer's peer list, and persists the joiner.
-// The stream is closed on every return path so the joiner surfaces EOF.
-func AcceptJoin(ctx context.Context, l *bsquic.Listener, store *peers.Store, validate SecretValidator) (peers.Peer, error) {
+// validate, signs the joiner's CSR with swarmCA when non-nil, sends the
+// peer list, and persists the joiner. swarmCA nil = pubkey-pin mode.
+func AcceptJoin(ctx context.Context, l *bsquic.Listener, store *peers.Store, validate SecretValidator, swarmCA *ca.CA) (peers.Peer, error) {
 	conn, err := l.Accept(ctx)
 	if err != nil {
 		return peers.Peer{}, fmt.Errorf("accept: %w", err)
@@ -90,27 +106,33 @@ func AcceptJoin(ctx context.Context, l *bsquic.Listener, store *peers.Store, val
 		}
 	}()
 
-	gotSwarm, gotSecret, addr, err := protocol.ReadJoinRequest(stream, maxAdvertisedAddrLen)
+	gotSwarm, gotSecret, addr, csrDER, err := protocol.ReadJoinRequest(stream, maxAdvertisedAddrLen, maxJoinCSRLen)
 	if err != nil {
-		_ = writeJoinResponseFunc(stream, "malformed request")
+		_ = writeJoinResponseFunc(stream, nil, "malformed request")
 		return peers.Peer{}, fmt.Errorf("read join request: %w", err)
 	}
 	expectedSwarm, err := validate(gotSecret)
 	if err != nil {
-		_ = writeJoinResponseFunc(stream, validatorWireCode(err))
+		_ = writeJoinResponseFunc(stream, nil, validatorWireCode(err))
 		return peers.Peer{}, fmt.Errorf("validate secret: %w", err)
 	}
 	if subtle.ConstantTimeCompare(gotSwarm[:], expectedSwarm[:]) != 1 {
-		_ = writeJoinResponseFunc(stream, wireErrSwarmMismatch)
+		_ = writeJoinResponseFunc(stream, nil, wireErrSwarmMismatch)
 		return peers.Peer{}, fmt.Errorf("swarm id mismatch")
+	}
+
+	signedCertDER, err := signJoinerCSRIfCA(ctx, swarmCA, csrDER, conn.RemotePub())
+	if err != nil {
+		_ = writeJoinResponseFunc(stream, nil, wireErrInternal)
+		return peers.Peer{}, err
 	}
 
 	snapshot, err := store.List()
 	if err != nil {
-		_ = writeJoinResponseFunc(stream, wireErrInternal)
+		_ = writeJoinResponseFunc(stream, nil, wireErrInternal)
 		return peers.Peer{}, fmt.Errorf("snapshot peers: %w", err)
 	}
-	if err := writeJoinResponseFunc(stream, ""); err != nil {
+	if err := writeJoinResponseFunc(stream, signedCertDER, ""); err != nil {
 		return peers.Peer{}, fmt.Errorf("write response: %w", err)
 	}
 	entries, err := peersToEntries(snapshot)
@@ -136,12 +158,19 @@ func AcceptJoin(ctx context.Context, l *bsquic.Listener, store *peers.Store, val
 }
 
 // DoJoin dials the introducer named by tokenStr (TLS pinned to the
-// token's pubkey), exchanges the join handshake, persists the introducer,
-// and returns the received peer list. Store untouched on any failure.
+// token's pubkey), exchanges the handshake (sending a CSR when the token
+// carries a CA cert), and persists the introducer. Store untouched on failure.
 func DoJoin(ctx context.Context, tokenStr string, myPriv ed25519.PrivateKey, myListenAddr string, store *peers.Store) (JoinResult, error) {
 	tok, err := token.Decode(tokenStr)
 	if err != nil {
 		return JoinResult{}, fmt.Errorf("decode token: %w", err)
+	}
+	var csrDER []byte
+	if len(tok.CACert) > 0 {
+		csrDER, err = ca.CreateCSR(myPriv)
+		if err != nil {
+			return JoinResult{}, fmt.Errorf("create csr: %w", err)
+		}
 	}
 	conn, err := bsquic.Dial(ctx, tok.Addr, myPriv, tok.Pub)
 	if err != nil {
@@ -153,19 +182,27 @@ func DoJoin(ctx context.Context, tokenStr string, myPriv ed25519.PrivateKey, myL
 	if err != nil {
 		return JoinResult{}, fmt.Errorf("open stream: %w", err)
 	}
-	if err := writeJoinRequestFunc(stream, tok.SwarmID, tok.Secret, myListenAddr); err != nil {
+	if err := writeJoinRequestFunc(stream, tok.SwarmID, tok.Secret, myListenAddr, csrDER); err != nil {
 		_ = stream.Close()
 		return JoinResult{}, fmt.Errorf("write request: %w", err)
 	}
 	if err := streamCloseFunc(stream); err != nil {
 		return JoinResult{}, fmt.Errorf("close request send: %w", err)
 	}
-	appErr, err := protocol.ReadJoinResponse(stream)
+	signedCertDER, appErr, err := protocol.ReadJoinResponse(stream, maxJoinCertLen)
 	if err != nil {
 		return JoinResult{}, fmt.Errorf("read response: %w", err)
 	}
 	if appErr != "" {
 		return JoinResult{}, joinResponseError(appErr)
+	}
+	if len(tok.CACert) > 0 {
+		if len(signedCertDER) == 0 {
+			return JoinResult{}, ErrMissingSignedCert
+		}
+		if err := verifySignedCert(signedCertDER, tok.CACert, myPriv); err != nil {
+			return JoinResult{}, fmt.Errorf("verify signed cert: %w", err)
+		}
 	}
 	entries, err := protocol.ReadPeerListMessage(stream, maxPeerListEntries, maxAdvertisedAddrLen)
 	if err != nil {
@@ -191,7 +228,7 @@ func DoJoin(ctx context.Context, tokenStr string, myPriv ed25519.PrivateKey, myL
 			return JoinResult{}, fmt.Errorf("persist peer %d: %w", i, err)
 		}
 	}
-	return JoinResult{Introducer: introducer, Peers: receivedPeers}, nil
+	return JoinResult{Introducer: introducer, Peers: receivedPeers, SignedCert: signedCertDER}, nil
 }
 
 // peersToEntries maps the peer-store snapshot to wire entries, rejecting
@@ -269,4 +306,62 @@ func ed25519PubCopy(pub ed25519.PublicKey) ed25519.PublicKey {
 	out := make(ed25519.PublicKey, len(pub))
 	copy(out, pub)
 	return out
+}
+
+// signJoinerCSRIfCA signs csrDER with swarmCA, pinning the CSR pubkey
+// to joinerPub. Returns (nil, nil) when swarmCA is nil; errors when
+// swarmCA is non-nil and csrDER is empty or invalid.
+func signJoinerCSRIfCA(ctx context.Context, swarmCA *ca.CA, csrDER []byte, joinerPub ed25519.PublicKey) ([]byte, error) {
+	if swarmCA == nil {
+		return nil, nil
+	}
+	if len(csrDER) == 0 {
+		slog.WarnContext(ctx, "join request missing csr in ca-mode swarm",
+			"joiner_pub", hex.EncodeToString(joinerPub))
+		return nil, fmt.Errorf("missing CSR in CA-mode swarm")
+	}
+	signedCertDER, err := ca.SignNodeCert(swarmCA, csrDER, joinerPub, ca.DefaultLeafValidity)
+	if err != nil {
+		slog.WarnContext(ctx, "sign joiner csr failed",
+			"joiner_pub", hex.EncodeToString(joinerPub),
+			"error", err)
+		return nil, fmt.Errorf("sign joiner csr: %w", err)
+	}
+	slog.InfoContext(ctx, "signed joiner leaf cert",
+		"joiner_pub", hex.EncodeToString(joinerPub),
+		"validity", ca.DefaultLeafValidity)
+	return signedCertDER, nil
+}
+
+// verifySignedCert checks that certDER chains to caCertDER and that the
+// leaf's Ed25519 pubkey equals myPriv.Public().
+func verifySignedCert(certDER, caCertDER []byte, myPriv ed25519.PrivateKey) error {
+	leaf, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return fmt.Errorf("parse leaf: %w", err)
+	}
+	caCert, err := x509.ParseCertificate(caCertDER)
+	if err != nil {
+		return fmt.Errorf("parse swarm ca cert: %w", err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(caCert)
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots:     pool,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		return fmt.Errorf("chain verify: %w", err)
+	}
+	leafPub, ok := leaf.PublicKey.(ed25519.PublicKey)
+	if !ok {
+		return fmt.Errorf("leaf public key is %T, want ed25519.PublicKey", leaf.PublicKey)
+	}
+	myPub, ok := myPriv.Public().(ed25519.PublicKey)
+	if !ok {
+		return fmt.Errorf("my private key is not ed25519")
+	}
+	if !leafPub.Equal(myPub) {
+		return errors.New("leaf public key does not match our identity")
+	}
+	return nil
 }

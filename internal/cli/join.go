@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"backupswarm/internal/bootstrap"
+	"backupswarm/internal/ca"
 	"backupswarm/internal/daemon"
 	"backupswarm/pkg/token"
 )
@@ -78,10 +79,16 @@ func newJoinCmd(dataDir *string) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("join: %w", err)
 			}
+			if len(result.SignedCert) > 0 {
+				if err := ca.SaveNodeCert(sess.dir, result.SignedCert); err != nil {
+					return fmt.Errorf("save node cert: %w", err)
+				}
+			}
 			slog.InfoContext(cmd.Context(), "joined peer",
 				"peer_pub", hex.EncodeToString(result.Introducer.PubKey),
 				"peer_addr", result.Introducer.Addr,
 				"peer_list_size", len(result.Peers),
+				"signed_cert", len(result.SignedCert) > 0,
 			)
 
 			if !thenRun {

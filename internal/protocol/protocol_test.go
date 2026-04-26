@@ -203,7 +203,7 @@ func TestWritePutChunkRequest_RejectsEmptyBlob(t *testing.T) {
 func TestWriteJoinResponse_PropagatesSuccessWriteError(t *testing.T) {
 	sentinel := errors.New("response status boom")
 	w := &errWriter{failAt: 0, err: sentinel}
-	if err := protocol.WriteJoinResponse(w, ""); !errors.Is(err, sentinel) {
+	if err := protocol.WriteJoinResponse(w, nil, ""); !errors.Is(err, sentinel) {
 		t.Errorf("WriteJoinResponse success err = %v, want wraps sentinel", err)
 	}
 }
@@ -214,7 +214,7 @@ func TestWriteJoinResponse_PropagatesErrorFrameWriteErrors(t *testing.T) {
 	for i, name := range []string{"status", "length", "body"} {
 		sentinel := errors.New(name + " response err boom")
 		w := &errWriter{failAt: i, err: sentinel}
-		err := protocol.WriteJoinResponse(w, "swarm_mismatch")
+		err := protocol.WriteJoinResponse(w, nil, "swarm_mismatch")
 		if !errors.Is(err, sentinel) {
 			t.Errorf("%s-stage err = %v, want wraps sentinel", name, err)
 		}
@@ -223,14 +223,14 @@ func TestWriteJoinResponse_PropagatesErrorFrameWriteErrors(t *testing.T) {
 
 func TestReadJoinResponse_RejectsTruncatedErrorLength(t *testing.T) {
 	frame := []byte{1, 0x00, 0x00}
-	if _, err := protocol.ReadJoinResponse(bytes.NewReader(frame)); err == nil {
+	if _, _, err := protocol.ReadJoinResponse(bytes.NewReader(frame), 1<<12); err == nil {
 		t.Error("ReadJoinResponse accepted truncated error length prefix")
 	}
 }
 
 func TestReadJoinResponse_RejectsOversizedErrorMessage(t *testing.T) {
 	frame := []byte{1, 0x00, 0x10, 0x00, 0x01}
-	if _, err := protocol.ReadJoinResponse(bytes.NewReader(frame)); err == nil {
+	if _, _, err := protocol.ReadJoinResponse(bytes.NewReader(frame), 1<<12); err == nil {
 		t.Error("ReadJoinResponse accepted oversized error length")
 	}
 }
@@ -241,7 +241,7 @@ func TestWriteJoinRequest_PropagatesWriteErrors(t *testing.T) {
 	for i, name := range []string{"swarm", "secret", "addrLen", "addrBody"} {
 		sentinel := errors.New(name + " request boom")
 		w := &errWriter{failAt: i, err: sentinel}
-		err := protocol.WriteJoinRequest(w, [32]byte{}, [32]byte{}, "x")
+		err := protocol.WriteJoinRequest(w, [32]byte{}, [32]byte{}, "x", nil)
 		if !errors.Is(err, sentinel) {
 			t.Errorf("%s-stage err = %v, want wraps sentinel", name, err)
 		}
@@ -275,10 +275,10 @@ func TestWriteReadJoinRequest_RoundTrip(t *testing.T) {
 	secret := filledArray(0xBB)
 
 	var buf bytes.Buffer
-	if err := protocol.WriteJoinRequest(&buf, swarmID, secret, "node-a.internal:7777"); err != nil {
+	if err := protocol.WriteJoinRequest(&buf, swarmID, secret, "node-a.internal:7777", nil); err != nil {
 		t.Fatalf("WriteJoinRequest: %v", err)
 	}
-	gotSwarm, gotSecret, gotAddr, err := protocol.ReadJoinRequest(&buf, 1<<10)
+	gotSwarm, gotSecret, gotAddr, _, err := protocol.ReadJoinRequest(&buf, 1<<10, 1<<12)
 	if err != nil {
 		t.Fatalf("ReadJoinRequest: %v", err)
 	}
@@ -295,10 +295,10 @@ func TestWriteReadJoinRequest_RoundTrip(t *testing.T) {
 
 func TestWriteReadJoinRequest_AcceptsEmptyAddr(t *testing.T) {
 	var buf bytes.Buffer
-	if err := protocol.WriteJoinRequest(&buf, [32]byte{}, [32]byte{}, ""); err != nil {
+	if err := protocol.WriteJoinRequest(&buf, [32]byte{}, [32]byte{}, "", nil); err != nil {
 		t.Fatalf("WriteJoinRequest: %v", err)
 	}
-	_, _, addr, err := protocol.ReadJoinRequest(&buf, 1<<10)
+	_, _, addr, _, err := protocol.ReadJoinRequest(&buf, 1<<10, 1<<12)
 	if err != nil {
 		t.Fatalf("ReadJoinRequest: %v", err)
 	}
@@ -308,39 +308,39 @@ func TestWriteReadJoinRequest_AcceptsEmptyAddr(t *testing.T) {
 }
 
 func TestReadJoinRequest_RejectsTruncated(t *testing.T) {
-	if _, _, _, err := protocol.ReadJoinRequest(bytes.NewReader([]byte{0x00}), 1<<10); err == nil {
+	if _, _, _, _, err := protocol.ReadJoinRequest(bytes.NewReader([]byte{0x00}), 1<<10, 1<<12); err == nil {
 		t.Error("ReadJoinRequest accepted truncated swarmID")
 	}
 	tooShort := append(bytes.Repeat([]byte{0x11}, 32), bytes.Repeat([]byte{0x22}, 30)...)
-	if _, _, _, err := protocol.ReadJoinRequest(bytes.NewReader(tooShort), 1<<10); err == nil {
+	if _, _, _, _, err := protocol.ReadJoinRequest(bytes.NewReader(tooShort), 1<<10, 1<<12); err == nil {
 		t.Error("ReadJoinRequest accepted truncated secret")
 	}
 	missingAddrLen := append(bytes.Repeat([]byte{0x11}, 32), bytes.Repeat([]byte{0x22}, 32)...)
-	if _, _, _, err := protocol.ReadJoinRequest(bytes.NewReader(missingAddrLen), 1<<10); err == nil {
+	if _, _, _, _, err := protocol.ReadJoinRequest(bytes.NewReader(missingAddrLen), 1<<10, 1<<12); err == nil {
 		t.Error("ReadJoinRequest accepted missing addr length")
 	}
 	bodyShort := append(missingAddrLen, 0x00, 0x00, 0x00, 0x05, 'a', 'b')
-	if _, _, _, err := protocol.ReadJoinRequest(bytes.NewReader(bodyShort), 1<<10); err == nil {
+	if _, _, _, _, err := protocol.ReadJoinRequest(bytes.NewReader(bodyShort), 1<<10, 1<<12); err == nil {
 		t.Error("ReadJoinRequest accepted truncated addr body")
 	}
 }
 
 func TestReadJoinRequest_RejectsOversizedAddr(t *testing.T) {
 	var buf bytes.Buffer
-	if err := protocol.WriteJoinRequest(&buf, [32]byte{}, [32]byte{}, "this-addr-is-too-long"); err != nil {
+	if err := protocol.WriteJoinRequest(&buf, [32]byte{}, [32]byte{}, "this-addr-is-too-long", nil); err != nil {
 		t.Fatalf("WriteJoinRequest: %v", err)
 	}
-	if _, _, _, err := protocol.ReadJoinRequest(&buf, 5); err == nil {
+	if _, _, _, _, err := protocol.ReadJoinRequest(&buf, 5, 1<<12); err == nil {
 		t.Error("ReadJoinRequest accepted oversized addr")
 	}
 }
 
 func TestWriteReadJoinResponse_Success(t *testing.T) {
 	var buf bytes.Buffer
-	if err := protocol.WriteJoinResponse(&buf, ""); err != nil {
+	if err := protocol.WriteJoinResponse(&buf, nil, ""); err != nil {
 		t.Fatalf("WriteJoinResponse: %v", err)
 	}
-	appErr, err := protocol.ReadJoinResponse(&buf)
+	_, appErr, err := protocol.ReadJoinResponse(&buf, 1<<12)
 	if err != nil {
 		t.Fatalf("ReadJoinResponse: %v", err)
 	}
@@ -351,10 +351,10 @@ func TestWriteReadJoinResponse_Success(t *testing.T) {
 
 func TestWriteReadJoinResponse_ErrorPath(t *testing.T) {
 	var buf bytes.Buffer
-	if err := protocol.WriteJoinResponse(&buf, "swarm_mismatch"); err != nil {
+	if err := protocol.WriteJoinResponse(&buf, nil, "swarm_mismatch"); err != nil {
 		t.Fatalf("WriteJoinResponse: %v", err)
 	}
-	appErr, err := protocol.ReadJoinResponse(&buf)
+	_, appErr, err := protocol.ReadJoinResponse(&buf, 1<<12)
 	if err != nil {
 		t.Fatalf("ReadJoinResponse: %v", err)
 	}
@@ -364,17 +364,17 @@ func TestWriteReadJoinResponse_ErrorPath(t *testing.T) {
 }
 
 func TestReadJoinResponse_RejectsUnknownStatus(t *testing.T) {
-	if _, err := protocol.ReadJoinResponse(bytes.NewReader([]byte{0xff})); err == nil {
+	if _, _, err := protocol.ReadJoinResponse(bytes.NewReader([]byte{0xff}), 1<<12); err == nil {
 		t.Error("ReadJoinResponse accepted unknown status byte")
 	}
 }
 
 func TestReadJoinResponse_RejectsTruncated(t *testing.T) {
-	if _, err := protocol.ReadJoinResponse(bytes.NewReader(nil)); err == nil {
+	if _, _, err := protocol.ReadJoinResponse(bytes.NewReader(nil), 1<<12); err == nil {
 		t.Error("ReadJoinResponse accepted empty stream")
 	}
 	frame := []byte{1, 0x00, 0x00, 0x00, 0x05, 'a', 'b'}
-	if _, err := protocol.ReadJoinResponse(bytes.NewReader(frame)); err == nil {
+	if _, _, err := protocol.ReadJoinResponse(bytes.NewReader(frame), 1<<12); err == nil {
 		t.Error("ReadJoinResponse accepted truncated error body")
 	}
 }

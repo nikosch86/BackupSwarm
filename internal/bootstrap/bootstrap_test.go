@@ -132,7 +132,7 @@ func TestBootstrap_EndToEnd(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		acceptedPeer, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator())
+		acceptedPeer, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator(), nil)
 	}()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -215,7 +215,7 @@ func TestBootstrap_SendsExistingPeers(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator())
+		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator(), nil)
 	}()
 
 	result, err := bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerPeerList)
@@ -275,7 +275,7 @@ func TestBootstrap_PersistsReceivedPeerList(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator())
+		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator(), nil)
 	}()
 
 	if _, err := bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerPeerList); err != nil {
@@ -339,7 +339,7 @@ func TestBootstrap_PeerListWithIntroducerPubkey_PreservesIntroducer(t *testing.T
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator())
+		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator(), nil)
 	}()
 
 	if _, err := bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerPeerList); err != nil {
@@ -385,7 +385,7 @@ func TestBootstrap_SwarmIDMismatch_RejectedByIntroducer(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator())
+		_, _ = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator(), nil)
 	}()
 
 	_, err = bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerPeerList)
@@ -416,7 +416,7 @@ func TestBootstrap_AlreadyUsedToken_RejectedByIntroducer(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, preConsumed)
+		_, _ = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, preConsumed, nil)
 	}()
 
 	_, err := bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerPeerList)
@@ -451,7 +451,7 @@ func TestBootstrap_SecretMismatch_RejectedByIntroducer(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator())
+		_, _ = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator(), nil)
 	}()
 
 	_, err = bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerPeerList)
@@ -479,7 +479,7 @@ func TestBootstrap_WrongPubkeyTokenFailsTLSPin(t *testing.T) {
 	acceptCtx, acceptCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer acceptCancel()
 	go func() {
-		_, _ = bootstrap.AcceptJoin(acceptCtx, rig.listener, rig.introducerPeerList, rig.validator())
+		_, _ = bootstrap.AcceptJoin(acceptCtx, rig.listener, rig.introducerPeerList, rig.validator(), nil)
 	}()
 
 	_, err = bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "127.0.0.1:1", rig.joinerPeerList)
@@ -518,7 +518,7 @@ func TestBootstrap_AcceptJoin_CtxCancelReturns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator())
+		_, err := bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator(), nil)
 		done <- err
 	}()
 	time.Sleep(100 * time.Millisecond)
@@ -546,7 +546,7 @@ func TestBootstrap_JoinerWithEmptyListenAddr(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		acceptedPeer, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator())
+		acceptedPeer, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator(), nil)
 	}()
 
 	_, err := bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "", rig.joinerPeerList)
@@ -585,7 +585,7 @@ func TestBootstrap_IntroducerStoreError_PropagatesAppErr(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator())
+		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator(), nil)
 	}()
 
 	_, err := bootstrap.DoJoin(ctx, tok, rig.joinerPriv, "", rig.joinerPeerList)
@@ -621,7 +621,7 @@ func TestAcceptJoin_ClientClosesWithoutStream(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator())
+		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator(), nil)
 	}()
 
 	conn, err := bsquic.Dial(dialCtx, rig.listener.Addr().String(), rig.joinerPriv, rig.introducerPub)
@@ -646,7 +646,7 @@ func TestAcceptJoin_ListenerClosed(t *testing.T) {
 	_ = rig.listener.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, err := bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator())
+	_, err := bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator(), nil)
 	if err == nil {
 		t.Fatal("AcceptJoin returned nil on closed listener")
 	}
@@ -664,7 +664,7 @@ func TestAcceptJoin_MalformedRequest(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator())
+		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator(), nil)
 	}()
 
 	conn, err := bsquic.Dial(ctx, rig.listener.Addr().String(), rig.joinerPriv, rig.introducerPub)
@@ -710,7 +710,7 @@ func TestDoJoin_IntroducerDropsBeforeResponse(t *testing.T) {
 			_ = conn.Close()
 			return
 		}
-		_, _, _, _ = protocol.ReadJoinRequest(stream, maxAdvertisedAddrLenForTest)
+		_, _, _, _, _ = protocol.ReadJoinRequest(stream, maxAdvertisedAddrLenForTest, 1<<12)
 		_ = conn.Close()
 	}()
 
@@ -737,7 +737,7 @@ func TestDoJoin_JoinerStoreClosed_PropagatesErr(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator())
+		_, _ = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator(), nil)
 	}()
 
 	_ = rig.joinerPeerList.Close()

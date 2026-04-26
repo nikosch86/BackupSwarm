@@ -63,6 +63,14 @@ var ErrBlobTooLarge = errors.New("put chunk blob exceeds maximum size")
 // length exceeds the caller-supplied cap.
 var ErrAddrTooLarge = errors.New("join hello addr exceeds maximum size")
 
+// ErrCSRTooLarge is returned by ReadJoinRequest when the advertised CSR
+// length exceeds the caller-supplied cap.
+var ErrCSRTooLarge = errors.New("join request csr exceeds maximum size")
+
+// ErrCertTooLarge is returned by ReadJoinResponse when the signed leaf
+// cert length exceeds the caller-supplied cap.
+var ErrCertTooLarge = errors.New("join response cert exceeds maximum size")
+
 // WritePutChunkRequest frames blob onto w. The frame is
 // [4 bytes BE length][blob bytes]. Empty blobs are rejected; the peer
 // stores blob bytes by sha256 and a zero-length blob has no useful
@@ -164,8 +172,9 @@ func ReadPutChunkResponse(r io.Reader) (hash [32]byte, appErr string, err error)
 }
 
 // WriteJoinRequest frames a join request on w as
-// [32B swarmID][32B secret][4B BE addr_len][addr bytes].
-func WriteJoinRequest(w io.Writer, swarmID, secret [32]byte, listenAddr string) error {
+// [32B swarmID][32B secret][4B BE addr_len][addr][4B BE csr_len][csr].
+// csrDER is empty in pubkey-pin swarms.
+func WriteJoinRequest(w io.Writer, swarmID, secret [32]byte, listenAddr string, csrDER []byte) error {
 	if _, err := w.Write(swarmID[:]); err != nil {
 		return fmt.Errorf("write join request swarm: %w", err)
 	}
@@ -177,49 +186,81 @@ func WriteJoinRequest(w io.Writer, swarmID, secret [32]byte, listenAddr string) 
 	if _, err := w.Write(hdr[:]); err != nil {
 		return fmt.Errorf("write join request addr length: %w", err)
 	}
-	if len(listenAddr) == 0 {
-		return nil
+	if len(listenAddr) > 0 {
+		if _, err := w.Write([]byte(listenAddr)); err != nil {
+			return fmt.Errorf("write join request addr: %w", err)
+		}
 	}
-	if _, err := w.Write([]byte(listenAddr)); err != nil {
-		return fmt.Errorf("write join request addr: %w", err)
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(csrDER)))
+	if _, err := w.Write(hdr[:]); err != nil {
+		return fmt.Errorf("write join request csr length: %w", err)
+	}
+	if len(csrDER) > 0 {
+		if _, err := w.Write(csrDER); err != nil {
+			return fmt.Errorf("write join request csr: %w", err)
+		}
 	}
 	return nil
 }
 
 // ReadJoinRequest reads a single join request frame from r. maxAddrLen
-// caps the advertised listen address length.
-func ReadJoinRequest(r io.Reader, maxAddrLen int) (swarmID, secret [32]byte, listenAddr string, err error) {
+// caps the advertised listen address length; maxCSRLen caps the CSR DER
+// length. csrDER is empty when the joiner did not send a CSR.
+func ReadJoinRequest(r io.Reader, maxAddrLen, maxCSRLen int) (swarmID, secret [32]byte, listenAddr string, csrDER []byte, err error) {
 	if _, err = io.ReadFull(r, swarmID[:]); err != nil {
-		return swarmID, secret, "", fmt.Errorf("read join request swarm: %w", err)
+		return swarmID, secret, "", nil, fmt.Errorf("read join request swarm: %w", err)
 	}
 	if _, err = io.ReadFull(r, secret[:]); err != nil {
-		return swarmID, secret, "", fmt.Errorf("read join request secret: %w", err)
+		return swarmID, secret, "", nil, fmt.Errorf("read join request secret: %w", err)
 	}
 	var hdr [4]byte
 	if _, err = io.ReadFull(r, hdr[:]); err != nil {
-		return swarmID, secret, "", fmt.Errorf("read join request addr length: %w", err)
+		return swarmID, secret, "", nil, fmt.Errorf("read join request addr length: %w", err)
 	}
-	n := binary.BigEndian.Uint32(hdr[:])
-	if maxAddrLen > 0 && int64(n) > int64(maxAddrLen) {
-		return swarmID, secret, "", fmt.Errorf("%w: got %d, max %d", ErrAddrTooLarge, n, maxAddrLen)
+	addrLen := binary.BigEndian.Uint32(hdr[:])
+	if maxAddrLen > 0 && int64(addrLen) > int64(maxAddrLen) {
+		return swarmID, secret, "", nil, fmt.Errorf("%w: got %d, max %d", ErrAddrTooLarge, addrLen, maxAddrLen)
 	}
-	if n == 0 {
-		return swarmID, secret, "", nil
+	if addrLen > 0 {
+		buf := make([]byte, addrLen)
+		if _, err = io.ReadFull(r, buf); err != nil {
+			return swarmID, secret, "", nil, fmt.Errorf("read join request addr: %w", err)
+		}
+		listenAddr = string(buf)
 	}
-	buf := make([]byte, n)
-	if _, err = io.ReadFull(r, buf); err != nil {
-		return swarmID, secret, "", fmt.Errorf("read join request addr: %w", err)
+	if _, err = io.ReadFull(r, hdr[:]); err != nil {
+		return swarmID, secret, listenAddr, nil, fmt.Errorf("read join request csr length: %w", err)
 	}
-	return swarmID, secret, string(buf), nil
+	csrLen := binary.BigEndian.Uint32(hdr[:])
+	if maxCSRLen > 0 && int64(csrLen) > int64(maxCSRLen) {
+		return swarmID, secret, listenAddr, nil, fmt.Errorf("%w: got %d, max %d", ErrCSRTooLarge, csrLen, maxCSRLen)
+	}
+	if csrLen > 0 {
+		csrDER = make([]byte, csrLen)
+		if _, err = io.ReadFull(r, csrDER); err != nil {
+			return swarmID, secret, listenAddr, nil, fmt.Errorf("read join request csr: %w", err)
+		}
+	}
+	return swarmID, secret, listenAddr, csrDER, nil
 }
 
-// WriteJoinResponse writes an acknowledgement frame. On success
-// (appErr == "") the frame is [statusOK]; otherwise
-// [statusErr][4B BE err_len][err bytes].
-func WriteJoinResponse(w io.Writer, appErr string) error {
+// WriteJoinResponse writes [statusOK][4B BE cert_len][cert] on success
+// (signedCertDER empty in pubkey-pin swarms) or
+// [statusErr][4B BE err_len][err bytes] on application error.
+func WriteJoinResponse(w io.Writer, signedCertDER []byte, appErr string) error {
 	if appErr == "" {
 		if _, err := w.Write([]byte{statusOK}); err != nil {
 			return fmt.Errorf("write join response status: %w", err)
+		}
+		var lenBuf [4]byte
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(signedCertDER)))
+		if _, err := w.Write(lenBuf[:]); err != nil {
+			return fmt.Errorf("write join response cert length: %w", err)
+		}
+		if len(signedCertDER) > 0 {
+			if _, err := w.Write(signedCertDER); err != nil {
+				return fmt.Errorf("write join response cert: %w", err)
+			}
 		}
 		return nil
 	}
@@ -237,32 +278,48 @@ func WriteJoinResponse(w io.Writer, appErr string) error {
 	return nil
 }
 
-// ReadJoinResponse reads a single response frame from r. Returns the
-// peer-supplied error string (empty on success) or a transport error.
-func ReadJoinResponse(r io.Reader) (string, error) {
+// ReadJoinResponse reads a response frame from r, capping the signed
+// leaf cert at maxCertLen. On application error the returned cert is nil
+// and appErr is set; on success the cert is empty in pubkey-pin swarms.
+func ReadJoinResponse(r io.Reader, maxCertLen int) ([]byte, string, error) {
 	var status [1]byte
 	if _, err := io.ReadFull(r, status[:]); err != nil {
-		return "", fmt.Errorf("read join response status: %w", err)
+		return nil, "", fmt.Errorf("read join response status: %w", err)
 	}
 	switch status[0] {
 	case statusOK:
-		return "", nil
+		var lenBuf [4]byte
+		if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+			return nil, "", fmt.Errorf("read join response cert length: %w", err)
+		}
+		n := binary.BigEndian.Uint32(lenBuf[:])
+		if maxCertLen > 0 && int64(n) > int64(maxCertLen) {
+			return nil, "", fmt.Errorf("%w: got %d, max %d", ErrCertTooLarge, n, maxCertLen)
+		}
+		if n == 0 {
+			return nil, "", nil
+		}
+		cert := make([]byte, n)
+		if _, err := io.ReadFull(r, cert); err != nil {
+			return nil, "", fmt.Errorf("read join response cert: %w", err)
+		}
+		return cert, "", nil
 	case statusErr:
 		var lenBuf [4]byte
 		if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
-			return "", fmt.Errorf("read join response error length: %w", err)
+			return nil, "", fmt.Errorf("read join response error length: %w", err)
 		}
 		n := binary.BigEndian.Uint32(lenBuf[:])
 		if n > MaxErrorMessageLen {
-			return "", fmt.Errorf("join response error length %d exceeds max %d", n, MaxErrorMessageLen)
+			return nil, "", fmt.Errorf("join response error length %d exceeds max %d", n, MaxErrorMessageLen)
 		}
 		body := make([]byte, n)
 		if _, err := io.ReadFull(r, body); err != nil {
-			return "", fmt.Errorf("read join response error body: %w", err)
+			return nil, "", fmt.Errorf("read join response error body: %w", err)
 		}
-		return string(body), nil
+		return nil, string(body), nil
 	default:
-		return "", fmt.Errorf("unknown join response status byte %d", status[0])
+		return nil, "", fmt.Errorf("unknown join response status byte %d", status[0])
 	}
 }
 

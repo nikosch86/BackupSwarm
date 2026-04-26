@@ -8,10 +8,12 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"backupswarm/internal/ca"
 	"backupswarm/internal/invites"
 	"backupswarm/internal/peers"
 	"backupswarm/internal/protocol"
@@ -48,14 +50,14 @@ func TestJoinResponseError_UnknownCode(t *testing.T) {
 	}
 }
 
-func withWriteJoinResponseFunc(t *testing.T, fn func(w io.Writer, appErr string) error) {
+func withWriteJoinResponseFunc(t *testing.T, fn func(w io.Writer, signedCertDER []byte, appErr string) error) {
 	t.Helper()
 	prev := writeJoinResponseFunc
 	writeJoinResponseFunc = fn
 	t.Cleanup(func() { writeJoinResponseFunc = prev })
 }
 
-func withWriteJoinRequestFunc(t *testing.T, fn func(w io.Writer, swarmID, secret [32]byte, addr string) error) {
+func withWriteJoinRequestFunc(t *testing.T, fn func(w io.Writer, swarmID, secret [32]byte, addr string, csrDER []byte) error) {
 	t.Helper()
 	prev := writeJoinRequestFunc
 	writeJoinRequestFunc = fn
@@ -167,14 +169,14 @@ func (r *internalRig) tokenStr(t *testing.T) string {
 func TestAcceptJoin_WriteResponseFailure(t *testing.T) {
 	rig := newInternalRig(t)
 	sentinel := errors.New("forced response write failure")
-	withWriteJoinResponseFunc(t, func(w io.Writer, appErr string) error {
+	withWriteJoinResponseFunc(t, func(w io.Writer, signedCertDER []byte, appErr string) error {
 		if appErr == "" {
 			if c, ok := w.(io.Closer); ok {
 				_ = c.Close()
 			}
 			return sentinel
 		}
-		return protocol.WriteJoinResponse(w, appErr)
+		return protocol.WriteJoinResponse(w, signedCertDER, appErr)
 	})
 
 	tok := rig.tokenStr(t)
@@ -186,7 +188,7 @@ func TestAcceptJoin_WriteResponseFailure(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, acceptErr = AcceptJoin(ctx, rig.listener, rig.introStore, rig.validator())
+		_, acceptErr = AcceptJoin(ctx, rig.listener, rig.introStore, rig.validator(), nil)
 	}()
 
 	_, _ = DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerStore)
@@ -218,7 +220,7 @@ func TestAcceptJoin_WritePeerListFailure(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, acceptErr = AcceptJoin(ctx, rig.listener, rig.introStore, rig.validator())
+		_, acceptErr = AcceptJoin(ctx, rig.listener, rig.introStore, rig.validator(), nil)
 	}()
 
 	_, _ = DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerStore)
@@ -237,7 +239,7 @@ func TestAcceptJoin_WritePeerListFailure(t *testing.T) {
 func TestDoJoin_WriteRequestFailure(t *testing.T) {
 	rig := newInternalRig(t)
 	sentinel := errors.New("forced request write failure")
-	withWriteJoinRequestFunc(t, func(w io.Writer, swarmID, secret [32]byte, addr string) error {
+	withWriteJoinRequestFunc(t, func(w io.Writer, swarmID, secret [32]byte, addr string, csrDER []byte) error {
 		return sentinel
 	})
 
@@ -249,7 +251,7 @@ func TestDoJoin_WriteRequestFailure(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = AcceptJoin(ctx, rig.listener, rig.introStore, rig.validator())
+		_, _ = AcceptJoin(ctx, rig.listener, rig.introStore, rig.validator(), nil)
 	}()
 
 	_, err := DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerStore)
@@ -261,6 +263,34 @@ func TestDoJoin_WriteRequestFailure(t *testing.T) {
 	}
 	cancel()
 	wg.Wait()
+}
+
+// TestSignJoinerCSRIfCA_SignFailureWraps feeds garbage CSR bytes so
+// ca.SignNodeCert errors at parse-time; the wrapped error must mention
+// "sign joiner csr".
+func TestSignJoinerCSRIfCA_SignFailureWraps(t *testing.T) {
+	swarmCA, err := ca.Generate()
+	if err != nil {
+		t.Fatalf("ca.Generate: %v", err)
+	}
+	_, joinerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("joiner key: %v", err)
+	}
+	joinerPub, ok := joinerPriv.Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatalf("joiner pub: %T", joinerPriv.Public())
+	}
+	signed, err := signJoinerCSRIfCA(context.Background(), swarmCA, []byte("not-a-csr"), joinerPub)
+	if err == nil {
+		t.Fatal("signJoinerCSRIfCA accepted garbage CSR bytes")
+	}
+	if signed != nil {
+		t.Errorf("signed = %v, want nil on error", signed)
+	}
+	if !strings.Contains(err.Error(), "sign joiner csr") {
+		t.Errorf("err = %q, want 'sign joiner csr' prefix", err)
+	}
 }
 
 // TestDoJoin_StreamCloseFailure asserts DoJoin wraps a half-close failure
@@ -282,7 +312,7 @@ func TestDoJoin_StreamCloseFailure(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = AcceptJoin(acceptCtx, rig.listener, rig.introStore, rig.validator())
+		_, _ = AcceptJoin(acceptCtx, rig.listener, rig.introStore, rig.validator(), nil)
 	}()
 
 	_, err := DoJoin(ctx, tok, rig.joinerPriv, "192.0.2.1:9000", rig.joinerStore)
