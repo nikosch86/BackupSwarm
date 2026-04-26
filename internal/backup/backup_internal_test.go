@@ -457,7 +457,7 @@ func TestPrune_IndexDeleteError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = peerStore.Close() })
 
-	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil)
+	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -469,7 +469,7 @@ func TestPrune_IndexDeleteError(t *testing.T) {
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer dialCancel()
-	conn, err := bsquic.Dial(dialCtx, listener.Addr().String(), ownerPriv, peerPub)
+	conn, err := bsquic.Dial(dialCtx, listener.Addr().String(), ownerPriv, peerPub, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -891,7 +891,7 @@ func TestServeConn_BoundsConcurrentDispatchers(t *testing.T) {
 		t.Fatalf("client key: %v", err)
 	}
 
-	listener, err := bsquic.Listen("127.0.0.1:0", serverPriv, nil)
+	listener, err := bsquic.Listen("127.0.0.1:0", serverPriv, nil, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -917,7 +917,7 @@ func TestServeConn_BoundsConcurrentDispatchers(t *testing.T) {
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(dialCancel)
-	conn, err := bsquic.Dial(dialCtx, listener.Addr().String(), clientPriv, serverPub)
+	conn, err := bsquic.Dial(dialCtx, listener.Addr().String(), clientPriv, serverPub, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -987,7 +987,7 @@ func TestServeConn_LogsDispatchError(t *testing.T) {
 		t.Fatalf("client key: %v", err)
 	}
 
-	listener, err := bsquic.Listen("127.0.0.1:0", serverPriv, nil)
+	listener, err := bsquic.Listen("127.0.0.1:0", serverPriv, nil, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -999,7 +999,7 @@ func TestServeConn_LogsDispatchError(t *testing.T) {
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(dialCancel)
-	conn, err := bsquic.Dial(dialCtx, listener.Addr().String(), clientPriv, serverPub)
+	conn, err := bsquic.Dial(dialCtx, listener.Addr().String(), clientPriv, serverPub, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -1052,7 +1052,7 @@ func TestServeConn_SemaphoreAcquireCancelled(t *testing.T) {
 		t.Fatalf("client key: %v", err)
 	}
 
-	listener, err := bsquic.Listen("127.0.0.1:0", serverPriv, nil)
+	listener, err := bsquic.Listen("127.0.0.1:0", serverPriv, nil, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -1067,7 +1067,7 @@ func TestServeConn_SemaphoreAcquireCancelled(t *testing.T) {
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(dialCancel)
-	conn, err := bsquic.Dial(dialCtx, listener.Addr().String(), clientPriv, serverPub)
+	conn, err := bsquic.Dial(dialCtx, listener.Addr().String(), clientPriv, serverPub, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

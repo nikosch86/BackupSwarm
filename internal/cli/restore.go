@@ -68,7 +68,7 @@ func newRestoreCmd(dataDir *string) *cobra.Command {
 
 			dialCtx, dialCancel := context.WithTimeout(cmd.Context(), dialTimeout)
 			defer dialCancel()
-			conn, err := bsquic.Dial(dialCtx, peer.Addr, id.PrivateKey, peer.PubKey)
+			conn, err := bsquic.Dial(dialCtx, peer.Addr, id.PrivateKey, peer.PubKey, nil)
 			if err != nil {
 				return fmt.Errorf("dial peer %q: %w", peer.Addr, err)
 			}

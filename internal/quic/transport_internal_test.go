@@ -106,7 +106,7 @@ func TestListen_CertBuildFailure(t *testing.T) {
 	priv := newTestKey(t)
 	withRandReader(t, iotest.ErrReader(errors.New("forced rng failure")))
 
-	if _, err := Listen("127.0.0.1:0", priv, nil); err == nil {
+	if _, err := Listen("127.0.0.1:0", priv, nil, nil); err == nil {
 		t.Fatal("expected Listen to fail when cert build fails")
 	}
 }
@@ -119,7 +119,25 @@ func TestDial_CertBuildFailure(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := Dial(ctx, "127.0.0.1:1", priv, pub); err == nil {
+	if _, err := Dial(ctx, "127.0.0.1:1", priv, pub, nil); err == nil {
 		t.Fatal("expected Dial to fail when cert build fails")
+	}
+}
+
+// TestVerifyChain_BadIntermediateDER asserts verifyChain wraps a parse
+// failure on any intermediate DER as "parse peer intermediate". Exercises
+// the loop's error branch which the round-trip tests do not reach.
+func TestVerifyChain_BadIntermediateDER(t *testing.T) {
+	t.Parallel()
+	priv := newTestKey(t)
+	leaf, err := newSelfSignedCert(priv)
+	if err != nil {
+		t.Fatalf("new self-signed cert: %v", err)
+	}
+	pool := x509.NewCertPool()
+	rawCerts := [][]byte{leaf.Certificate[0], {0x00, 0x01, 0x02, 0x03}}
+	err = verifyChain(rawCerts, pool)
+	if err == nil {
+		t.Fatal("expected verifyChain to fail on garbage intermediate DER")
 	}
 }

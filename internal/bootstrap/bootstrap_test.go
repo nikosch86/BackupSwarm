@@ -45,7 +45,7 @@ func setupTwoSides(t *testing.T) *twoSides {
 	if err != nil {
 		t.Fatalf("join key: %v", err)
 	}
-	l, err := bsquic.Listen("127.0.0.1:0", introPriv, nil)
+	l, err := bsquic.Listen("127.0.0.1:0", introPriv, nil, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -624,7 +624,7 @@ func TestAcceptJoin_ClientClosesWithoutStream(t *testing.T) {
 		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator(), nil)
 	}()
 
-	conn, err := bsquic.Dial(dialCtx, rig.listener.Addr().String(), rig.joinerPriv, rig.introducerPub)
+	conn, err := bsquic.Dial(dialCtx, rig.listener.Addr().String(), rig.joinerPriv, rig.introducerPub, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -667,7 +667,7 @@ func TestAcceptJoin_MalformedRequest(t *testing.T) {
 		_, acceptErr = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator(), nil)
 	}()
 
-	conn, err := bsquic.Dial(ctx, rig.listener.Addr().String(), rig.joinerPriv, rig.introducerPub)
+	conn, err := bsquic.Dial(ctx, rig.listener.Addr().String(), rig.joinerPriv, rig.introducerPub, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

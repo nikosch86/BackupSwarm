@@ -79,7 +79,7 @@ func seedRig(t *testing.T) Options {
 	if err != nil {
 		t.Fatalf("owner key: %v", err)
 	}
-	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil)
+	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -88,7 +88,7 @@ func seedRig(t *testing.T) Options {
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer dialCancel()
-	ownerConn, err := bsquic.Dial(dialCtx, listener.Addr().String(), ownerPriv, peerPub)
+	ownerConn, err := bsquic.Dial(dialCtx, listener.Addr().String(), ownerPriv, peerPub, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

@@ -258,7 +258,7 @@ func Run(ctx context.Context, opts Options) error {
 
 	listener := opts.Listener
 	if listener == nil {
-		listener, err = bsquic.Listen(opts.ListenAddr, id.PrivateKey, verifyMember)
+		listener, err = bsquic.Listen(opts.ListenAddr, id.PrivateKey, verifyMember, nil)
 		if err != nil {
 			return fmt.Errorf("listen on %q: %w", opts.ListenAddr, err)
 		}
@@ -305,7 +305,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	dialCtx, dialCancel := context.WithTimeout(ctx, opts.DialTimeout)
-	peerConn, err := bsquic.Dial(dialCtx, storagePeer.Addr, id.PrivateKey, storagePeer.PubKey)
+	peerConn, err := bsquic.Dial(dialCtx, storagePeer.Addr, id.PrivateKey, storagePeer.PubKey, nil)
 	dialCancel()
 	if err != nil {
 		return fmt.Errorf("dial peer %q: %w", storagePeer.Addr, err)

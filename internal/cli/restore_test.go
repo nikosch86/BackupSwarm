@@ -67,7 +67,7 @@ func TestRestoreCmd_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("peer key: %v", err)
 	}
-	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil)
+	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestRestoreCmd_EndToEnd(t *testing.T) {
 	ownerConn, err := func() (*bsquic.Conn, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		return bsquic.Dial(ctx, listener.Addr().String(), id.PrivateKey, peerPub)
+		return bsquic.Dial(ctx, listener.Addr().String(), id.PrivateKey, peerPub, nil)
 	}()
 	if err != nil {
 		t.Fatalf("Dial: %v", err)

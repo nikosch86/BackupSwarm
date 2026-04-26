@@ -54,7 +54,7 @@ func newRestoreRig(t *testing.T) *restoreRig {
 		t.Fatalf("owner key: %v", err)
 	}
 
-	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil)
+	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -64,7 +64,7 @@ func newRestoreRig(t *testing.T) *restoreRig {
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()
-	ownerConn, err := bsquic.Dial(dialCtx, listener.Addr().String(), ownerPriv, peerPub)
+	ownerConn, err := bsquic.Dial(dialCtx, listener.Addr().String(), ownerPriv, peerPub, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

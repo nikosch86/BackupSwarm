@@ -66,7 +66,7 @@ func newScanRig(t *testing.T) *scanRig {
 		t.Fatalf("owner key: %v", err)
 	}
 
-	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil)
+	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -76,7 +76,7 @@ func newScanRig(t *testing.T) *scanRig {
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()
-	ownerConn, err := bsquic.Dial(dialCtx, listener.Addr().String(), ownerPriv, peerPub)
+	ownerConn, err := bsquic.Dial(dialCtx, listener.Addr().String(), ownerPriv, peerPub, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -320,7 +320,7 @@ func newPeerRig(t *testing.T) *peerRig {
 	if err != nil {
 		t.Fatalf("peer key: %v", err)
 	}
-	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil)
+	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -667,7 +667,7 @@ func TestRun_StorageOnly_NoBackupDir(t *testing.T) {
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer dialCancel()
-	conn, err := bsquic.Dial(dialCtx, listenAddr, ownerPriv, daemonPub)
+	conn, err := bsquic.Dial(dialCtx, listenAddr, ownerPriv, daemonPub, nil)
 	if err != nil {
 		cancel()
 		t.Fatalf("dial daemon: %v", err)
@@ -753,7 +753,7 @@ func TestRun_RejectsUnknownPeerAtHandshake(t *testing.T) {
 	_, strangerPriv, _ := ed25519.GenerateKey(rand.Reader)
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer dialCancel()
-	conn, err := bsquic.Dial(dialCtx, listenAddr, strangerPriv, daemonPub)
+	conn, err := bsquic.Dial(dialCtx, listenAddr, strangerPriv, daemonPub, nil)
 	if err == nil {
 		defer func() { _ = conn.Close() }()
 		s, sErr := conn.OpenStream(dialCtx)

@@ -172,7 +172,7 @@ func DoJoin(ctx context.Context, tokenStr string, myPriv ed25519.PrivateKey, myL
 			return JoinResult{}, fmt.Errorf("create csr: %w", err)
 		}
 	}
-	conn, err := bsquic.Dial(ctx, tok.Addr, myPriv, tok.Pub)
+	conn, err := bsquic.Dial(ctx, tok.Addr, myPriv, tok.Pub, nil)
 	if err != nil {
 		return JoinResult{}, fmt.Errorf("dial introducer: %w", err)
 	}

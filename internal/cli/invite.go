@@ -63,7 +63,7 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 			// handshake completes and --then-run hands off to the
 			// daemon, daemon.Run flips the listener to a membership
 			// check against peers.db before starting Serve.
-			listener, err := bsquic.Listen(listenAddr, sess.id.PrivateKey, nil)
+			listener, err := bsquic.Listen(listenAddr, sess.id.PrivateKey, nil, nil)
 			if err != nil {
 				return fmt.Errorf("listen on %q: %w", listenAddr, err)
 			}

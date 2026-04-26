@@ -71,6 +71,18 @@ var ErrInvalidPeerCert = errors.New("peer TLS certificate not Ed25519")
 // by `invite` before the joiner's pubkey is in peers.db.
 type VerifyPeerFunc func(pub ed25519.PublicKey) error
 
+// TrustConfig opts a Listener or Dialer into CA-mode mTLS: Cert is the
+// wire leaf (CA-signed); Pool is the trust-root set the peer's leaf must
+// chain to. Both fields must be set together; nil = pin-mode.
+type TrustConfig struct {
+	Cert *tls.Certificate
+	Pool *x509.CertPool
+}
+
+// ErrInvalidTrustConfig is returned by Listen/Dial when a non-nil
+// TrustConfig is missing Cert or Pool.
+var ErrInvalidTrustConfig = errors.New("TrustConfig requires both Cert and Pool")
+
 // Listener accepts inbound peer connections. The membership predicate is
 // held behind an atomic so SetVerifyPeer can swap it race-free after bind
 // (used during invite→daemon handoff).
@@ -81,13 +93,14 @@ type Listener struct {
 	verifyPeer atomic.Pointer[VerifyPeerFunc]
 }
 
-// Listen starts a QUIC listener on addr (e.g. "127.0.0.1:0", ":7777"),
-// presenting a TLS certificate signed by priv. verifyPeer, when non-nil,
-// gates every inbound handshake on the peer's Ed25519 pubkey — returning
-// an error rejects the connection at the TLS layer before any stream is
-// dispatched. nil = bootstrap mode (accept any Ed25519 peer).
-func Listen(addr string, priv ed25519.PrivateKey, verifyPeer VerifyPeerFunc) (*Listener, error) {
-	cert, err := newSelfSignedCert(priv)
+// Listen binds a QUIC listener on addr. nil trust = pin-mode (self-signed
+// from priv); non-nil = CA-mode (trust.Cert as leaf, peer chain-verified
+// against trust.Pool). verifyPeer gates by Ed25519 pubkey; nil = accept any.
+func Listen(addr string, priv ed25519.PrivateKey, verifyPeer VerifyPeerFunc, trust *TrustConfig) (*Listener, error) {
+	if err := validateTrust(trust); err != nil {
+		return nil, err
+	}
+	cert, err := leafCert(priv, trust)
 	if err != nil {
 		return nil, fmt.Errorf("build server cert: %w", err)
 	}
@@ -97,6 +110,11 @@ func Listen(addr string, priv ed25519.PrivateKey, verifyPeer VerifyPeerFunc) (*L
 		Certificates: []tls.Certificate{cert},
 		ClientAuth:   tls.RequireAnyClientCert,
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if trust != nil {
+				if err := verifyChain(rawCerts, trust.Pool); err != nil {
+					return err
+				}
+			}
 			pub, err := peerEd25519Pub(rawCerts)
 			if err != nil {
 				return err
@@ -162,19 +180,26 @@ func (l *Listener) Close() error {
 	return l.conn.Close()
 }
 
-// Dial opens an outbound QUIC connection to addr authenticated as priv,
-// pinning the peer's Ed25519 public key to expectedPeerPub. The dial fails
-// with an error wrapping ErrPeerPubkeyMismatch if the peer presents any
-// other identity.
-func Dial(ctx context.Context, addr string, priv ed25519.PrivateKey, expectedPeerPub ed25519.PublicKey) (*Conn, error) {
-	cert, err := newSelfSignedCert(priv)
+// Dial opens an outbound QUIC connection to addr, pinning the peer's pubkey
+// to expectedPeerPub. Non-nil trust = CA-mode (peer chain-verified against
+// trust.Pool). Wraps ErrPeerPubkeyMismatch on identity mismatch.
+func Dial(ctx context.Context, addr string, priv ed25519.PrivateKey, expectedPeerPub ed25519.PublicKey, trust *TrustConfig) (*Conn, error) {
+	if err := validateTrust(trust); err != nil {
+		return nil, err
+	}
+	cert, err := leafCert(priv, trust)
 	if err != nil {
 		return nil, fmt.Errorf("build client cert: %w", err)
 	}
 	tlsConf := &tls.Config{
 		Certificates:       []tls.Certificate{cert},
-		InsecureSkipVerify: true, // chain verification disabled; we pin the Ed25519 pubkey ourselves
+		InsecureSkipVerify: true,
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if trust != nil {
+				if err := verifyChain(rawCerts, trust.Pool); err != nil {
+					return err
+				}
+			}
 			pub, err := peerEd25519Pub(rawCerts)
 			if err != nil {
 				return err
@@ -257,6 +282,54 @@ func ed25519FromCerts(chain []*x509.Certificate) (ed25519.PublicKey, error) {
 		return nil, ErrInvalidPeerCert
 	}
 	return pub, nil
+}
+
+// validateTrust requires both Cert and Pool when trust is non-nil.
+func validateTrust(t *TrustConfig) error {
+	if t == nil {
+		return nil
+	}
+	if t.Cert == nil || t.Pool == nil {
+		return ErrInvalidTrustConfig
+	}
+	return nil
+}
+
+// leafCert returns the TLS leaf to present on the wire (CA-mode → caller
+// cert, pin-mode → self-signed from priv).
+func leafCert(priv ed25519.PrivateKey, trust *TrustConfig) (tls.Certificate, error) {
+	if trust != nil {
+		return *trust.Cert, nil
+	}
+	return newSelfSignedCert(priv)
+}
+
+// verifyChain checks the leaf in rawCerts chains to pool, without the
+// hostname check the stdlib path entails.
+func verifyChain(rawCerts [][]byte, pool *x509.CertPool) error {
+	if len(rawCerts) == 0 {
+		return ErrInvalidPeerCert
+	}
+	leaf, err := x509.ParseCertificate(rawCerts[0])
+	if err != nil {
+		return fmt.Errorf("parse peer leaf: %w", err)
+	}
+	intermediates := x509.NewCertPool()
+	for _, der := range rawCerts[1:] {
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			return fmt.Errorf("parse peer intermediate: %w", err)
+		}
+		intermediates.AddCert(cert)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots:         pool,
+		Intermediates: intermediates,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		return fmt.Errorf("chain verify: %w", err)
+	}
+	return nil
 }
 
 // newSelfSignedCert builds a self-signed X.509 cert whose key is priv's

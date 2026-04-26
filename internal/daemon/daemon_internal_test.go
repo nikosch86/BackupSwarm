@@ -247,7 +247,7 @@ func TestPurgeAll_PruneFailurePropagates(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = peerStore.Close() })
 
-	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil)
+	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil, nil)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestPurgeAll_PruneFailurePropagates(t *testing.T) {
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer dialCancel()
-	conn, err := bsquic.Dial(dialCtx, listener.Addr().String(), ownerPriv, peerPub)
+	conn, err := bsquic.Dial(dialCtx, listener.Addr().String(), ownerPriv, peerPub, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
