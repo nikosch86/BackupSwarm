@@ -22,6 +22,7 @@ import (
 	"backupswarm/internal/peers"
 	bsquic "backupswarm/internal/quic"
 	"backupswarm/internal/store"
+	"backupswarm/internal/swarm"
 )
 
 // seedPeer opens peers.db at <dataDir>/peers.db and writes a single
@@ -947,6 +948,181 @@ func TestRun_NoStorageCandidate_FallsThroughToStorageOnly(t *testing.T) {
 	}
 	cancel()
 
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not exit within 5s of cancel")
+	}
+}
+
+// TestRun_ReachabilityMarkedOnDialFailure asserts a dial failure flips
+// the peer's entry in the supplied ReachabilityMap to StateUnreachable.
+func TestRun_ReachabilityMarkedOnDialFailure(t *testing.T) {
+	dataDir := t.TempDir()
+	backupDir := t.TempDir()
+	writeFile(t, filepath.Join(backupDir, "a.bin"), 1<<20)
+
+	deadPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	seedPeer(t, dataDir, "127.0.0.1:1", deadPub)
+
+	reach := swarm.NewReachabilityMap()
+	if err := daemon.Run(context.Background(), daemon.Options{
+		DataDir:      dataDir,
+		BackupDir:    backupDir,
+		ListenAddr:   "127.0.0.1:0",
+		ChunkSize:    1 << 20,
+		DialTimeout:  200 * time.Millisecond,
+		Progress:     io.Discard,
+		Reachability: reach,
+	}); err == nil {
+		t.Fatal("Run accepted unreachable peer")
+	}
+	if got := reach.State(deadPub); got != swarm.StateUnreachable {
+		t.Errorf("dead peer State = %v, want StateUnreachable", got)
+	}
+	if reach.IsReachable(deadPub) {
+		t.Error("dead peer reported reachable")
+	}
+}
+
+// TestRun_ReachabilityMarkedOnDialSuccess asserts a successful dial
+// flips the peer's entry to StateReachable while the daemon is running,
+// and to StateUnreachable after the deferred close fires on shutdown.
+func TestRun_ReachabilityMarkedOnDialSuccess(t *testing.T) {
+	peer := newPeerRig(t)
+	dataDir := t.TempDir()
+	backupDir := t.TempDir()
+	writeFile(t, filepath.Join(backupDir, "file.bin"), 1<<20)
+	seedPeer(t, dataDir, peer.addr, peer.pub)
+
+	reach := swarm.NewReachabilityMap()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.Run(ctx, daemon.Options{
+			DataDir:      dataDir,
+			BackupDir:    backupDir,
+			ListenAddr:   "127.0.0.1:0",
+			ChunkSize:    1 << 20,
+			ScanInterval: 50 * time.Millisecond,
+			Progress:     io.Discard,
+			Reachability: reach,
+		})
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if reach.IsReachable(peer.pub) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !reach.IsReachable(peer.pub) {
+		cancel()
+		<-done
+		t.Fatal("alive peer never marked reachable")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not exit within 5s of cancel")
+	}
+
+	if got := reach.State(peer.pub); got != swarm.StateUnreachable {
+		t.Errorf("alive peer State after shutdown = %v, want StateUnreachable", got)
+	}
+}
+
+// TestRun_ReachabilityMarkedOnInboundAccept asserts the ConnObserver
+// inbound hooks flip a remote dialer to StateReachable on accept and
+// StateUnreachable when the conn closes.
+func TestRun_ReachabilityMarkedOnInboundAccept(t *testing.T) {
+	dataDir := t.TempDir()
+
+	probe, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("probe udp port: %v", err)
+	}
+	listenAddr := probe.LocalAddr().String()
+	_ = probe.Close()
+
+	ownerPub, ownerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	seedPeer(t, dataDir, "", ownerPub)
+
+	reach := swarm.NewReachabilityMap()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.Run(ctx, daemon.Options{
+			DataDir:      dataDir,
+			ListenAddr:   listenAddr,
+			ChunkSize:    1 << 20,
+			Progress:     io.Discard,
+			Reachability: reach,
+		})
+	}()
+	time.Sleep(200 * time.Millisecond)
+
+	pubBytes, err := os.ReadFile(filepath.Join(dataDir, "node.pub"))
+	if err != nil {
+		cancel()
+		<-done
+		t.Fatalf("read node.pub: %v", err)
+	}
+	daemonPub := ed25519.PublicKey(pubBytes)
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer dialCancel()
+	conn, err := bsquic.Dial(dialCtx, listenAddr, ownerPriv, daemonPub, nil)
+	if err != nil {
+		cancel()
+		<-done
+		t.Fatalf("dial daemon: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if reach.IsReachable(ownerPub) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !reach.IsReachable(ownerPub) {
+		_ = conn.Close()
+		cancel()
+		<-done
+		t.Fatal("inbound dialer never marked reachable via OnAccept")
+	}
+
+	_ = conn.Close()
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if reach.State(ownerPub) == swarm.StateUnreachable {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := reach.State(ownerPub); got != swarm.StateUnreachable {
+		cancel()
+		<-done
+		t.Errorf("inbound dialer State after close = %v, want StateUnreachable", got)
+	}
+
+	cancel()
 	select {
 	case err := <-done:
 		if err != nil {

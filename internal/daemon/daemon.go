@@ -176,6 +176,9 @@ type Options struct {
 	// Progress receives daemon-level progress lines (scan starts,
 	// mode transitions). nil is treated as io.Discard.
 	Progress io.Writer
+	// Reachability is the peer reachability map the daemon updates
+	// from connection lifecycle events. nil makes Run allocate one.
+	Reachability *swarm.ReachabilityMap
 }
 
 const (
@@ -234,6 +237,11 @@ func Run(ctx context.Context, opts Options) error {
 	dialablePeers, err := listDialablePeers(peerStore)
 	if err != nil {
 		return err
+	}
+
+	reach := opts.Reachability
+	if reach == nil {
+		reach = swarm.NewReachabilityMap()
 	}
 
 	// Classify before binding so flag-validation errors surface cleanly.
@@ -322,7 +330,16 @@ func Run(ctx context.Context, opts Options) error {
 		Dedup: swarm.NewDedupCache(swarm.DefaultDedupCapacity),
 		Conns: connSet,
 	}
-	obs := &backup.ConnObserver{OnAccept: connSet.Add, OnClose: connSet.Remove}
+	obs := &backup.ConnObserver{
+		OnAccept: func(c *bsquic.Conn) {
+			connSet.Add(c)
+			reach.MarkConn(c, swarm.StateReachable)
+		},
+		OnClose: func(c *bsquic.Conn) {
+			connSet.Remove(c)
+			reach.MarkConn(c, swarm.StateUnreachable)
+		},
+	}
 	joinHandler := makeJoinHandler(opts.DataDir, peerStore, swarmCA, connSet)
 
 	serveErrCh := make(chan error, 1)
@@ -351,17 +368,19 @@ func Run(ctx context.Context, opts Options) error {
 		return waitForServe(ctx, serveErrCh)
 	}
 
-	dialed, err := dialAllPeers(ctx, dialablePeers, id.PrivateKey, opts.DialTimeout)
+	dialed, err := dialAllPeers(ctx, dialablePeers, id.PrivateKey, opts.DialTimeout, reach)
 	if err != nil {
 		return err
 	}
 	for _, dp := range dialed {
 		connSet.Add(dp.conn)
+		reach.MarkConn(dp.conn, swarm.StateReachable)
 		// Accepts streams the peer opens on this outbound conn (e.g.
 		// forwarded PeerAnnouncements). Exits when the conn closes.
 		go backup.AcceptStreams(ctx, dp.conn, st, router.HandleStream, joinHandler)
 		defer func(c *bsquic.Conn) {
 			connSet.Remove(c)
+			reach.MarkConn(c, swarm.StateUnreachable)
 			_ = c.Close()
 		}(dp.conn)
 		slog.InfoContext(ctx, "dialed peer",
@@ -452,9 +471,9 @@ func listDialablePeers(ps *peers.Store) ([]peers.Peer, error) {
 }
 
 // dialAllPeers dials each known peer best-effort. Failed dials are
-// logged and skipped. Returns the first dial error only when every
-// dial failed; otherwise returns the successful subset.
-func dialAllPeers(ctx context.Context, known []peers.Peer, priv ed25519.PrivateKey, timeout time.Duration) ([]dialedPeer, error) {
+// logged, marked Unreachable in reach, and skipped. Returns the first
+// dial error only when every dial failed; otherwise returns the successful subset.
+func dialAllPeers(ctx context.Context, known []peers.Peer, priv ed25519.PrivateKey, timeout time.Duration, reach *swarm.ReachabilityMap) ([]dialedPeer, error) {
 	out := make([]dialedPeer, 0, len(known))
 	var firstErr error
 	for _, p := range known {
@@ -462,6 +481,7 @@ func dialAllPeers(ctx context.Context, known []peers.Peer, priv ed25519.PrivateK
 		conn, err := bsquic.Dial(dctx, p.Addr, priv, p.PubKey, nil)
 		cancel()
 		if err != nil {
+			reach.Mark(p.PubKey, swarm.StateUnreachable)
 			if firstErr == nil {
 				firstErr = fmt.Errorf("dial peer %q: %w", p.Addr, err)
 			}
