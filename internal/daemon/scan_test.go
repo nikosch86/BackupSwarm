@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -305,6 +306,8 @@ type peerRig struct {
 	storeRoot string
 	listener  *bsquic.Listener
 	serveDone chan error
+	// accepts counts inbound conns observed via backup.ConnObserver.
+	accepts atomic.Int32
 }
 
 func newPeerRig(t *testing.T) *peerRig {
@@ -326,19 +329,23 @@ func newPeerRig(t *testing.T) *peerRig {
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 
-	serveCtx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	done := make(chan error, 1)
-	go func() { done <- backup.Serve(serveCtx, listener, peerStore, nil, nil, nil) }()
-
-	return &peerRig{
+	rig := &peerRig{
 		addr:      listener.Addr().String(),
 		pub:       peerPub,
 		store:     peerStore,
 		storeRoot: storeRoot,
 		listener:  listener,
-		serveDone: done,
 	}
+
+	serveCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	obs := &backup.ConnObserver{
+		OnAccept: func(*bsquic.Conn) { rig.accepts.Add(1) },
+	}
+	go func() { done <- backup.Serve(serveCtx, listener, peerStore, nil, nil, obs) }()
+	rig.serveDone = done
+	return rig
 }
 
 // TestRun_WithPeer_FirstBackupShipsChunks asserts the daemon ships a chunk to the peer in one happy-path scan and exits cleanly on cancel.
@@ -604,29 +611,122 @@ func TestRun_DialFailure(t *testing.T) {
 	}
 }
 
-// TestRun_MultiplePeers asserts Run wraps ErrMultiplePeers when peers.db has more than one dialable entry.
-func TestRun_MultiplePeers(t *testing.T) {
+// TestRun_DialsAllKnownPeers asserts that with two dialable peers in
+// peers.db, the daemon dials both on startup and ships chunks to one
+// of them on the first scan.
+func TestRun_DialsAllKnownPeers(t *testing.T) {
+	peer1 := newPeerRig(t)
+	peer2 := newPeerRig(t)
 	dataDir := t.TempDir()
 	backupDir := t.TempDir()
+	writeFile(t, filepath.Join(backupDir, "file.bin"), 1<<20)
+	seedPeer(t, dataDir, peer1.addr, peer1.pub)
+	seedPeer(t, dataDir, peer2.addr, peer2.pub)
 
-	pub1, _, _ := ed25519.GenerateKey(rand.Reader)
-	pub2, _, _ := ed25519.GenerateKey(rand.Reader)
-	seedPeer(t, dataDir, "127.0.0.1:1001", pub1)
-	seedPeer(t, dataDir, "127.0.0.1:1002", pub2)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.Run(ctx, daemon.Options{
+			DataDir:      dataDir,
+			BackupDir:    backupDir,
+			ListenAddr:   "127.0.0.1:0",
+			ChunkSize:    1 << 20,
+			ScanInterval: 50 * time.Millisecond,
+			Progress:     io.Discard,
+		})
+	}()
 
-	err := daemon.Run(context.Background(), daemon.Options{
-		DataDir:    dataDir,
-		BackupDir:  backupDir,
-		ListenAddr: "127.0.0.1:0",
-		ChunkSize:  1 << 20,
-		Progress:   io.Discard,
-	})
-	if err == nil {
-		t.Fatal("Run accepted multiple dialable peers")
+	bothAccepted := func() bool { return peer1.accepts.Load() >= 1 && peer2.accepts.Load() >= 1 }
+	someShipped := func() bool {
+		return hasShardDir(mustReadDir(t, peer1.storeRoot)) || hasShardDir(mustReadDir(t, peer2.storeRoot))
 	}
-	if !errors.Is(err, daemon.ErrMultiplePeers) {
-		t.Errorf("err = %v, want wraps ErrMultiplePeers", err)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if bothAccepted() && someShipped() {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not exit within 5s of cancel")
+	}
+
+	if got := peer1.accepts.Load(); got < 1 {
+		t.Errorf("peer1 accepts = %d, want >= 1 (daemon must dial all known peers)", got)
+	}
+	if got := peer2.accepts.Load(); got < 1 {
+		t.Errorf("peer2 accepts = %d, want >= 1 (daemon must dial all known peers)", got)
+	}
+	// Chunks land in exactly one rig — the chosen backup target.
+	if !someShipped() {
+		t.Error("neither peer received chunks; backup target was not selected")
+	}
+}
+
+// TestRun_BestEffortDial_OnePeerOffline asserts that with one alive
+// and one unreachable peer in peers.db, the daemon continues with the
+// alive peer and ships chunks.
+func TestRun_BestEffortDial_OnePeerOffline(t *testing.T) {
+	alive := newPeerRig(t)
+	dataDir := t.TempDir()
+	backupDir := t.TempDir()
+	writeFile(t, filepath.Join(backupDir, "file.bin"), 1<<20)
+	seedPeer(t, dataDir, alive.addr, alive.pub)
+
+	deadPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	seedPeer(t, dataDir, "127.0.0.1:1", deadPub)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.Run(ctx, daemon.Options{
+			DataDir:      dataDir,
+			BackupDir:    backupDir,
+			ListenAddr:   "127.0.0.1:0",
+			ChunkSize:    1 << 20,
+			DialTimeout:  500 * time.Millisecond,
+			ScanInterval: 50 * time.Millisecond,
+			Progress:     io.Discard,
+		})
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if hasShardDir(mustReadDir(t, alive.storeRoot)) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not exit within 5s of cancel")
+	}
+
+	if !hasShardDir(mustReadDir(t, alive.storeRoot)) {
+		t.Error("alive peer did not receive chunks — best-effort dial dropped the alive peer")
+	}
+}
+
+func mustReadDir(t *testing.T, dir string) []os.DirEntry {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	return entries
 }
 
 // TestRun_StorageOnly_NoBackupDir asserts a daemon started with no BackupDir accepts an inbound chunk from a real owner.
@@ -801,6 +901,59 @@ func TestRun_IgnoresPeersWithEmptyAddr(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return within 5s of cancel")
+	}
+}
+
+// TestRun_NoStorageCandidate_FallsThroughToStorageOnly asserts a daemon
+// with a dialable RolePeer (no storage candidates) falls through to the
+// storage-only wait and returns nil on context cancel.
+func TestRun_NoStorageCandidate_FallsThroughToStorageOnly(t *testing.T) {
+	peer := newPeerRig(t)
+	dataDir := t.TempDir()
+	backupDir := t.TempDir()
+	writeFile(t, filepath.Join(backupDir, "file.bin"), 1<<20)
+
+	ps, err := peers.Open(filepath.Join(dataDir, "peers.db"))
+	if err != nil {
+		t.Fatalf("peers.Open: %v", err)
+	}
+	if err := ps.Add(peers.Peer{Addr: peer.addr, PubKey: peer.pub, Role: peers.RolePeer}); err != nil {
+		ps.Close()
+		t.Fatalf("peers.Add: %v", err)
+	}
+	if err := ps.Close(); err != nil {
+		t.Fatalf("peers.Close: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.Run(ctx, daemon.Options{
+			DataDir:      dataDir,
+			BackupDir:    backupDir,
+			ListenAddr:   "127.0.0.1:0",
+			ChunkSize:    1 << 20,
+			ScanInterval: 50 * time.Millisecond,
+			Progress:     io.Discard,
+		})
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if peer.accepts.Load() >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not exit within 5s of cancel")
 	}
 }
 

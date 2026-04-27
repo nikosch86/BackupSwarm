@@ -51,26 +51,25 @@ make check
 ## Two-node swarm (local smoke test)
 
 ```bash
-# Node A (introducer): print an invite token and wait for one joiner.
-./bin/backupswarm --data-dir /tmp/bs-a invite --listen 127.0.0.1:7777
+# Node A (founder): start the daemon and print an initial invite token.
+./bin/backupswarm --data-dir /tmp/bs-a run \
+    --listen 127.0.0.1:7777 --invite
 
 # Copy the printed token. In a second terminal:
 
-# Node B (joiner): verify the token over TLS and persist A as a peer.
-./bin/backupswarm --data-dir /tmp/bs-b join <token>
-
-# Start A as a storage peer (serves chunks for B; no backup of its own).
-./bin/backupswarm --data-dir /tmp/bs-a run --listen 127.0.0.1:7777
-
-# Start B as a backup source targeting A.
+# Node B (joiner): verify the token over TLS, persist A, transition to daemon.
 mkdir -p /tmp/bs-b-src && echo hello > /tmp/bs-b-src/test
-./bin/backupswarm --data-dir /tmp/bs-b run \
-    --backup-dir /tmp/bs-b-src \
-    --listen 127.0.0.1:7778
+./bin/backupswarm --data-dir /tmp/bs-b join <token> \
+    --then-run --backup-dir /tmp/bs-b-src --listen 127.0.0.1:7778
+
+# To issue further invites against the running daemon at /tmp/bs-a:
+./bin/backupswarm --data-dir /tmp/bs-a invite
 ```
 
 The daemon reads the storage peer from `<data-dir>/peers.db` (populated by
 `join`). Omitting `--backup-dir` runs the daemon in pure storage-peer mode.
+`run --invite` accepts `--token-out FILE` to write the token atomically and
+`--no-ca` to opt the founder into pubkey-pin trust.
 
 ## Restore
 
@@ -120,8 +119,9 @@ All development operations go through the Makefile — never invoke `go` or `doc
 |---|---|
 | `make docker-build` | Build the multi-stage Docker image (`backupswarm:dev`) |
 | `make docker-run` | Run a single node in Docker (foreground) |
-| `make docker-compose-up` | Spin up a local multi-node swarm for testing |
+| `make docker-compose-up` | Spin up a local 3-node swarm for testing |
 | `make docker-compose-down` | Tear down the local swarm |
+| `make docker-compose-test` | Containerised end-to-end test: assert two joiners reach the founder, the joiner backs up the seeded tree, and the announcement reaches the third node |
 
 ### Security
 

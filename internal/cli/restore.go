@@ -20,7 +20,8 @@ import (
 // nowhere.
 var errNoStoragePeer = fmt.Errorf("no storage peer with a dialable address in peers.db; run `join <token>` first")
 
-// errMultiplePeers matches daemon.ErrMultiplePeers: single-peer mode only.
+// errMultiplePeers fires when peers.db has more than one dialable
+// storage candidate. Restore takes a single destination conn.
 var errMultiplePeers = fmt.Errorf("multiple dialable peers in peers.db; restore supports exactly one")
 
 func newRestoreCmd(dataDir *string) *cobra.Command {

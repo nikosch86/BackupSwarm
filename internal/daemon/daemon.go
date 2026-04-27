@@ -8,6 +8,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -177,10 +178,6 @@ type Options struct {
 	Progress io.Writer
 }
 
-// ErrMultiplePeers is returned by Run when more than one peer in
-// peers.db has a non-empty address. Only single-peer mode is supported.
-var ErrMultiplePeers = errors.New("multiple dialable peers in peers.db; single-peer mode only")
-
 const (
 	defaultScanInterval = 60 * time.Second
 	defaultDialTimeout  = 30 * time.Second
@@ -234,7 +231,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer func() { _ = peerStore.Close() }()
 
-	storagePeer, err := pickStoragePeer(peerStore)
+	dialablePeers, err := listDialablePeers(peerStore)
 	if err != nil {
 		return err
 	}
@@ -341,43 +338,45 @@ func Run(ctx context.Context, opts Options) error {
 		return waitForServe(ctx, serveErrCh)
 	}
 
-	peerAddr := ""
-	if storagePeer != nil {
-		peerAddr = storagePeer.Addr
-	}
 	slog.InfoContext(ctx, "daemon starting",
 		"node_id", id.ShortID(),
 		"mode", mode,
 		"listen", opts.ListenAddr,
-		"peer", peerAddr,
+		"known_peers", len(dialablePeers),
 	)
-	fmt.Fprintf(opts.Progress, "daemon starting: mode=%s listen=%s\n", modeName(mode), opts.ListenAddr)
+	fmt.Fprintf(opts.Progress, "daemon starting: mode=%s listen=%s known_peers=%d\n", modeName(mode), opts.ListenAddr, len(dialablePeers))
 
-	// Backup dir present but no peer to dial — behave as storage-peer.
-	// (Someone may be using the node as a shared data sink; their own
-	// backups wait until peers.db is populated.)
-	if storagePeer == nil {
+	// Backup dir present but no known peers — behave as storage-peer.
+	if len(dialablePeers) == 0 {
 		return waitForServe(ctx, serveErrCh)
 	}
 
-	dialCtx, dialCancel := context.WithTimeout(ctx, opts.DialTimeout)
-	peerConn, err := bsquic.Dial(dialCtx, storagePeer.Addr, id.PrivateKey, storagePeer.PubKey, nil)
-	dialCancel()
+	dialed, err := dialAllPeers(ctx, dialablePeers, id.PrivateKey, opts.DialTimeout)
 	if err != nil {
-		return fmt.Errorf("dial peer %q: %w", storagePeer.Addr, err)
+		return err
 	}
-	connSet.Add(peerConn)
-	// Accepts streams the storage peer opens on this outbound conn
-	// (e.g. forwarded PeerAnnouncements). Exits when peerConn closes.
-	go backup.AcceptStreams(ctx, peerConn, st, router.HandleStream, joinHandler)
-	defer func() {
-		connSet.Remove(peerConn)
-		_ = peerConn.Close()
-	}()
-	slog.InfoContext(ctx, "dialed storage peer",
-		"peer_addr", storagePeer.Addr,
-		"peer_pub", hex.EncodeToString(storagePeer.PubKey),
-	)
+	for _, dp := range dialed {
+		connSet.Add(dp.conn)
+		// Accepts streams the peer opens on this outbound conn (e.g.
+		// forwarded PeerAnnouncements). Exits when the conn closes.
+		go backup.AcceptStreams(ctx, dp.conn, st, router.HandleStream, joinHandler)
+		defer func(c *bsquic.Conn) {
+			connSet.Remove(c)
+			_ = c.Close()
+		}(dp.conn)
+		slog.InfoContext(ctx, "dialed peer",
+			"peer_addr", dp.peer.Addr,
+			"peer_pub", hex.EncodeToString(dp.peer.PubKey),
+			"role", dp.peer.Role,
+		)
+	}
+
+	target := pickBackupTarget(dialed)
+	if target == nil {
+		// No storage candidate dialable; fall through to storage-only.
+		return waitForServe(ctx, serveErrCh)
+	}
+	peerConn := target.conn
 
 	switch mode {
 	case ModePurge:
@@ -429,29 +428,66 @@ func waitForServe(ctx context.Context, serveErrCh <-chan error) error {
 	}
 }
 
-// pickStoragePeer picks the single dialable storage candidate from
-// peers.db: non-empty Addr and a Role that IsStorageCandidate. Returns
-// (nil, nil) on zero matches, (nil, ErrMultiplePeers) on more than one.
-func pickStoragePeer(ps *peers.Store) (*peers.Peer, error) {
+// dialedPeer pairs an open outbound conn with the peer record that
+// produced it.
+type dialedPeer struct {
+	conn *bsquic.Conn
+	peer peers.Peer
+}
+
+// listDialablePeers returns every peer record with a non-empty Addr.
+// Role is not filtered; backup-target selection is separate.
+func listDialablePeers(ps *peers.Store) ([]peers.Peer, error) {
 	all, err := ps.List()
 	if err != nil {
 		return nil, fmt.Errorf("list peers: %w", err)
 	}
-	var dialable []peers.Peer
+	dialable := make([]peers.Peer, 0, len(all))
 	for _, p := range all {
-		if p.Addr != "" && p.Role.IsStorageCandidate() {
+		if p.Addr != "" {
 			dialable = append(dialable, p)
 		}
 	}
-	switch len(dialable) {
-	case 0:
-		return nil, nil
-	case 1:
-		p := dialable[0]
-		return &p, nil
-	default:
-		return nil, ErrMultiplePeers
+	return dialable, nil
+}
+
+// dialAllPeers dials each known peer best-effort. Failed dials are
+// logged and skipped. Returns the first dial error only when every
+// dial failed; otherwise returns the successful subset.
+func dialAllPeers(ctx context.Context, known []peers.Peer, priv ed25519.PrivateKey, timeout time.Duration) ([]dialedPeer, error) {
+	out := make([]dialedPeer, 0, len(known))
+	var firstErr error
+	for _, p := range known {
+		dctx, cancel := context.WithTimeout(ctx, timeout)
+		conn, err := bsquic.Dial(dctx, p.Addr, priv, p.PubKey, nil)
+		cancel()
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("dial peer %q: %w", p.Addr, err)
+			}
+			slog.WarnContext(ctx, "dial peer failed",
+				"peer_addr", p.Addr,
+				"peer_pub", hex.EncodeToString(p.PubKey),
+				"err", err)
+			continue
+		}
+		out = append(out, dialedPeer{conn: conn, peer: p})
 	}
+	if len(out) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	return out, nil
+}
+
+// pickBackupTarget returns the first dialed peer whose Role is a
+// storage candidate, or nil if none.
+func pickBackupTarget(dialed []dialedPeer) *dialedPeer {
+	for i := range dialed {
+		if dialed[i].peer.Role.IsStorageCandidate() {
+			return &dialed[i]
+		}
+	}
+	return nil
 }
 
 // runScanLoop blocks until ctx is cancelled or the Serve goroutine
