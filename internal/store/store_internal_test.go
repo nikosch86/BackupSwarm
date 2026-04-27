@@ -303,6 +303,85 @@ func TestPutOwned_PutBytesFailureAfterClaim(t *testing.T) {
 	}
 }
 
+// TestRelease_ZeroIsNoop asserts release(0) leaves the used tally unchanged.
+func TestRelease_ZeroIsNoop(t *testing.T) {
+	s, err := NewWithMax(t.TempDir(), 32)
+	if err != nil {
+		t.Fatalf("NewWithMax: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if _, err := s.Put([]byte("eight!!!")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	before := s.Used()
+	s.release(0)
+	if got := s.Used(); got != before {
+		t.Errorf("Used after release(0) = %d, want %d", got, before)
+	}
+}
+
+// TestRelease_NegativeIsNoop asserts release with a non-positive count is a no-op.
+func TestRelease_NegativeIsNoop(t *testing.T) {
+	s, err := NewWithMax(t.TempDir(), 32)
+	if err != nil {
+		t.Fatalf("NewWithMax: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if _, err := s.Put([]byte("eight!!!")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	before := s.Used()
+	s.release(-5)
+	if got := s.Used(); got != before {
+		t.Errorf("Used after release(-5) = %d, want %d", got, before)
+	}
+}
+
+// TestScanUsedBytes_SkipsNonRegularEntries seeds a shard dir with a
+// nested subdirectory and asserts NewWithMax reports Used summed over
+// regular files only.
+func TestScanUsedBytes_SkipsNonRegularEntries(t *testing.T) {
+	root := t.TempDir()
+	first, err := NewWithMax(root, 0)
+	if err != nil {
+		t.Fatalf("NewWithMax #1: %v", err)
+	}
+	blob := []byte("payload")
+	if _, err := first.Put(blob); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	var shardDir string
+	for _, e := range entries {
+		if e.IsDir() {
+			shardDir = filepath.Join(root, e.Name())
+			break
+		}
+	}
+	if shardDir == "" {
+		t.Fatal("no shard dir found")
+	}
+	if err := os.Mkdir(filepath.Join(shardDir, "sub"), 0o700); err != nil {
+		t.Fatalf("Mkdir sub: %v", err)
+	}
+
+	second, err := NewWithMax(root, 0)
+	if err != nil {
+		t.Fatalf("NewWithMax #2: %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	if got := second.Used(); got != int64(len(blob)) {
+		t.Errorf("Used = %d, want %d (sub-dir inside shard must be skipped)", got, len(blob))
+	}
+}
+
 // TestPathFor_UsesFirstByteShardAndFullHexName asserts pathFor places the blob under the first-byte shard with a full-hex filename.
 func TestPathFor_UsesFirstByteShardAndFullHexName(t *testing.T) {
 	s, err := New(t.TempDir())

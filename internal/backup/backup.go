@@ -275,6 +275,37 @@ func SendGetChunk(ctx context.Context, conn *bsquic.Conn, hash [32]byte) ([]byte
 	return sendGetChunk(ctx, bsquicConnAdapter{c: conn}, hash)
 }
 
+// SendGetCapacity probes conn for the peer's used/max byte counts;
+// max=0 reports the peer as unlimited. Wraps any peer-reported
+// application error.
+func SendGetCapacity(ctx context.Context, conn *bsquic.Conn) (used, max int64, err error) {
+	return sendGetCapacity(ctx, bsquicConnAdapter{c: conn})
+}
+
+// sendGetCapacity opens a MsgGetCapacity stream (empty body — the type
+// byte is the entire request) and reads the response.
+func sendGetCapacity(ctx context.Context, conn streamOpener) (used, max int64, err error) {
+	s, err := conn.OpenStream(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("open stream: %w", err)
+	}
+	if err := protocol.WriteMessageType(s, protocol.MsgGetCapacity); err != nil {
+		_ = s.Close()
+		return 0, 0, err
+	}
+	if err := s.Close(); err != nil {
+		return 0, 0, fmt.Errorf("close send side: %w", err)
+	}
+	used, max, appErr, err := protocol.ReadGetCapacityResponse(s)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read response: %w", err)
+	}
+	if appErr != "" {
+		return 0, 0, fmt.Errorf("peer rejected capacity probe: %s", appErr)
+	}
+	return used, max, nil
+}
+
 // sendGetChunk writes a GetChunk request and returns the blob or a
 // wrapped peer application error.
 func sendGetChunk(ctx context.Context, conn streamOpener, hash [32]byte) ([]byte, error) {
@@ -448,6 +479,8 @@ func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owne
 			return fmt.Errorf("join request received but no handler configured")
 		}
 		return join(ctx, rw, ownerKey)
+	case protocol.MsgGetCapacity:
+		return handleGetCapacityStream(ctx, rw, st)
 	default:
 		return fmt.Errorf("unknown message type %d", msgType)
 	}
@@ -461,6 +494,8 @@ func errCode(err error) string {
 		return "not_found"
 	case errors.Is(err, store.ErrOwnerMismatch):
 		return "owner_mismatch"
+	case errors.Is(err, store.ErrVolumeFull):
+		return "no_space"
 	default:
 		return "internal"
 	}
@@ -497,6 +532,13 @@ func handleDeleteChunkStream(ctx context.Context, rw io.ReadWriter, st *store.St
 		return protocol.WriteDeleteChunkResponse(rw, code)
 	}
 	return protocol.WriteDeleteChunkResponse(rw, "")
+}
+
+// handleGetCapacityStream writes the store's used/max byte totals
+// onto rw. Always reports success; the OK/Err frame shape leaves room
+// for future error states.
+func handleGetCapacityStream(_ context.Context, rw io.ReadWriter, st *store.Store) error {
+	return protocol.WriteGetCapacityResponse(rw, st.Used(), st.Capacity(), "")
 }
 
 // handleGetChunkStream authorizes the get against owner (the TLS-

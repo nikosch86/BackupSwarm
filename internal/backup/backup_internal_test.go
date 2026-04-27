@@ -1268,6 +1268,8 @@ func TestErrCode_MapsSentinels(t *testing.T) {
 		{"chunk-not-found wrapped", fmt.Errorf("wrap: %w", store.ErrChunkNotFound), "not_found"},
 		{"owner-mismatch bare", store.ErrOwnerMismatch, "owner_mismatch"},
 		{"owner-mismatch wrapped", fmt.Errorf("wrap: %w", store.ErrOwnerMismatch), "owner_mismatch"},
+		{"volume-full bare", store.ErrVolumeFull, "no_space"},
+		{"volume-full wrapped", fmt.Errorf("wrap: %w", store.ErrVolumeFull), "no_space"},
 		{"unmapped", errors.New("permission denied: /data/secret"), "internal"},
 	}
 	for _, tc := range cases {
@@ -1308,6 +1310,119 @@ func TestHandlePutChunkStream_OwnerMismatchReturnsCode(t *testing.T) {
 	}
 	if appErr != "owner_mismatch" {
 		t.Errorf("appErr = %q, want %q", appErr, "owner_mismatch")
+	}
+	if bytes.Contains(rw.wbuf.Bytes(), []byte("/")) {
+		t.Errorf("response frame contains '/'; suggests path leak: %q", rw.wbuf.String())
+	}
+}
+
+// TestHandleGetCapacityStream_ReportsUsedAndCap drives the dispatcher
+// directly: a store seeded with one PutOwned should report Used =
+// len(blob) and Capacity = configured MaxBytes.
+func TestHandleGetCapacityStream_ReportsUsedAndCap(t *testing.T) {
+	const cap = int64(1 << 20)
+	st, err := store.NewWithMax(filepath.Join(t.TempDir(), "chunks"), cap)
+	if err != nil {
+		t.Fatalf("store.NewWithMax: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	blob := []byte("seed-bytes")
+	if _, err := st.PutOwned(blob, []byte("alice")); err != nil {
+		t.Fatalf("PutOwned: %v", err)
+	}
+
+	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(nil)}
+	if err := handleGetCapacityStream(context.Background(), rw, st); err != nil {
+		t.Fatalf("handleGetCapacityStream: %v", err)
+	}
+	used, gotCap, appErr, err := protocol.ReadGetCapacityResponse(&rw.wbuf)
+	if err != nil {
+		t.Fatalf("ReadGetCapacityResponse: %v", err)
+	}
+	if appErr != "" {
+		t.Errorf("appErr = %q, want empty", appErr)
+	}
+	if used != int64(len(blob)) {
+		t.Errorf("used = %d, want %d", used, len(blob))
+	}
+	if gotCap != cap {
+		t.Errorf("cap = %d, want %d", gotCap, cap)
+	}
+}
+
+// TestHandleGetCapacityStream_UnlimitedReportsZeroCap asserts an
+// unlimited-capacity store reports cap=0 (the "unlimited" sentinel).
+func TestHandleGetCapacityStream_UnlimitedReportsZeroCap(t *testing.T) {
+	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(nil)}
+	if err := handleGetCapacityStream(context.Background(), rw, st); err != nil {
+		t.Fatalf("handleGetCapacityStream: %v", err)
+	}
+	used, cap, appErr, err := protocol.ReadGetCapacityResponse(&rw.wbuf)
+	if err != nil {
+		t.Fatalf("ReadGetCapacityResponse: %v", err)
+	}
+	if appErr != "" || used != 0 || cap != 0 {
+		t.Errorf("unlimited empty store: used=%d cap=%d appErr=%q", used, cap, appErr)
+	}
+}
+
+// TestDispatchStream_GetCapacityRoutesToHandler asserts the dispatcher
+// recognizes MsgGetCapacity and writes the expected used/cap pair.
+func TestDispatchStream_GetCapacityRoutesToHandler(t *testing.T) {
+	st, err := store.NewWithMax(filepath.Join(t.TempDir(), "chunks"), 1024)
+	if err != nil {
+		t.Fatalf("NewWithMax: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	var inBuf bytes.Buffer
+	if err := protocol.WriteMessageType(&inBuf, protocol.MsgGetCapacity); err != nil {
+		t.Fatalf("WriteMessageType: %v", err)
+	}
+	rw := &fakeStream{writeErrAt: -1, rd: &inBuf}
+	if err := dispatchStream(context.Background(), rw, st, []byte("any"), nil, nil); err != nil {
+		t.Fatalf("dispatchStream: %v", err)
+	}
+	used, cap, _, err := protocol.ReadGetCapacityResponse(&rw.wbuf)
+	if err != nil {
+		t.Fatalf("ReadGetCapacityResponse: %v", err)
+	}
+	if used != 0 || cap != 1024 {
+		t.Errorf("dispatched response: used=%d cap=%d, want 0/1024", used, cap)
+	}
+}
+
+// TestHandlePutChunkStream_VolumeFullReturnsCode caps the store at fewer
+// bytes than the request blob and asserts the wire response is the
+// "no_space" short code.
+func TestHandlePutChunkStream_VolumeFullReturnsCode(t *testing.T) {
+	st, err := store.NewWithMax(filepath.Join(t.TempDir(), "chunks"), 4)
+	if err != nil {
+		t.Fatalf("store.NewWithMax: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	var reqBuf bytes.Buffer
+	if err := protocol.WritePutChunkRequest(&reqBuf, []byte("too-many-bytes")); err != nil {
+		t.Fatalf("WritePutChunkRequest: %v", err)
+	}
+	rw := &fakeStream{writeErrAt: -1, rd: &reqBuf}
+	if err := handlePutChunkStream(context.Background(), rw, st, []byte("alice")); err != nil {
+		t.Fatalf("handlePutChunkStream: %v", err)
+	}
+	_, appErr, err := protocol.ReadPutChunkResponse(&rw.wbuf)
+	if err != nil {
+		t.Fatalf("ReadPutChunkResponse: %v", err)
+	}
+	if appErr != "no_space" {
+		t.Errorf("appErr = %q, want %q", appErr, "no_space")
 	}
 	if bytes.Contains(rw.wbuf.Bytes(), []byte("/")) {
 		t.Errorf("response frame contains '/'; suggests path leak: %q", rw.wbuf.String())
@@ -1493,5 +1608,101 @@ func TestHandlePutChunkStream_LogsRichError(t *testing.T) {
 	}
 	if !strings.Contains(logged, "level=WARN") {
 		t.Errorf("slog capture missing WARN level; got: %s", logged)
+	}
+}
+
+// capOKFrame returns a GetCapacity success frame.
+func capOKFrame(t *testing.T, used, max int64) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := protocol.WriteGetCapacityResponse(&buf, used, max, ""); err != nil {
+		t.Fatalf("build capacity ok frame: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// capErrFrame returns a GetCapacity application-error frame.
+func capErrFrame(t *testing.T, msg string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := protocol.WriteGetCapacityResponse(&buf, 0, 0, msg); err != nil {
+		t.Fatalf("build capacity err frame: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestSendGetCapacity_SuccessPath(t *testing.T) {
+	stream := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(capOKFrame(t, 100, 1024))}
+	opener := &fakeOpener{stream: stream}
+
+	used, max, err := sendGetCapacity(context.Background(), opener)
+	if err != nil {
+		t.Fatalf("sendGetCapacity: %v", err)
+	}
+	if used != 100 || max != 1024 {
+		t.Errorf("used=%d max=%d, want 100/1024", used, max)
+	}
+	if !stream.closed {
+		t.Error("sendGetCapacity did not half-close stream")
+	}
+}
+
+func TestSendGetCapacity_AppErrorPropagation(t *testing.T) {
+	stream := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(capErrFrame(t, "no_capacity_known"))}
+	opener := &fakeOpener{stream: stream}
+
+	_, _, err := sendGetCapacity(context.Background(), opener)
+	if err == nil {
+		t.Fatal("sendGetCapacity returned nil despite app-error frame")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("peer rejected capacity probe")) {
+		t.Errorf("err = %q, want 'peer rejected capacity probe' prefix", err)
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("no_capacity_known")) {
+		t.Errorf("err = %q, want peer message", err)
+	}
+}
+
+func TestSendGetCapacity_OpenStreamError(t *testing.T) {
+	sentinel := errors.New("open boom")
+	opener := &fakeOpener{openErr: sentinel}
+	_, _, err := sendGetCapacity(context.Background(), opener)
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+}
+
+func TestSendGetCapacity_WriteMessageTypeError(t *testing.T) {
+	sentinel := errors.New("type boom")
+	stream := &fakeStream{writeErrAt: 0, writeErr: sentinel}
+	opener := &fakeOpener{stream: stream}
+	_, _, err := sendGetCapacity(context.Background(), opener)
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+	if !stream.closed {
+		t.Error("sendGetCapacity did not close stream after type-write error")
+	}
+}
+
+func TestSendGetCapacity_CloseError(t *testing.T) {
+	sentinel := errors.New("close boom")
+	stream := &fakeStream{writeErrAt: -1, closeErr: sentinel}
+	opener := &fakeOpener{stream: stream}
+	_, _, err := sendGetCapacity(context.Background(), opener)
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+}
+
+func TestSendGetCapacity_ReadResponseError(t *testing.T) {
+	stream := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(nil)}
+	opener := &fakeOpener{stream: stream}
+	_, _, err := sendGetCapacity(context.Background(), opener)
+	if err == nil {
+		t.Fatal("sendGetCapacity returned nil on empty response stream")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("read response")) {
+		t.Errorf("err = %q, want 'read response' prefix", err)
 	}
 }

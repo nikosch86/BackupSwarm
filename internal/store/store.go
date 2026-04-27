@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -61,21 +62,41 @@ var ErrNoOwnerRecorded = errors.New("no owner recorded for blob")
 // does not match the stored owner (maps to an authz failure).
 var ErrOwnerMismatch = errors.New("owner mismatch")
 
+// ErrVolumeFull is returned by Put and PutOwned when the new blob would
+// push the store past its configured MaxBytes capacity.
+var ErrVolumeFull = errors.New("storage volume full")
+
 // Store is a content-addressed chunk store rooted at a local directory.
 // Safe for concurrent use: Put is atomic via temp-file + rename and
 // idempotent for repeated writes of identical content.
 type Store struct {
-	root string
+	root     string
+	maxBytes int64
 
 	// owners is lazily opened on first owner-tracking call; plain Put
 	// never touches it. ownersMu makes lazy-open race-safe.
 	ownersMu sync.Mutex
 	owners   *bbolt.DB
+
+	// usedMu guards used; the reserve/release pair is the single point
+	// of truth for the running tally.
+	usedMu sync.Mutex
+	used   int64
 }
 
-// New opens (or initializes) a store rooted at dir. Dir is created and
-// chmod'd to 0700; returns an error if dir is not creatable as a directory.
+// New opens (or initializes) a store rooted at dir with no capacity
+// limit. See NewWithMax to enforce a per-store byte cap.
 func New(dir string) (*Store, error) {
+	return NewWithMax(dir, 0)
+}
+
+// NewWithMax opens (or initializes) a store rooted at dir. maxBytes
+// caps total bytes stored; 0 means unlimited, negatives are rejected.
+// Existing on-disk chunks are summed once to seed the used tally.
+func NewWithMax(dir string, maxBytes int64) (*Store, error) {
+	if maxBytes < 0 {
+		return nil, fmt.Errorf("max bytes must be non-negative, got %d", maxBytes)
+	}
 	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return nil, fmt.Errorf("create store dir %q: %w", dir, err)
 	}
@@ -83,7 +104,11 @@ func New(dir string) (*Store, error) {
 	if err := os.Chmod(dir, dirPerm); err != nil {
 		return nil, fmt.Errorf("chmod store dir %q: %w", dir, err)
 	}
-	return &Store{root: dir}, nil
+	used, err := scanUsedBytes(dir)
+	if err != nil {
+		return nil, fmt.Errorf("scan used bytes: %w", err)
+	}
+	return &Store{root: dir, maxBytes: maxBytes, used: used}, nil
 }
 
 // Close releases the lazily-opened owners bbolt handle. Idempotent.
@@ -101,7 +126,22 @@ func (s *Store) Close() error {
 // Put writes data and returns its SHA-256. Idempotent; no owner recorded.
 // Callers needing owner-authorized delete must use PutOwned instead.
 func (s *Store) Put(data []byte) ([sha256.Size]byte, error) {
-	return s.putBytes(data)
+	hash := sha256.Sum256(data)
+	release, err := s.reserveForBlob(hash, int64(len(data)))
+	if err != nil {
+		return hash, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			release()
+		}
+	}()
+	if _, err := s.writeBlob(data, hash); err != nil {
+		return hash, err
+	}
+	committed = true
+	return hash, nil
 }
 
 // PutOwned is Put plus an owner record. Same-owner + same-content is a
@@ -109,17 +149,46 @@ func (s *Store) Put(data []byte) ([sha256.Size]byte, error) {
 // no recorded owner is treated as quarantined and also returns ErrOwnerMismatch.
 func (s *Store) PutOwned(data, owner []byte) ([sha256.Size]byte, error) {
 	hash := sha256.Sum256(data)
+	release, err := s.reserveForBlob(hash, int64(len(data)))
+	if err != nil {
+		return hash, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			release()
+		}
+	}()
 	if err := s.claimOwner(hash, owner); err != nil {
 		return hash, err
 	}
-	if _, err := s.putBytes(data); err != nil {
+	if _, err := s.writeBlob(data, hash); err != nil {
 		return hash, err
 	}
+	committed = true
 	return hash, nil
 }
 
-func (s *Store) putBytes(data []byte) ([sha256.Size]byte, error) {
-	hash := sha256.Sum256(data)
+// reserveForBlob reserves n bytes when the blob is not yet on disk and
+// returns a release closure for rollback; an already-present blob gets
+// a no-op release.
+func (s *Store) reserveForBlob(hash [sha256.Size]byte, n int64) (release func(), err error) {
+	has, err := s.blobOnDisk(hash)
+	if err != nil {
+		return nil, err
+	}
+	if has {
+		return func() {}, nil
+	}
+	if err := s.reserve(n); err != nil {
+		return nil, err
+	}
+	return func() { s.release(n) }, nil
+}
+
+// writeBlob writes data to its content-addressed path. A populated
+// path is a no-op. Capacity reservation is the caller's responsibility.
+func (s *Store) writeBlob(data []byte, hash [sha256.Size]byte) ([sha256.Size]byte, error) {
 	path := s.pathFor(hash)
 
 	if _, err := os.Stat(path); err == nil {
@@ -140,9 +209,9 @@ func (s *Store) putBytes(data []byte) ([sha256.Size]byte, error) {
 		return hash, fmt.Errorf("create temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
-	committed := false
+	renamed := false
 	defer func() {
-		if !committed {
+		if !renamed {
 			_ = os.Remove(tmpPath)
 		}
 	}()
@@ -157,7 +226,7 @@ func (s *Store) putBytes(data []byte) ([sha256.Size]byte, error) {
 	if err := renameFunc(tmpPath, path); err != nil {
 		return hash, fmt.Errorf("rename %q -> %q: %w", tmpPath, path, err)
 	}
-	committed = true
+	renamed = true
 	return hash, nil
 }
 
@@ -197,14 +266,21 @@ func (s *Store) Has(hash [sha256.Size]byte) (bool, error) {
 // callers needing that must use DeleteForOwner.
 func (s *Store) Delete(hash [sha256.Size]byte) error {
 	path := s.pathFor(hash)
-	err := os.Remove(path)
-	if err == nil {
-		return nil
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: %x", ErrChunkNotFound, hash)
+		}
+		return fmt.Errorf("stat %q: %w", path, err)
 	}
-	if errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("%w: %x", ErrChunkNotFound, hash)
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: %x", ErrChunkNotFound, hash)
+		}
+		return fmt.Errorf("remove %q: %w", path, err)
 	}
-	return fmt.Errorf("remove %q: %w", path, err)
+	s.release(info.Size())
+	return nil
 }
 
 // Owner returns the Ed25519 pubkey recorded for hash. Returns
@@ -364,4 +440,96 @@ func (s *Store) ensureOwnersDB() (*bbolt.DB, error) {
 func (s *Store) pathFor(hash [sha256.Size]byte) string {
 	hexHash := hex.EncodeToString(hash[:])
 	return filepath.Join(s.root, hexHash[:2], hexHash)
+}
+
+// Used returns the running tally of bytes occupied by stored blobs.
+func (s *Store) Used() int64 {
+	s.usedMu.Lock()
+	defer s.usedMu.Unlock()
+	return s.used
+}
+
+// Capacity returns the configured maximum bytes for this store. Zero
+// means unlimited.
+func (s *Store) Capacity() int64 {
+	return s.maxBytes
+}
+
+// Available returns Capacity - Used, or math.MaxInt64 when the store is
+// unlimited (Capacity == 0).
+func (s *Store) Available() int64 {
+	if s.maxBytes == 0 {
+		return math.MaxInt64
+	}
+	s.usedMu.Lock()
+	defer s.usedMu.Unlock()
+	avail := s.maxBytes - s.used
+	if avail < 0 {
+		return 0
+	}
+	return avail
+}
+
+// reserve adds n to the running used tally if doing so would not exceed
+// maxBytes; returns ErrVolumeFull otherwise. n=0 is a no-op.
+func (s *Store) reserve(n int64) error {
+	if n <= 0 {
+		return nil
+	}
+	s.usedMu.Lock()
+	defer s.usedMu.Unlock()
+	if s.maxBytes > 0 && s.used+n > s.maxBytes {
+		return fmt.Errorf("%w: would exceed cap by %d bytes", ErrVolumeFull, s.used+n-s.maxBytes)
+	}
+	s.used += n
+	return nil
+}
+
+// release subtracts n from the running used tally. n=0 is a no-op;
+// the result is clamped to zero.
+func (s *Store) release(n int64) {
+	if n <= 0 {
+		return
+	}
+	s.usedMu.Lock()
+	defer s.usedMu.Unlock()
+	s.used -= n
+	if s.used < 0 {
+		s.used = 0
+	}
+}
+
+// scanUsedBytes sums the sizes of every regular file under root's
+// shard directories. Non-regular entries and a missing root read as
+// zero bytes.
+func scanUsedBytes(root string) (int64, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("read root %q: %w", root, err)
+	}
+	var total int64
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		shardDir := filepath.Join(root, e.Name())
+		shardEntries, err := os.ReadDir(shardDir)
+		if err != nil {
+			return 0, fmt.Errorf("read shard %q: %w", shardDir, err)
+		}
+		for _, f := range shardEntries {
+			if !f.Type().IsRegular() {
+				continue
+			}
+			info, err := f.Info()
+			if err != nil {
+				return 0, fmt.Errorf("stat %q: %w", filepath.Join(shardDir, f.Name()), err)
+			}
+			total += info.Size()
+		}
+	}
+	return total, nil
 }

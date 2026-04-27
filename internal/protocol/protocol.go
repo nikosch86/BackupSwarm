@@ -30,6 +30,9 @@ const (
 	// MsgJoinRequest prefixes a JoinRequest body. Lets the daemon's
 	// dispatcher route join handshakes alongside backup traffic.
 	MsgJoinRequest MessageType = 0x05
+	// MsgGetCapacity prefixes a capacity-probe stream. The request body
+	// is empty; the response reports the peer's used and max bytes.
+	MsgGetCapacity MessageType = 0x06
 )
 
 // WriteMessageType writes t as a single byte.
@@ -552,6 +555,78 @@ func ReadGetChunkResponse(r io.Reader, maxBlobLen int) (blob []byte, appErr stri
 		return nil, string(body), nil
 	default:
 		return nil, "", fmt.Errorf("unknown get response status byte %d", status[0])
+	}
+}
+
+// WriteGetCapacityResponse writes [statusOK][8B BE used][8B BE max] on
+// success (max=0 = unlimited) or [statusErr][4B BE error_len][error]
+// on application error.
+func WriteGetCapacityResponse(w io.Writer, used, max int64, appErr string) error {
+	if appErr == "" {
+		if _, err := w.Write([]byte{statusOK}); err != nil {
+			return fmt.Errorf("write capacity response status: %w", err)
+		}
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], uint64(used))
+		if _, err := w.Write(buf[:]); err != nil {
+			return fmt.Errorf("write capacity response used: %w", err)
+		}
+		binary.BigEndian.PutUint64(buf[:], uint64(max))
+		if _, err := w.Write(buf[:]); err != nil {
+			return fmt.Errorf("write capacity response cap: %w", err)
+		}
+		return nil
+	}
+	if _, err := w.Write([]byte{statusErr}); err != nil {
+		return fmt.Errorf("write capacity response status: %w", err)
+	}
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(appErr)))
+	if _, err := w.Write(lenBuf[:]); err != nil {
+		return fmt.Errorf("write capacity response error length: %w", err)
+	}
+	if _, err := w.Write([]byte(appErr)); err != nil {
+		return fmt.Errorf("write capacity response error body: %w", err)
+	}
+	return nil
+}
+
+// ReadGetCapacityResponse returns (used, max, "", nil) on success
+// (max=0 = unlimited), (0, 0, errString, nil) on application error,
+// or a transport error as the final return.
+func ReadGetCapacityResponse(r io.Reader) (used, max int64, appErr string, err error) {
+	var status [1]byte
+	if _, err = io.ReadFull(r, status[:]); err != nil {
+		return 0, 0, "", fmt.Errorf("read capacity response status: %w", err)
+	}
+	switch status[0] {
+	case statusOK:
+		var buf [8]byte
+		if _, err = io.ReadFull(r, buf[:]); err != nil {
+			return 0, 0, "", fmt.Errorf("read capacity response used: %w", err)
+		}
+		used = int64(binary.BigEndian.Uint64(buf[:]))
+		if _, err = io.ReadFull(r, buf[:]); err != nil {
+			return 0, 0, "", fmt.Errorf("read capacity response cap: %w", err)
+		}
+		max = int64(binary.BigEndian.Uint64(buf[:]))
+		return used, max, "", nil
+	case statusErr:
+		var lenBuf [4]byte
+		if _, err = io.ReadFull(r, lenBuf[:]); err != nil {
+			return 0, 0, "", fmt.Errorf("read capacity response error length: %w", err)
+		}
+		n := binary.BigEndian.Uint32(lenBuf[:])
+		if n > MaxErrorMessageLen {
+			return 0, 0, "", fmt.Errorf("capacity response error length %d exceeds max %d", n, MaxErrorMessageLen)
+		}
+		body := make([]byte, n)
+		if _, err = io.ReadFull(r, body); err != nil {
+			return 0, 0, "", fmt.Errorf("read capacity response error body: %w", err)
+		}
+		return 0, 0, string(body), nil
+	default:
+		return 0, 0, "", fmt.Errorf("unknown capacity response status byte %d", status[0])
 	}
 }
 

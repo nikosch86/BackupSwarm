@@ -21,6 +21,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		invite       bool
 		tokenOut     string
 		noCA         bool
+		maxStorage   string
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -42,6 +43,10 @@ func newRunCmd(dataDir *string) *cobra.Command {
 			if !invite && noCA {
 				return fmt.Errorf("--no-ca requires --invite")
 			}
+			maxBytes, err := parseSize(maxStorage)
+			if err != nil {
+				return fmt.Errorf("--max-storage: %w", err)
+			}
 
 			dir, err := resolveDataDir(*dataDir)
 			if err != nil {
@@ -59,6 +64,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				IssueInitialInvite: invite,
 				InitialInviteOut:   tokenOut,
 				NoCA:               noCA,
+				MaxStorageBytes:    maxBytes,
 				Progress:           cmd.OutOrStdout(),
 			})
 		},
@@ -73,5 +79,6 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().BoolVar(&invite, "invite", false, "Issue an initial invite token at startup; print it to stdout and continue into the daemon")
 	cmd.Flags().StringVar(&tokenOut, "token-out", "", "Write the initial invite token to this file (atomic); requires --invite")
 	cmd.Flags().BoolVar(&noCA, "no-ca", false, "Skip swarm CA generation; use pubkey-pin trust. Locks the swarm into pin mode for life. Requires --invite.")
+	cmd.Flags().StringVar(&maxStorage, "max-storage", "0", "Cap on bytes stored locally for swarm peers; accepts k/m/g/t suffixes (e.g. 10g). 0 = unlimited.")
 	return cmd
 }

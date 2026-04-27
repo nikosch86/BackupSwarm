@@ -40,6 +40,56 @@ func mustGenPub(t *testing.T) ed25519.PublicKey {
 	return pub
 }
 
+// TestWarnIfOverCap_OverCapEmitsSlogAndProgress: when used > capacity,
+// the helper writes both an slog warning and a human-readable progress
+// line so an operator notices the cap is below current on-disk usage.
+func TestWarnIfOverCap_OverCapEmitsSlogAndProgress(t *testing.T) {
+	w := &syncWriter{}
+	captureSlog(t, w)
+
+	var progress strings.Builder
+	warnIfOverCap(context.Background(), 200, 100, &progress)
+
+	logged := w.String()
+	if !strings.Contains(logged, "stored bytes exceed configured max-storage") {
+		t.Errorf("slog output missing warning: %q", logged)
+	}
+	if !strings.Contains(logged, "used_bytes=200") || !strings.Contains(logged, "max_bytes=100") || !strings.Contains(logged, "over_by_bytes=100") {
+		t.Errorf("slog output missing structured fields: %q", logged)
+	}
+	if !strings.Contains(progress.String(), "exceeds --max-storage") {
+		t.Errorf("progress output missing warning: %q", progress.String())
+	}
+}
+
+// TestWarnIfOverCap_UnderCapSilent: usage at or below the cap (or
+// unlimited cap) emits nothing — operators only hear from the helper
+// when they need to act.
+func TestWarnIfOverCap_UnderCapSilent(t *testing.T) {
+	cases := []struct {
+		name           string
+		used, capacity int64
+	}{
+		{"unlimited", 1 << 30, 0},
+		{"under cap", 50, 100},
+		{"exactly at cap", 100, 100},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &syncWriter{}
+			captureSlog(t, w)
+			var progress strings.Builder
+			warnIfOverCap(context.Background(), tc.used, tc.capacity, &progress)
+			if got := w.String(); got != "" {
+				t.Errorf("slog wrote %q, want empty", got)
+			}
+			if got := progress.String(); got != "" {
+				t.Errorf("progress wrote %q, want empty", got)
+			}
+		})
+	}
+}
+
 // TestPollPendingInvites_TracksIssueAndConsume runs the poll loop with
 // a tight interval, then issues + consumes an invite via a separate
 // Open and asserts the cache reflects each transition within a few

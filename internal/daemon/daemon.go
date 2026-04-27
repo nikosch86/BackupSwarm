@@ -179,6 +179,9 @@ type Options struct {
 	// Reachability is the peer reachability map the daemon updates
 	// from connection lifecycle events. nil makes Run allocate one.
 	Reachability *swarm.ReachabilityMap
+	// MaxStorageBytes caps the local chunk store; 0 means unlimited.
+	// PutChunk over the cap returns the "no_space" wire code.
+	MaxStorageBytes int64
 }
 
 const (
@@ -219,11 +222,13 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer func() { _ = idx.Close() }()
 
-	st, err := store.New(filepath.Join(opts.DataDir, storeDirName))
+	st, err := store.NewWithMax(filepath.Join(opts.DataDir, storeDirName), opts.MaxStorageBytes)
 	if err != nil {
 		return fmt.Errorf("open chunk store: %w", err)
 	}
 	defer func() { _ = st.Close() }()
+
+	warnIfOverCap(ctx, st.Used(), st.Capacity(), opts.Progress)
 
 	peerStore := opts.PeerStore
 	if peerStore == nil {
@@ -578,6 +583,21 @@ func modeName(m Mode) string {
 	default:
 		return fmt.Sprintf("unknown(%d)", m)
 	}
+}
+
+// warnIfOverCap logs a slog warning and writes a progress line when
+// used exceeds capacity. capacity == 0 (unlimited) is a no-op.
+func warnIfOverCap(ctx context.Context, used, capacity int64, progress io.Writer) {
+	if capacity == 0 || used <= capacity {
+		return
+	}
+	overBy := used - capacity
+	slog.WarnContext(ctx, "stored bytes exceed configured max-storage; new chunks will be rejected until usage drops",
+		"used_bytes", used,
+		"max_bytes", capacity,
+		"over_by_bytes", overBy,
+	)
+	fmt.Fprintf(progress, "warning: %d bytes on disk exceeds --max-storage %d (over by %d); new chunks will be rejected until usage drops\n", used, capacity, overBy)
 }
 
 // BackupDirHasRegularFiles walks dir and returns true as soon as one

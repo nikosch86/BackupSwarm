@@ -114,6 +114,71 @@ func TestRunCmd_IdleStorageOnly_ExitsOnCancel(t *testing.T) {
 	}
 }
 
+// TestRunCmd_RegistersMaxStorageFlag asserts the --max-storage flag is
+// exposed on the run subcommand so users can cap the local store.
+func TestRunCmd_RegistersMaxStorageFlag(t *testing.T) {
+	root := NewRootCmd()
+	var run *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Name() == "run" {
+			run = c
+			break
+		}
+	}
+	if run == nil {
+		t.Fatal("run subcommand missing")
+	}
+	if f := run.Flags().Lookup("max-storage"); f == nil {
+		t.Fatal("run is missing --max-storage flag")
+	}
+}
+
+// TestRunCmd_RejectsInvalidMaxStorage asserts a malformed --max-storage
+// value surfaces as a flag error before the daemon even starts.
+func TestRunCmd_RejectsInvalidMaxStorage(t *testing.T) {
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--max-storage", "garbage",
+	})
+	if err := root.Execute(); err == nil {
+		t.Error("run accepted invalid --max-storage")
+	}
+}
+
+// TestRunCmd_AcceptsHumanMaxStorage asserts a valid --max-storage value
+// (e.g. "1m") parses and the daemon starts cleanly.
+func TestRunCmd_AcceptsHumanMaxStorage(t *testing.T) {
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--max-storage", "1m",
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("run with --max-storage 1m returned err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit within 5s of cancel")
+	}
+}
+
 // TestRunCmd_RefusesWhenLocalEmptyIndexPopulated asserts run wraps daemon.ErrRefuseStart for an empty local with a populated index.
 func TestRunCmd_RefusesWhenLocalEmptyIndexPopulated(t *testing.T) {
 	dataDir := t.TempDir()

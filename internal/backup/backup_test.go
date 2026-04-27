@@ -852,6 +852,28 @@ func TestSendGetChunk_ForeignPeer_OwnerMismatch(t *testing.T) {
 	}
 }
 
+// TestSendGetCapacity_RoundTrip exercises the capacity probe end-to-end
+// against a real QUIC peer: a put followed by a probe should report
+// used = blob length and cap = 0 (the unlimited-store sentinel).
+func TestSendGetCapacity_RoundTrip(t *testing.T) {
+	rig := newTestRig(t)
+	blob := []byte("seed-bytes-for-capacity-probe")
+	if _, err := rig.peerStore.PutOwned(blob, rig.ownerPubKey); err != nil {
+		t.Fatalf("peerStore.PutOwned: %v", err)
+	}
+
+	used, cap, err := backup.SendGetCapacity(context.Background(), rig.ownerConn)
+	if err != nil {
+		t.Fatalf("SendGetCapacity: %v", err)
+	}
+	if used != int64(len(blob)) {
+		t.Errorf("used = %d, want %d", used, len(blob))
+	}
+	if cap != 0 {
+		t.Errorf("cap = %d, want 0 (unlimited)", cap)
+	}
+}
+
 // TestRun_DefaultsNilProgress asserts a nil opts.Progress falls back to io.Discard without panicking.
 func TestRun_DefaultsNilProgress(t *testing.T) {
 	rig := newTestRig(t)
