@@ -17,6 +17,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"backupswarm/internal/backup"
@@ -360,6 +362,42 @@ func Run(ctx context.Context, opts Options) error {
 	serveErrCh := make(chan error, 1)
 	go func() { serveErrCh <- backup.Serve(ctx, listener, st, router.HandleStream, joinHandler, obs) }()
 
+	// modeStr is fixed once at startup; the snapshot reports the entry mode.
+	modeStr := "storage-only"
+	if opts.BackupDir != "" {
+		modeStr = modeName(mode)
+	}
+	var lastScanAtNanos atomic.Int64
+	lastScanAtFn := func() time.Time {
+		v := lastScanAtNanos.Load()
+		if v == 0 {
+			return time.Time{}
+		}
+		return time.Unix(0, v)
+	}
+	// snapCtx bounds the snapshot loop to daemon.Run's lifetime.
+	// Defer order: snapCancel → snapWG.Wait → RemoveRuntimeSnapshot.
+	snapCtx, snapCancel := context.WithCancel(ctx)
+	var snapWG sync.WaitGroup
+	snapWG.Add(1)
+	go func() {
+		defer snapWG.Done()
+		runSnapshotLoop(snapCtx, snapshotLoopOptions{
+			dataDir:      opts.DataDir,
+			interval:     opts.ScanInterval,
+			listenAddr:   listener.Addr().String(),
+			modeFn:       func() string { return modeStr },
+			connsFn:      connSet.Snapshot,
+			lastScanFn:   lastScanAtFn,
+			storeStatsFn: func() (int64, int64) { return st.Used(), st.Capacity() },
+			reach:        reach,
+			peerStore:    peerStore,
+		})
+	}()
+	defer func() { _ = RemoveRuntimeSnapshot(opts.DataDir) }()
+	defer snapWG.Wait()
+	defer snapCancel()
+
 	// Pure storage-peer role: serve inbound chunks only, no scan loop.
 	if opts.BackupDir == "" {
 		slog.InfoContext(ctx, "daemon starting (storage-only)",
@@ -447,7 +485,9 @@ func Run(ctx context.Context, opts Options) error {
 		ChunkSize:    opts.ChunkSize,
 		Progress:     opts.Progress,
 	}
-	return runScanLoop(ctx, scanOpts, opts.ScanInterval, serveErrCh)
+	return runScanLoop(ctx, scanOpts, opts.ScanInterval, serveErrCh, func() {
+		lastScanAtNanos.Store(time.Now().UnixNano())
+	})
 }
 
 // waitForServe blocks until ctx is cancelled (clean shutdown) or the
@@ -530,8 +570,9 @@ func pickStorageConns(dialed []dialedPeer) []*bsquic.Conn {
 // runScanLoop blocks until ctx is cancelled or the Serve goroutine
 // surfaces an error, running ScanOnce every interval. The first scan
 // runs immediately so the daemon doesn't sit idle for a full interval
-// on startup.
-func runScanLoop(ctx context.Context, opts ScanOnceOptions, interval time.Duration, serveErrCh <-chan error) error {
+// on startup. onScanSuccess fires after every successful scan and is
+// the daemon's hook to update lastScanAt for the runtime snapshot.
+func runScanLoop(ctx context.Context, opts ScanOnceOptions, interval time.Duration, serveErrCh <-chan error, onScanSuccess func()) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -539,6 +580,10 @@ func runScanLoop(ctx context.Context, opts ScanOnceOptions, interval time.Durati
 		if err := ScanOnce(ctx, opts); err != nil {
 			slog.WarnContext(ctx, "scan failed", "err", err)
 			fmt.Fprintf(opts.Progress, "scan failed: %v\n", err)
+			return
+		}
+		if onScanSuccess != nil {
+			onScanSuccess()
 		}
 	}
 	doScan()
