@@ -81,15 +81,21 @@ func Classify(localPopulated, indexPopulated, restore, purge bool) (Mode, error)
 }
 
 // ScanOnceOptions is the owner-side configuration for a single scan
-// pass: back up changed files and prune deleted ones, using the same
-// QUIC connection for both directions.
+// pass: back up changed files across all storage peers and prune deleted
+// ones, using the same conn slice for both directions.
 type ScanOnceOptions struct {
 	// BackupDir is the directory being kept in sync. Incremental
 	// backup-Run is invoked with Path == BackupDir and Prune with
 	// Root == BackupDir.
 	BackupDir string
-	// Conn is the live QUIC connection to the storage peer.
-	Conn *bsquic.Conn
+	// Conns are the live QUIC connections to candidate storage peers.
+	// backup.Run picks Redundancy peers per chunk weighted by capacity;
+	// backup.Prune sends deletes to every conn that matches a peer in
+	// each ChunkRef.Peers.
+	Conns []*bsquic.Conn
+	// Redundancy is the per-chunk peer count; zero or negative defaults
+	// to 1 inside backup.Run.
+	Redundancy int
 	// Index is the local bbolt index.
 	Index *index.Index
 	// RecipientPub is the X25519 public key for chunk encryption.
@@ -102,14 +108,15 @@ type ScanOnceOptions struct {
 }
 
 // ScanOnce runs one incremental backup pass followed by one prune sweep
-// against opts.Conn. Each call is independent; safe to retry after failure.
+// against opts.Conns. Each call is independent; safe to retry after failure.
 func ScanOnce(ctx context.Context, opts ScanOnceOptions) error {
 	if opts.Progress == nil {
 		opts.Progress = io.Discard
 	}
 	if err := backup.Run(ctx, backup.RunOptions{
 		Path:         opts.BackupDir,
-		Conn:         opts.Conn,
+		Conns:        opts.Conns,
+		Redundancy:   opts.Redundancy,
 		RecipientPub: opts.RecipientPub,
 		Index:        opts.Index,
 		ChunkSize:    opts.ChunkSize,
@@ -119,7 +126,7 @@ func ScanOnce(ctx context.Context, opts ScanOnceOptions) error {
 	}
 	if err := backup.Prune(ctx, backup.PruneOptions{
 		Root:     opts.BackupDir,
-		Conn:     opts.Conn,
+		Conns:    opts.Conns,
 		Index:    opts.Index,
 		Progress: opts.Progress,
 	}); err != nil {
@@ -182,6 +189,9 @@ type Options struct {
 	// MaxStorageBytes caps the local chunk store; 0 means unlimited.
 	// PutChunk over the cap returns the "no_space" wire code.
 	MaxStorageBytes int64
+	// Redundancy is the per-chunk peer count used by ScanOnce. Zero or
+	// negative defaults to 1 inside backup.Run.
+	Redundancy int
 }
 
 const (
@@ -395,19 +405,18 @@ func Run(ctx context.Context, opts Options) error {
 		)
 	}
 
-	target := pickBackupTarget(dialed)
-	if target == nil {
+	storageConns := pickStorageConns(dialed)
+	if len(storageConns) == 0 {
 		// No storage candidate dialable; fall through to storage-only.
 		return waitForServe(ctx, serveErrCh)
 	}
-	peerConn := target.conn
 
 	switch mode {
 	case ModePurge:
 		// Purge: iterate the index and send DeleteChunk per entry.
 		// (Prune scopes by Root and the empty backup dir has nothing
 		// under Root to iterate.)
-		if err := purgeAll(ctx, idx, peerConn, opts.Progress); err != nil {
+		if err := purgeAll(ctx, idx, storageConns, opts.Progress); err != nil {
 			return fmt.Errorf("purge: %w", err)
 		}
 		fmt.Fprintln(opts.Progress, "purge complete; daemon continuing in idle mode")
@@ -418,7 +427,7 @@ func Run(ctx context.Context, opts Options) error {
 		// next scan incremental-skip each restored file.
 		if err := restore.Run(ctx, restore.Options{
 			Dest:          "/",
-			Conn:          peerConn,
+			Conns:         storageConns,
 			Index:         idx,
 			RecipientPub:  rk.PublicKey,
 			RecipientPriv: rk.PrivateKey,
@@ -431,7 +440,8 @@ func Run(ctx context.Context, opts Options) error {
 
 	scanOpts := ScanOnceOptions{
 		BackupDir:    opts.BackupDir,
-		Conn:         peerConn,
+		Conns:        storageConns,
+		Redundancy:   opts.Redundancy,
 		Index:        idx,
 		RecipientPub: rk.PublicKey,
 		ChunkSize:    opts.ChunkSize,
@@ -504,15 +514,17 @@ func dialAllPeers(ctx context.Context, known []peers.Peer, priv ed25519.PrivateK
 	return out, nil
 }
 
-// pickBackupTarget returns the first dialed peer whose Role is a
-// storage candidate, or nil if none.
-func pickBackupTarget(dialed []dialedPeer) *dialedPeer {
+// pickStorageConns returns the conns for dialed peers whose role admits
+// chunk storage. Order follows the dialed slice (deterministic by
+// peers.db iteration order).
+func pickStorageConns(dialed []dialedPeer) []*bsquic.Conn {
+	out := make([]*bsquic.Conn, 0, len(dialed))
 	for i := range dialed {
 		if dialed[i].peer.Role.IsStorageCandidate() {
-			return &dialed[i]
+			out = append(out, dialed[i].conn)
 		}
 	}
-	return nil
+	return out
 }
 
 // runScanLoop blocks until ctx is cancelled or the Serve goroutine
@@ -544,7 +556,7 @@ func runScanLoop(ctx context.Context, opts ScanOnceOptions, interval time.Durati
 
 // purgeAll sends DeleteChunk for every chunk of every index entry,
 // then clears the index. Used by Run when Mode == ModePurge.
-func purgeAll(ctx context.Context, idx *index.Index, conn *bsquic.Conn, progress io.Writer) error {
+func purgeAll(ctx context.Context, idx *index.Index, conns []*bsquic.Conn, progress io.Writer) error {
 	entries, err := idx.List()
 	if err != nil {
 		return fmt.Errorf("list index: %w", err)
@@ -558,7 +570,7 @@ func purgeAll(ctx context.Context, idx *index.Index, conn *bsquic.Conn, progress
 		// deletes and removes the entry.
 		if err := backup.Prune(ctx, backup.PruneOptions{
 			Root:     filepath.Dir(e.Path),
-			Conn:     conn,
+			Conns:    conns,
 			Index:    idx,
 			Progress: progress,
 		}); err != nil {

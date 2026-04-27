@@ -179,6 +179,87 @@ func TestRunCmd_AcceptsHumanMaxStorage(t *testing.T) {
 	}
 }
 
+// TestRunCmd_RegistersRedundancyFlag asserts the --redundancy flag is
+// exposed on the run subcommand so users can configure per-chunk peer count.
+func TestRunCmd_RegistersRedundancyFlag(t *testing.T) {
+	root := NewRootCmd()
+	var run *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Name() == "run" {
+			run = c
+			break
+		}
+	}
+	if run == nil {
+		t.Fatal("run subcommand missing")
+	}
+	if f := run.Flags().Lookup("redundancy"); f == nil {
+		t.Fatal("run is missing --redundancy flag")
+	}
+}
+
+// TestRunCmd_RejectsZeroRedundancy asserts --redundancy 0 fails fast.
+func TestRunCmd_RejectsZeroRedundancy(t *testing.T) {
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--redundancy", "0",
+	})
+	if err := root.Execute(); err == nil {
+		t.Error("run accepted --redundancy 0")
+	}
+}
+
+// TestRunCmd_RejectsNegativeRedundancy asserts --redundancy -1 fails fast.
+func TestRunCmd_RejectsNegativeRedundancy(t *testing.T) {
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--redundancy", "-1",
+	})
+	if err := root.Execute(); err == nil {
+		t.Error("run accepted --redundancy -1")
+	}
+}
+
+// TestRunCmd_AcceptsRedundancy asserts a valid --redundancy value parses
+// and the daemon starts cleanly.
+func TestRunCmd_AcceptsRedundancy(t *testing.T) {
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--redundancy", "3",
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("run with --redundancy 3 returned err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit within 5s of cancel")
+	}
+}
+
 // TestRunCmd_RefusesWhenLocalEmptyIndexPopulated asserts run wraps daemon.ErrRefuseStart for an empty local with a populated index.
 func TestRunCmd_RefusesWhenLocalEmptyIndexPopulated(t *testing.T) {
 	dataDir := t.TempDir()

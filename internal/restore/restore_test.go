@@ -103,7 +103,7 @@ func (r *restoreRig) backupFile(path string, data []byte) {
 	}
 	opts := backup.RunOptions{
 		Path:         path,
-		Conn:         r.ownerConn,
+		Conns:        []*bsquic.Conn{r.ownerConn},
 		RecipientPub: r.recipientPub,
 		Index:        r.ownerIndex,
 		ChunkSize:    1 << 20,
@@ -128,7 +128,7 @@ func TestRun_PreservesModTime(t *testing.T) {
 	dest := t.TempDir()
 	if err := restore.Run(context.Background(), restore.Options{
 		Dest:          dest,
-		Conn:          rig.ownerConn,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
@@ -157,7 +157,7 @@ func TestRun_RestoresSingleFile(t *testing.T) {
 	dest := t.TempDir()
 	opts := restore.Options{
 		Dest:          dest,
-		Conn:          rig.ownerConn,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
@@ -194,7 +194,7 @@ func TestRun_RestoresDirectoryTree(t *testing.T) {
 	dest := t.TempDir()
 	if err := restore.Run(context.Background(), restore.Options{
 		Dest:          dest,
-		Conn:          rig.ownerConn,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
@@ -234,7 +234,7 @@ func TestRun_RestoreVerifiesPlaintextHash(t *testing.T) {
 	dest := t.TempDir()
 	err = restore.Run(context.Background(), restore.Options{
 		Dest:          dest,
-		Conn:          rig.ownerConn,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
@@ -268,7 +268,7 @@ func TestRun_PeerMissingBlob(t *testing.T) {
 	dest := t.TempDir()
 	err = restore.Run(context.Background(), restore.Options{
 		Dest:          dest,
-		Conn:          rig.ownerConn,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
@@ -285,7 +285,7 @@ func TestRun_EmptyIndex(t *testing.T) {
 	dest := t.TempDir()
 	if err := restore.Run(context.Background(), restore.Options{
 		Dest:          dest,
-		Conn:          rig.ownerConn,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
@@ -312,7 +312,7 @@ func TestRun_ProgressOutput(t *testing.T) {
 	var out bytes.Buffer
 	if err := restore.Run(context.Background(), restore.Options{
 		Dest:          t.TempDir(),
-		Conn:          rig.ownerConn,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
@@ -333,7 +333,7 @@ func TestRun_NilProgress(t *testing.T) {
 
 	if err := restore.Run(context.Background(), restore.Options{
 		Dest:          t.TempDir(),
-		Conn:          rig.ownerConn,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
@@ -352,7 +352,7 @@ func TestRun_ContextCancellation(t *testing.T) {
 	cancel()
 	err := restore.Run(ctx, restore.Options{
 		Dest:          t.TempDir(),
-		Conn:          rig.ownerConn,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
@@ -368,7 +368,7 @@ func TestRun_RequiresAbsoluteDest(t *testing.T) {
 	rig := newRestoreRig(t)
 	err := restore.Run(context.Background(), restore.Options{
 		Dest:          "rel/path",
-		Conn:          rig.ownerConn,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
@@ -387,7 +387,7 @@ func TestRun_IndexListError(t *testing.T) {
 	}
 	err := restore.Run(context.Background(), restore.Options{
 		Dest:          t.TempDir(),
-		Conn:          rig.ownerConn,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
@@ -421,7 +421,7 @@ func TestRun_UnmarshalError(t *testing.T) {
 
 	err = restore.Run(context.Background(), restore.Options{
 		Dest:          t.TempDir(),
-		Conn:          rig.ownerConn,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
@@ -449,7 +449,7 @@ func TestRun_DecryptError(t *testing.T) {
 
 	err = restore.Run(context.Background(), restore.Options{
 		Dest:          t.TempDir(),
-		Conn:          rig.ownerConn,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
 		Index:         rig.ownerIndex,
 		RecipientPub:  wrongPub,
 		RecipientPriv: wrongPriv,
@@ -480,7 +480,7 @@ func TestRun_MkdirError(t *testing.T) {
 
 	err := restore.Run(context.Background(), restore.Options{
 		Dest:          ro,
-		Conn:          rig.ownerConn,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
@@ -517,7 +517,7 @@ func TestRun_RefusesSymlinkAtTarget(t *testing.T) {
 
 	err := restore.Run(context.Background(), restore.Options{
 		Dest:          dest,
-		Conn:          rig.ownerConn,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
@@ -536,6 +536,25 @@ func TestRun_RefusesSymlinkAtTarget(t *testing.T) {
 	}
 }
 
+// TestRun_NoConns asserts Run rejects a call with no peer conns.
+func TestRun_NoConns(t *testing.T) {
+	rig := newRestoreRig(t)
+	err := restore.Run(context.Background(), restore.Options{
+		Dest:          t.TempDir(),
+		Conns:         nil,
+		Index:         rig.ownerIndex,
+		RecipientPub:  rig.recipientPub,
+		RecipientPriv: rig.recipientPriv,
+		Progress:      io.Discard,
+	})
+	if err == nil {
+		t.Fatal("restore.Run returned nil with no conns")
+	}
+	if !strings.Contains(err.Error(), "no peer conns") {
+		t.Errorf("err = %q, want 'no peer conns' mention", err)
+	}
+}
+
 // TestRun_GetChunkError asserts a closed conn surfaces the transport err.
 func TestRun_GetChunkError(t *testing.T) {
 	rig := newRestoreRig(t)
@@ -545,7 +564,7 @@ func TestRun_GetChunkError(t *testing.T) {
 
 	err := restore.Run(context.Background(), restore.Options{
 		Dest:          t.TempDir(),
-		Conn:          rig.ownerConn,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,

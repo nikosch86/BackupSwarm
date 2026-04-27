@@ -7,6 +7,7 @@ package restore
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -49,8 +50,10 @@ type Options struct {
 	// Dest is the absolute directory under which every indexed path is
 	// recreated (path "/home/alice/x" → Dest + "/home/alice/x").
 	Dest string
-	// Conn is the live QUIC connection to the storage peer.
-	Conn *bsquic.Conn
+	// Conns are the live QUIC connections to peers that may hold backed-up
+	// chunks. For each chunk, restore tries every peer in ChunkRef.Peers
+	// that has a matching conn until one succeeds.
+	Conns []*bsquic.Conn
 	// Index is the local bbolt index describing what to restore.
 	Index *index.Index
 	// RecipientPub and RecipientPriv are the X25519 keypair used at backup.
@@ -68,6 +71,13 @@ func Run(ctx context.Context, opts Options) error {
 	if !filepath.IsAbs(opts.Dest) {
 		return fmt.Errorf("dest %q is not absolute", opts.Dest)
 	}
+	if len(opts.Conns) == 0 {
+		return errors.New("restore: no peer conns provided")
+	}
+	connByPub := make(map[string]*bsquic.Conn, len(opts.Conns))
+	for _, c := range opts.Conns {
+		connByPub[hex.EncodeToString(c.RemotePub())] = c
+	}
 	entries, err := opts.Index.List()
 	if err != nil {
 		return fmt.Errorf("index list: %w", err)
@@ -76,14 +86,14 @@ func Run(ctx context.Context, opts Options) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := restoreFile(ctx, opts, entry); err != nil {
+		if err := restoreFile(ctx, opts, entry, connByPub); err != nil {
 			return fmt.Errorf("restore %q: %w", entry.Path, err)
 		}
 	}
 	return nil
 }
 
-func restoreFile(ctx context.Context, opts Options, entry index.FileEntry) error {
+func restoreFile(ctx context.Context, opts Options, entry index.FileEntry, connByPub map[string]*bsquic.Conn) error {
 	outPath := filepath.Join(opts.Dest, entry.Path)
 	if err := os.MkdirAll(filepath.Dir(outPath), dirPerm); err != nil {
 		return fmt.Errorf("mkdir parent: %w", err)
@@ -98,7 +108,7 @@ func restoreFile(ctx context.Context, opts Options, entry index.FileEntry) error
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		blob, err := backup.SendGetChunk(ctx, opts.Conn, ref.CiphertextHash)
+		blob, err := fetchChunk(ctx, ref, connByPub)
 		if err != nil {
 			return fmt.Errorf("fetch chunk %d: %w", i, err)
 		}
@@ -127,4 +137,31 @@ func restoreFile(ctx context.Context, opts Options, entry index.FileEntry) error
 	}
 	fmt.Fprintf(opts.Progress, "restored %s (%d chunks)\n", entry.Path, len(entry.Chunks))
 	return nil
+}
+
+// fetchChunk tries each peer in ref.Peers that has a matching conn,
+// returning the first successfully retrieved blob. Returns the last
+// failure error if no peer yielded the blob.
+func fetchChunk(ctx context.Context, ref index.ChunkRef, connByPub map[string]*bsquic.Conn) ([]byte, error) {
+	if len(ref.Peers) == 0 {
+		return nil, errors.New("chunk has no recorded peers")
+	}
+	var lastErr error
+	for _, peerPub := range ref.Peers {
+		conn, ok := connByPub[hex.EncodeToString(peerPub)]
+		if !ok {
+			lastErr = fmt.Errorf("no live conn for peer %s", hex.EncodeToString(peerPub[:8]))
+			continue
+		}
+		blob, err := backup.SendGetChunk(ctx, conn, ref.CiphertextHash)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return blob, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no peer reachable for chunk")
+	}
+	return nil, lastErr
 }

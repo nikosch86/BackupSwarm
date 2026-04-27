@@ -1,30 +1,34 @@
 // Package backup implements the end-to-end backup pipeline: owner walks a
 // path, splits files into fixed-size chunks, encrypts for a recipient
-// X25519 key, ships each chunk on one QUIC stream, and records placements
-// in the local index; the peer stores received ciphertext by content hash.
+// X25519 key, ships each chunk on one or more QUIC streams to the
+// weighted-random selection of storage peers, and records placements in
+// the local index; each peer stores received ciphertext by content hash.
 package backup
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	mrand "math/rand/v2"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"backupswarm/internal/chunk"
 	"backupswarm/internal/crypto"
 	"backupswarm/internal/index"
+	"backupswarm/internal/placement"
 	"backupswarm/internal/protocol"
 	bsquic "backupswarm/internal/quic"
 	"backupswarm/internal/store"
 )
 
 // maxBlobLen caps one PutChunkRequest body: MaxChunkSize + headroom for
-// the crypto.MarshalBinary overhead. Keeps a malicious peer from forcing
-// a huge allocation.
+// the crypto.MarshalBinary overhead.
 const maxBlobLen = chunk.MaxChunkSize + 1024
 
 // Test-only seams; production never reassigns these.
@@ -32,25 +36,30 @@ var (
 	indexDeleteFunc = func(idx *index.Index, path string) error {
 		return idx.Delete(path)
 	}
-	// dispatchStreamFunc routes each accepted stream to a handler.
+	indexPutFunc = func(idx *index.Index, entry index.FileEntry) error {
+		return idx.Put(entry)
+	}
 	dispatchStreamFunc func(ctx context.Context, rw io.ReadWriter, st *store.Store, ownerKey []byte, ann AnnouncementHandler, join JoinHandler) error = dispatchStream
-	// serveConnStreamCap is the per-connection handler-goroutine cap,
-	// matched to bsquic.MaxIncomingStreamsPerConn.
-	serveConnStreamCap = int(bsquic.MaxIncomingStreamsPerConn)
+	serveConnStreamCap                                                                                                                                = int(bsquic.MaxIncomingStreamsPerConn)
 )
 
 // RunOptions is the owner-side configuration for a backup invocation.
 type RunOptions struct {
 	// Path is the file or directory to backup.
 	Path string
-	// Conn is the QUIC connection to the storage peer.
-	Conn *bsquic.Conn
+	// Conns are the live QUIC connections to candidate storage peers.
+	// Each invocation probes capacity per conn and picks Redundancy
+	// peers per chunk weighted by available bytes.
+	Conns []*bsquic.Conn
+	// Redundancy is the number of unique peers each chunk is placed on.
+	// Zero or negative is treated as 1.
+	Redundancy int
 	// RecipientPub is the X25519 public key for which every chunk key is
 	// wrapped. Typically the owner's own recipient public key, so that
 	// restore decrypts on the same node that backed up.
 	RecipientPub *[crypto.RecipientKeySize]byte
-	// Index is the local bbolt index, updated per file with the peer
-	// placement recorded in ChunkRef.Peers.
+	// Index is the local bbolt index, updated per file with the per-chunk
+	// peer placement recorded in ChunkRef.Peers.
 	Index *index.Index
 	// ChunkSize is the target chunk size in bytes; must fall within the
 	// [chunk.MinChunkSize, chunk.MaxChunkSize] bounds.
@@ -58,25 +67,41 @@ type RunOptions struct {
 	// Progress receives human-readable per-file progress lines. Pass
 	// io.Discard in non-interactive contexts.
 	Progress io.Writer
+	// Rng is the random source for weighted-random placement; nil seeds
+	// a fresh PCG from the wall clock.
+	Rng placement.Rng
 }
 
-// Run backs up everything under opts.Path to the storage peer reachable
-// via opts.Conn. Directories are walked recursively; regular files are
-// split, encrypted, shipped, and indexed. Symlinks and special files are
-// skipped (with a progress note).
+// Run backs up everything under opts.Path across opts.Conns. Directories
+// are walked recursively; regular files are split, encrypted, shipped, and
+// indexed. Symlinks and special files are skipped (with a progress note).
 func Run(ctx context.Context, opts RunOptions) error {
 	if opts.Progress == nil {
 		opts.Progress = io.Discard
+	}
+	if opts.Redundancy <= 0 {
+		opts.Redundancy = 1
+	}
+	if len(opts.Conns) == 0 {
+		return errors.New("backup: no peer conns provided")
 	}
 	info, err := os.Stat(opts.Path)
 	if err != nil {
 		return fmt.Errorf("stat %q: %w", opts.Path, err)
 	}
 
-	peerKey := append([]byte(nil), opts.Conn.RemotePub()...)
+	candidates := probeCandidates(ctx, opts.Conns)
+	if len(candidates) < opts.Redundancy {
+		return fmt.Errorf("%w: pool=%d, redundancy=%d", placement.ErrInsufficientPeers, len(candidates), opts.Redundancy)
+	}
+
+	rng := opts.Rng
+	if rng == nil {
+		rng = mrand.New(mrand.NewPCG(uint64(time.Now().UnixNano()), 0xc0ffee))
+	}
 
 	if !info.IsDir() {
-		return backupFile(ctx, opts, opts.Path, peerKey)
+		return backupFile(ctx, opts, opts.Path, candidates, rng)
 	}
 	return filepath.WalkDir(opts.Path, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -92,11 +117,11 @@ func Run(ctx context.Context, opts RunOptions) error {
 			fmt.Fprintf(opts.Progress, "skip non-regular file %s\n", path)
 			return nil
 		}
-		return backupFile(ctx, opts, path, peerKey)
+		return backupFile(ctx, opts, path, candidates, rng)
 	})
 }
 
-func backupFile(ctx context.Context, opts RunOptions, path string, peerKey []byte) error {
+func backupFile(ctx context.Context, opts RunOptions, path string, candidates []candidate, rng placement.Rng) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -144,22 +169,104 @@ func backupFile(ctx context.Context, opts RunOptions, path string, peerKey []byt
 		if err != nil {
 			return fmt.Errorf("marshal chunk %d of %q: %w", i, path, err)
 		}
-		hash, err := sendChunk(ctx, bsquicConnAdapter{c: opts.Conn}, blob)
+		peers, hash, err := placeChunk(ctx, candidates, opts.Redundancy, blob, rng)
 		if err != nil {
-			return fmt.Errorf("send chunk %d of %q: %w", i, path, err)
+			return fmt.Errorf("place chunk %d of %q: %w", i, path, err)
 		}
 		entry.Chunks = append(entry.Chunks, index.ChunkRef{
 			PlaintextHash:  c.Hash,
 			CiphertextHash: hash,
 			Size:           int64(len(blob)),
-			Peers:          [][]byte{peerKey},
+			Peers:          peers,
 		})
 	}
-	if err := opts.Index.Put(entry); err != nil {
+	if err := indexPutFunc(opts.Index, entry); err != nil {
 		return fmt.Errorf("index put %q: %w", path, err)
 	}
 	fmt.Fprintf(opts.Progress, "backed up %s (%d chunks)\n", path, len(chunks))
 	return nil
+}
+
+// candidate pairs a conn with its probed available capacity in bytes.
+type candidate struct {
+	conn      *bsquic.Conn
+	available int64
+}
+
+// unlimitedPlacementWeight is the per-peer weight applied when a peer
+// reports max==0 on the wire. Bounded so the sum across many peers
+// fits in int64.
+const unlimitedPlacementWeight = int64(1) << 50
+
+// probeCandidates queries each conn for its capacity and returns peers
+// with positive available capacity. A failed probe drops the peer from
+// the pool for this scan.
+func probeCandidates(ctx context.Context, conns []*bsquic.Conn) []candidate {
+	out := make([]candidate, 0, len(conns))
+	for _, c := range conns {
+		used, max, err := SendGetCapacity(ctx, c)
+		if err != nil {
+			slog.WarnContext(ctx, "capacity probe failed; peer excluded for this scan",
+				"peer_pub", hex.EncodeToString(c.RemotePub()),
+				"err", err)
+			continue
+		}
+		var avail int64
+		if max == 0 {
+			avail = unlimitedPlacementWeight
+		} else {
+			avail = max - used
+			if avail < 0 {
+				avail = 0
+			}
+		}
+		if avail == 0 {
+			slog.InfoContext(ctx, "peer at capacity; excluded for this scan",
+				"peer_pub", hex.EncodeToString(c.RemotePub()),
+				"used", used, "max", max)
+			continue
+		}
+		out = append(out, candidate{conn: c, available: avail})
+	}
+	return out
+}
+
+// placeChunk picks r peers via weighted-random and ships blob to each.
+// Returns the pubkeys of peers that accepted the put plus the canonical
+// content hash. Per-peer failures are logged and skipped; an empty
+// success set fails the call.
+func placeChunk(ctx context.Context, pool []candidate, r int, blob []byte, rng placement.Rng) ([][]byte, [32]byte, error) {
+	selected, err := placement.WeightedRandom(pool, func(c candidate) int64 { return c.available }, r, rng)
+	if err != nil {
+		return nil, [32]byte{}, err
+	}
+	var canonical [32]byte
+	var canonicalSet bool
+	out := make([][]byte, 0, len(selected))
+	for _, c := range selected {
+		hash, sendErr := sendChunk(ctx, bsquicConnAdapter{c: c.conn}, blob)
+		if sendErr != nil {
+			slog.WarnContext(ctx, "put chunk to peer failed",
+				"peer_pub", hex.EncodeToString(c.conn.RemotePub()),
+				"err", sendErr)
+			continue
+		}
+		if !canonicalSet {
+			canonical = hash
+			canonicalSet = true
+		} else if hash != canonical {
+			slog.WarnContext(ctx, "peer returned mismatched content hash; dropped from placement",
+				"peer_pub", hex.EncodeToString(c.conn.RemotePub()),
+				"want_hash", hex.EncodeToString(canonical[:]),
+				"got_hash", hex.EncodeToString(hash[:]))
+			continue
+		}
+		out = append(out, append([]byte(nil), c.conn.RemotePub()...))
+	}
+	if len(out) == 0 {
+		return nil, [32]byte{}, errors.New("all selected peers rejected chunk")
+	}
+	return out, canonical, nil
 }
 
 // PruneOptions is the owner-side configuration for a Prune sweep.
@@ -168,8 +275,10 @@ type PruneOptions struct {
 	// left alone (guards against a misconfigured daemon wiping unrelated
 	// backups).
 	Root string
-	// Conn is the QUIC connection to the storage peer holding the chunks.
-	Conn *bsquic.Conn
+	// Conns are the live QUIC connections to known peers. Per chunk,
+	// Prune sends DeleteChunk to every peer in ChunkRef.Peers that
+	// matches a conn here.
+	Conns []*bsquic.Conn
 	// Index is the local bbolt index.
 	Index *index.Index
 	// Progress receives a per-entry line when a delete is performed.
@@ -178,11 +287,16 @@ type PruneOptions struct {
 }
 
 // Prune sends DeleteChunk for every index entry under Root whose file is
-// gone from disk, then removes the entry. On any delete failure the entry
-// is retained so the owner can retry on the next scan.
+// gone from disk, then removes the entry. For each chunk, it tries every
+// peer in ChunkRef.Peers that has a matching conn. A "not_found" peer
+// reply counts as success (idempotent delete). Entries are kept on the
+// owner's side if no peer accepted the delete so the next sweep retries.
 func Prune(ctx context.Context, opts PruneOptions) error {
 	if opts.Progress == nil {
 		opts.Progress = io.Discard
+	}
+	if len(opts.Conns) == 0 {
+		return errors.New("prune: no peer conns provided")
 	}
 	rootAbs, err := filepath.Abs(opts.Root)
 	if err != nil {
@@ -192,7 +306,10 @@ func Prune(ctx context.Context, opts PruneOptions) error {
 	if err != nil {
 		return fmt.Errorf("index list: %w", err)
 	}
-	opener := bsquicConnAdapter{c: opts.Conn}
+	connByPub := make(map[string]*bsquic.Conn, len(opts.Conns))
+	for _, c := range opts.Conns {
+		connByPub[hex.EncodeToString(c.RemotePub())] = c
+	}
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -214,7 +331,7 @@ func Prune(ctx context.Context, opts PruneOptions) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if err := sendDeleteChunk(ctx, opener, ref.CiphertextHash); err != nil {
+			if err := deleteChunkOnPeers(ctx, ref, connByPub); err != nil {
 				return fmt.Errorf("delete chunk %x of %q: %w", ref.CiphertextHash, entry.Path, err)
 			}
 		}
@@ -224,6 +341,57 @@ func Prune(ctx context.Context, opts PruneOptions) error {
 		fmt.Fprintf(opts.Progress, "pruned %s (%d chunks)\n", entry.Path, len(entry.Chunks))
 	}
 	return nil
+}
+
+// deleteChunkOnPeers sends DeleteChunk to each peer in ref.Peers that has
+// a matching conn. A peer reporting "not_found" counts as success: the
+// chunk is in the desired (absent) state on that peer. Returns nil when
+// at least one peer accepted; otherwise the last failure error.
+func deleteChunkOnPeers(ctx context.Context, ref index.ChunkRef, connByPub map[string]*bsquic.Conn) error {
+	var lastErr error
+	any := false
+	for _, peerPub := range ref.Peers {
+		conn, ok := connByPub[hex.EncodeToString(peerPub)]
+		if !ok {
+			lastErr = fmt.Errorf("no live conn for peer %s", hex.EncodeToString(peerPub[:8]))
+			continue
+		}
+		if err := sendDeleteChunk(ctx, bsquicConnAdapter{c: conn}, ref.CiphertextHash); err != nil {
+			if isPeerNotFound(err) {
+				any = true
+				continue
+			}
+			slog.WarnContext(ctx, "delete chunk to peer failed",
+				"peer_pub", hex.EncodeToString(peerPub),
+				"err", err)
+			lastErr = err
+			continue
+		}
+		any = true
+	}
+	if !any {
+		if lastErr == nil {
+			lastErr = errors.New("no peers accepted delete")
+		}
+		return lastErr
+	}
+	return nil
+}
+
+// isPeerNotFound matches the wire vocabulary returned by the GetChunk /
+// DeleteChunk handlers when the chunk is not in the peer's store.
+func isPeerNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	const code = "not_found"
+	s := err.Error()
+	for i := 0; i+len(code) <= len(s); i++ {
+		if s[i:i+len(code)] == code {
+			return true
+		}
+	}
+	return false
 }
 
 // streamOpener is the subset of *bsquic.Conn that sendChunk needs; lets
@@ -423,10 +591,7 @@ func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann Anno
 // ctx cancels. Caller owns the conn lifecycle.
 func AcceptStreams(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann AnnouncementHandler, join JoinHandler) {
 	ownerKey := append([]byte(nil), conn.RemotePub()...)
-	// sem bounds concurrent dispatcher goroutines per connection.
 	sem := make(chan struct{}, serveConnStreamCap)
-	// wg ensures we don't return while dispatcher goroutines are still
-	// reading dispatchStreamFunc or touching st.
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	for {

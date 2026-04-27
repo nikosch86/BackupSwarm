@@ -22,6 +22,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		tokenOut     string
 		noCA         bool
 		maxStorage   string
+		redundancy   int
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -42,6 +43,9 @@ func newRunCmd(dataDir *string) *cobra.Command {
 			}
 			if !invite && noCA {
 				return fmt.Errorf("--no-ca requires --invite")
+			}
+			if redundancy < 1 {
+				return fmt.Errorf("--redundancy must be >= 1, got %d", redundancy)
 			}
 			maxBytes, err := parseSize(maxStorage)
 			if err != nil {
@@ -65,6 +69,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				InitialInviteOut:   tokenOut,
 				NoCA:               noCA,
 				MaxStorageBytes:    maxBytes,
+				Redundancy:         redundancy,
 				Progress:           cmd.OutOrStdout(),
 			})
 		},
@@ -80,5 +85,6 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&tokenOut, "token-out", "", "Write the initial invite token to this file (atomic); requires --invite")
 	cmd.Flags().BoolVar(&noCA, "no-ca", false, "Skip swarm CA generation; use pubkey-pin trust. Locks the swarm into pin mode for life. Requires --invite.")
 	cmd.Flags().StringVar(&maxStorage, "max-storage", "0", "Cap on bytes stored locally for swarm peers; accepts k/m/g/t suffixes (e.g. 10g). 0 = unlimited.")
+	cmd.Flags().IntVar(&redundancy, "redundancy", 1, "Number of unique storage peers each chunk is placed on (must be >= 1)")
 	return cmd
 }

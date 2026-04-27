@@ -120,7 +120,7 @@ func TestRestoreCmd_EndToEnd(t *testing.T) {
 	}
 	if err := backup.Run(context.Background(), backup.RunOptions{
 		Path:         srcPath,
-		Conn:         ownerConn,
+		Conns:        []*bsquic.Conn{ownerConn},
 		RecipientPub: rk.PublicKey,
 		Index:        ix,
 		ChunkSize:    1 << 20,
@@ -290,9 +290,9 @@ func TestRestoreCmd_DialFailure(t *testing.T) {
 	}
 }
 
-// TestPickSingleDialablePeer_ListFailureSurfacesWrapped asserts a List
-// error surfaces from pickSingleDialablePeer with a "list peers" wrap.
-func TestPickSingleDialablePeer_ListFailureSurfacesWrapped(t *testing.T) {
+// TestListDialableStoragePeers_ListFailureSurfacesWrapped asserts a List
+// error surfaces from listDialableStoragePeers with a "list peers" wrap.
+func TestListDialableStoragePeers_ListFailureSurfacesWrapped(t *testing.T) {
 	ps, err := peers.Open(filepath.Join(t.TempDir(), "list-fail.db"))
 	if err != nil {
 		t.Fatalf("peers.Open: %v", err)
@@ -300,9 +300,9 @@ func TestPickSingleDialablePeer_ListFailureSurfacesWrapped(t *testing.T) {
 	if err := ps.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	_, err = pickSingleDialablePeer(ps)
+	_, err = listDialableStoragePeers(ps)
 	if err == nil {
-		t.Fatal("pickSingleDialablePeer returned nil on closed store")
+		t.Fatal("listDialableStoragePeers returned nil on closed store")
 	}
 	if !strings.Contains(err.Error(), "list peers") {
 		t.Errorf("err = %q, want 'list peers' wrap", err)

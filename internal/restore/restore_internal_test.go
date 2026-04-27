@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -112,7 +113,7 @@ func seedRig(t *testing.T) Options {
 	}
 	if err := backup.Run(context.Background(), backup.RunOptions{
 		Path:         path,
-		Conn:         ownerConn,
+		Conns:        []*bsquic.Conn{ownerConn},
 		RecipientPub: recipientPub,
 		Index:        idx,
 		ChunkSize:    1 << 20,
@@ -122,7 +123,7 @@ func seedRig(t *testing.T) Options {
 	}
 
 	return Options{
-		Conn:          ownerConn,
+		Conns:         []*bsquic.Conn{ownerConn},
 		Index:         idx,
 		RecipientPub:  recipientPub,
 		RecipientPriv: recipientPriv,
@@ -201,6 +202,50 @@ func TestRestoreFile_ChtimesFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "chtimes") {
 		t.Errorf("err = %q, want 'chtimes' mention", err)
+	}
+}
+
+// TestFetchChunk_NoRecordedPeers asserts fetchChunk rejects a ChunkRef
+// with an empty Peers slice — there is no peer to try.
+func TestFetchChunk_NoRecordedPeers(t *testing.T) {
+	ref := index.ChunkRef{CiphertextHash: [32]byte{0x01}, Size: 1, Peers: nil}
+	_, err := fetchChunk(context.Background(), ref, nil)
+	if err == nil {
+		t.Fatal("fetchChunk returned nil with no recorded peers")
+	}
+	if !strings.Contains(err.Error(), "no recorded peers") {
+		t.Errorf("err = %q, want 'no recorded peers' mention", err)
+	}
+}
+
+// TestRestoreFile_ContextCancelledInChunkLoop asserts restoreFile bails
+// inside the per-chunk loop when the context is cancelled before the
+// first iteration.
+func TestRestoreFile_ContextCancelledInChunkLoop(t *testing.T) {
+	opts := seedRig(t)
+	opts.Dest = t.TempDir()
+
+	entries, err := opts.Index.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("seeded index has no entries")
+	}
+	connByPub := make(map[string]*bsquic.Conn, len(opts.Conns))
+	for _, c := range opts.Conns {
+		connByPub[hex.EncodeToString(c.RemotePub())] = c
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = restoreFile(ctx, opts, entries[0], connByPub)
+	if err == nil {
+		t.Fatal("restoreFile returned nil despite cancelled ctx")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
 	}
 }
 

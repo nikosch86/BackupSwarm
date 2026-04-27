@@ -129,7 +129,7 @@ func TestScanOnce_BackupAndPrune(t *testing.T) {
 
 	opts := daemon.ScanOnceOptions{
 		BackupDir:    root,
-		Conn:         rig.ownerConn,
+		Conns:        []*bsquic.Conn{rig.ownerConn},
 		Index:        rig.ownerIndex,
 		RecipientPub: rig.recipientPub,
 		ChunkSize:    1 << 20,
@@ -178,7 +178,7 @@ func TestScanOnce_NilProgress(t *testing.T) {
 	writeFile(t, filepath.Join(root, "a.bin"), 1<<20)
 	opts := daemon.ScanOnceOptions{
 		BackupDir:    root,
-		Conn:         rig.ownerConn,
+		Conns:        []*bsquic.Conn{rig.ownerConn},
 		Index:        rig.ownerIndex,
 		RecipientPub: rig.recipientPub,
 		ChunkSize:    1 << 20,
@@ -195,7 +195,7 @@ func TestScanOnce_BackupFailurePropagates(t *testing.T) {
 	writeFile(t, filepath.Join(root, "a.bin"), 1<<20)
 	opts := daemon.ScanOnceOptions{
 		BackupDir:    root,
-		Conn:         rig.ownerConn,
+		Conns:        []*bsquic.Conn{rig.ownerConn},
 		Index:        rig.ownerIndex,
 		RecipientPub: rig.recipientPub,
 		ChunkSize:    1,
@@ -210,22 +210,19 @@ func TestScanOnce_BackupFailurePropagates(t *testing.T) {
 	}
 }
 
-// TestScanOnce_PruneFailurePropagates asserts a Prune error wraps as "prune".
+// TestScanOnce_PruneFailurePropagates asserts a Prune error wraps as
+// "prune". An empty backup dir drives Run to a no-op so the closed
+// index trips Prune.Index.List, not the Run side.
 func TestScanOnce_PruneFailurePropagates(t *testing.T) {
 	rig := newScanRig(t)
-	root := t.TempDir()
-	if err := rig.ownerIndex.Put(index.FileEntry{
-		Path:   filepath.Join(root, "ghost.bin"),
-		Size:   1,
-		Chunks: []index.ChunkRef{{CiphertextHash: [32]byte{0xaa}, Size: 10}},
-	}); err != nil {
-		t.Fatalf("seed index: %v", err)
+	root := t.TempDir() // empty: Run walks no files, no chunks placed
+	if err := rig.ownerIndex.Close(); err != nil {
+		t.Fatalf("Close index: %v", err)
 	}
-	_ = rig.ownerConn.Close()
 
 	opts := daemon.ScanOnceOptions{
 		BackupDir:    root,
-		Conn:         rig.ownerConn,
+		Conns:        []*bsquic.Conn{rig.ownerConn},
 		Index:        rig.ownerIndex,
 		RecipientPub: rig.recipientPub,
 		ChunkSize:    1 << 20,
@@ -233,7 +230,7 @@ func TestScanOnce_PruneFailurePropagates(t *testing.T) {
 	}
 	err := daemon.ScanOnce(context.Background(), opts)
 	if err == nil {
-		t.Fatal("ScanOnce accepted closed-conn prune")
+		t.Fatal("ScanOnce accepted closed-index prune")
 	}
 	if !bytes.Contains([]byte(err.Error()), []byte("prune")) {
 		t.Errorf("err = %q, want 'prune' prefix", err)
@@ -789,7 +786,7 @@ func TestRun_StorageOnly_NoBackupDir(t *testing.T) {
 	writeFile(t, filepath.Join(srcDir, "file.bin"), 1<<20)
 	if err := backup.Run(context.Background(), backup.RunOptions{
 		Path:         srcDir,
-		Conn:         conn,
+		Conns:        []*bsquic.Conn{conn},
 		RecipientPub: recipientPub,
 		Index:        ownerIdx,
 		ChunkSize:    1 << 20,

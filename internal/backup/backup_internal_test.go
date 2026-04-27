@@ -121,6 +121,25 @@ func TestSendChunk_WritePutChunkRequestError(t *testing.T) {
 	}
 }
 
+// TestSendChunk_WriteRequestBodyError fails the second stream write
+// (WritePutChunkRequest header), which is the post-MsgPutChunk error path.
+func TestSendChunk_WriteRequestBodyError(t *testing.T) {
+	sentinel := errors.New("write body boom")
+	stream := &fakeStream{writeErrAt: 1, writeErr: sentinel}
+	opener := &fakeOpener{stream: stream}
+
+	_, err := sendChunk(context.Background(), opener, []byte("blob"))
+	if err == nil {
+		t.Fatal("sendChunk returned nil on WritePutChunkRequest body error")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("sendChunk err = %v, want wraps sentinel", err)
+	}
+	if !stream.closed {
+		t.Error("sendChunk did not close stream after request-body write error")
+	}
+}
+
 // TestSendChunk_CloseSendSideError asserts a stream-close error is surfaced wrapped.
 func TestSendChunk_CloseSendSideError(t *testing.T) {
 	sentinel := errors.New("half-close boom")
@@ -481,6 +500,21 @@ func TestSendDeleteChunk_WriteError(t *testing.T) {
 	}
 }
 
+// TestSendDeleteChunk_WriteRequestHashError fails the hash-bytes write
+// after the MsgDeleteChunk type byte succeeds.
+func TestSendDeleteChunk_WriteRequestHashError(t *testing.T) {
+	sentinel := errors.New("hash write boom")
+	stream := &fakeStream{writeErrAt: 1, writeErr: sentinel}
+	opener := &fakeOpener{stream: stream}
+	err := sendDeleteChunk(context.Background(), opener, [32]byte{0xaa})
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+	if !stream.closed {
+		t.Error("sendDeleteChunk did not close stream after hash write error")
+	}
+}
+
 func TestSendDeleteChunk_CloseError(t *testing.T) {
 	sentinel := errors.New("close boom")
 	stream := &fakeStream{writeErrAt: -1, closeErr: sentinel}
@@ -509,6 +543,88 @@ func withIndexDeleteFunc(t *testing.T, fn func(idx *index.Index, path string) er
 	prev := indexDeleteFunc
 	indexDeleteFunc = fn
 	t.Cleanup(func() { indexDeleteFunc = prev })
+}
+
+// withIndexPutFunc swaps indexPutFunc for the duration of a test.
+func withIndexPutFunc(t *testing.T, fn func(idx *index.Index, entry index.FileEntry) error) {
+	t.Helper()
+	prev := indexPutFunc
+	indexPutFunc = fn
+	t.Cleanup(func() { indexPutFunc = prev })
+}
+
+// TestRun_IndexPutError injects an Index.Put failure and asserts backupFile wraps it as "index put".
+func TestRun_IndexPutError(t *testing.T) {
+	peerPub, peerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("peer key: %v", err)
+	}
+	_, ownerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("owner key: %v", err)
+	}
+	peerStore, err := store.New(filepath.Join(t.TempDir(), "peer-chunks"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = peerStore.Close() })
+
+	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil, nil)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	serveCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = Serve(serveCtx, listener, peerStore, nil, nil, nil) }()
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer dialCancel()
+	conn, err := bsquic.Dial(dialCtx, listener.Addr().String(), ownerPriv, peerPub, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	idx, err := index.Open(filepath.Join(t.TempDir(), "owner-index.db"))
+	if err != nil {
+		t.Fatalf("index.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+
+	recipientPub, _, err := crypto.GenerateRecipientKey()
+	if err != nil {
+		t.Fatalf("GenerateRecipientKey: %v", err)
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "f.bin")
+	if err := os.WriteFile(path, []byte("payload"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	sentinel := errors.New("forced index.Put failure")
+	withIndexPutFunc(t, func(_ *index.Index, _ index.FileEntry) error {
+		return sentinel
+	})
+
+	err = Run(context.Background(), RunOptions{
+		Path:         path,
+		Conns:        []*bsquic.Conn{conn},
+		RecipientPub: recipientPub,
+		Index:        idx,
+		ChunkSize:    1 << 20,
+		Progress:     io.Discard,
+	})
+	if err == nil {
+		t.Fatal("Run returned nil despite injected index.Put failure")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("index put")) {
+		t.Errorf("err = %q, want 'index put' mention", err)
+	}
 }
 
 // TestPrune_IndexDeleteError injects an Index.Delete failure and asserts Prune wraps and returns it.
@@ -562,7 +678,7 @@ func TestPrune_IndexDeleteError(t *testing.T) {
 	}
 	if err := Run(context.Background(), RunOptions{
 		Path:         path,
-		Conn:         conn,
+		Conns:        []*bsquic.Conn{conn},
 		RecipientPub: recipientPub,
 		Index:        idx,
 		ChunkSize:    1 << 20,
@@ -581,7 +697,7 @@ func TestPrune_IndexDeleteError(t *testing.T) {
 
 	err = Prune(context.Background(), PruneOptions{
 		Root:     root,
-		Conn:     conn,
+		Conns:    []*bsquic.Conn{conn},
 		Index:    idx,
 		Progress: io.Discard,
 	})

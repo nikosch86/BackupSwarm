@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -289,33 +288,31 @@ func TestListDialablePeers_ListFailureSurfacesWrapped(t *testing.T) {
 	}
 }
 
-// TestPickBackupTarget_FirstStorageCandidate asserts pickBackupTarget
-// returns the first IsStorageCandidate from the dialed list and skips
-// RolePeer entries.
-func TestPickBackupTarget_FirstStorageCandidate(t *testing.T) {
+// TestPickStorageConns_OnlyStorageCandidates asserts pickStorageConns
+// returns conns for every IsStorageCandidate and skips RolePeer entries.
+func TestPickStorageConns_OnlyStorageCandidates(t *testing.T) {
 	rolePub := mustGenPub(t)
 	introPub := mustGenPub(t)
+	storagePub := mustGenPub(t)
 	dialed := []dialedPeer{
 		{peer: peers.Peer{Addr: "a", PubKey: rolePub, Role: peers.RolePeer}},
 		{peer: peers.Peer{Addr: "b", PubKey: introPub, Role: peers.RoleIntroducer}},
+		{peer: peers.Peer{Addr: "c", PubKey: storagePub, Role: peers.RoleStorage}},
 	}
-	got := pickBackupTarget(dialed)
-	if got == nil {
-		t.Fatal("pickBackupTarget returned nil despite a RoleIntroducer in the list")
-	}
-	if !bytes.Equal(got.peer.PubKey, introPub) {
-		t.Errorf("picked %x, want introducer %x", got.peer.PubKey[:8], introPub[:8])
+	got := pickStorageConns(dialed)
+	if len(got) != 2 {
+		t.Fatalf("got %d conns, want 2 (introducer + storage)", len(got))
 	}
 }
 
-// TestPickBackupTarget_NoStorageCandidate asserts pickBackupTarget
-// returns nil when the dialed list has only RolePeer entries.
-func TestPickBackupTarget_NoStorageCandidate(t *testing.T) {
+// TestPickStorageConns_EmptyList asserts pickStorageConns returns an
+// empty slice when the dialed list has only RolePeer entries.
+func TestPickStorageConns_EmptyList(t *testing.T) {
 	dialed := []dialedPeer{
 		{peer: peers.Peer{Addr: "a", PubKey: mustGenPub(t), Role: peers.RolePeer}},
 	}
-	if got := pickBackupTarget(dialed); got != nil {
-		t.Errorf("pickBackupTarget = %+v, want nil for non-storage list", got)
+	if got := pickStorageConns(dialed); len(got) != 0 {
+		t.Errorf("pickStorageConns = %+v, want empty for non-storage list", got)
 	}
 }
 
@@ -448,7 +445,7 @@ func TestPurgeAll_PruneFailurePropagates(t *testing.T) {
 		t.Fatalf("seed index: %v", err)
 	}
 
-	err = purgeAll(context.Background(), idx, conn, io.Discard)
+	err = purgeAll(context.Background(), idx, []*bsquic.Conn{conn}, io.Discard)
 	if err == nil {
 		t.Fatal("purgeAll returned nil despite closed conn")
 	}

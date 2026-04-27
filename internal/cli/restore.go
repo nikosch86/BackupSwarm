@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -15,23 +16,18 @@ import (
 	"backupswarm/internal/restore"
 )
 
-// ErrNoStoragePeer is returned when peers.db has no entry with a
-// non-empty address — the restore command cannot fetch blobs from
-// nowhere.
+// errNoStoragePeer is returned when peers.db has no storage candidate
+// with a non-empty address — restore cannot fetch blobs from nowhere.
 var errNoStoragePeer = fmt.Errorf("no storage peer with a dialable address in peers.db; run `join <token>` first")
-
-// errMultiplePeers fires when peers.db has more than one dialable
-// storage candidate. Restore takes a single destination conn.
-var errMultiplePeers = fmt.Errorf("multiple dialable peers in peers.db; restore supports exactly one")
 
 func newRestoreCmd(dataDir *string) *cobra.Command {
 	var dialTimeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "restore <dest>",
-		Short: "Fetch every indexed file from the storage peer and reassemble it under <dest>",
-		Long: "Read the local index and the storage peer recorded in peers.db, fetch each " +
-			"chunk, decrypt it, verify its plaintext hash, and write the file to " +
-			"<dest>/<original-absolute-path>. <dest> must be absolute.",
+		Short: "Fetch every indexed file from known storage peers and reassemble it under <dest>",
+		Long: "Read the local index and the storage peers recorded in peers.db, dial each, " +
+			"fetch every chunk from a peer that holds it, decrypt it, verify its plaintext " +
+			"hash, and write the file to <dest>/<original-absolute-path>. <dest> must be absolute.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dest := args[0]
@@ -56,7 +52,7 @@ func newRestoreCmd(dataDir *string) *cobra.Command {
 				return fmt.Errorf("open peer store: %w", err)
 			}
 			defer func() { _ = peerStore.Close() }()
-			peer, err := pickSingleDialablePeer(peerStore)
+			storagePeers, err := listDialableStoragePeers(peerStore)
 			if err != nil {
 				return err
 			}
@@ -67,17 +63,15 @@ func newRestoreCmd(dataDir *string) *cobra.Command {
 			}
 			defer func() { _ = idx.Close() }()
 
-			dialCtx, dialCancel := context.WithTimeout(cmd.Context(), dialTimeout)
-			defer dialCancel()
-			conn, err := bsquic.Dial(dialCtx, peer.Addr, id.PrivateKey, peer.PubKey, nil)
+			conns, closeFn, err := dialAll(cmd.Context(), storagePeers, id.PrivateKey, dialTimeout)
 			if err != nil {
-				return fmt.Errorf("dial peer %q: %w", peer.Addr, err)
+				return err
 			}
-			defer func() { _ = conn.Close() }()
+			defer closeFn()
 
 			return restore.Run(cmd.Context(), restore.Options{
 				Dest:          dest,
-				Conn:          conn,
+				Conns:         conns,
 				Index:         idx,
 				RecipientPub:  rk.PublicKey,
 				RecipientPriv: rk.PrivateKey,
@@ -85,14 +79,13 @@ func newRestoreCmd(dataDir *string) *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().DurationVar(&dialTimeout, "dial-timeout", 30*time.Second, "Timeout for the initial dial to the storage peer")
+	cmd.Flags().DurationVar(&dialTimeout, "dial-timeout", 30*time.Second, "Timeout for each dial to a storage peer")
 	return cmd
 }
 
-// pickSingleDialablePeer returns the single peer in ps with a non-empty
-// Addr and a Role that IsStorageCandidate, or an error if zero or more
-// than one exist.
-func pickSingleDialablePeer(ps *peers.Store) (*peers.Peer, error) {
+// listDialableStoragePeers returns every peer in ps with a non-empty
+// Addr and a Role that admits storage. errNoStoragePeer fires on empty.
+func listDialableStoragePeers(ps *peers.Store) ([]peers.Peer, error) {
 	all, err := ps.List()
 	if err != nil {
 		return nil, fmt.Errorf("list peers: %w", err)
@@ -103,13 +96,36 @@ func pickSingleDialablePeer(ps *peers.Store) (*peers.Peer, error) {
 			dialable = append(dialable, p)
 		}
 	}
-	switch len(dialable) {
-	case 0:
+	if len(dialable) == 0 {
 		return nil, errNoStoragePeer
-	case 1:
-		p := dialable[0]
-		return &p, nil
-	default:
-		return nil, errMultiplePeers
 	}
+	return dialable, nil
+}
+
+// dialAll dials every peer best-effort. Returns the successful conns and
+// a closer that closes them all. Errors only when zero dials succeeded.
+func dialAll(ctx context.Context, peerList []peers.Peer, priv ed25519.PrivateKey, timeout time.Duration) ([]*bsquic.Conn, func(), error) {
+	conns := make([]*bsquic.Conn, 0, len(peerList))
+	var firstErr error
+	for _, p := range peerList {
+		dialCtx, dialCancel := context.WithTimeout(ctx, timeout)
+		conn, err := bsquic.Dial(dialCtx, p.Addr, priv, p.PubKey, nil)
+		dialCancel()
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("dial peer %q: %w", p.Addr, err)
+			}
+			continue
+		}
+		conns = append(conns, conn)
+	}
+	if len(conns) == 0 {
+		return nil, func() {}, firstErr
+	}
+	closer := func() {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}
+	return conns, closer, nil
 }
