@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"backupswarm/internal/backup"
@@ -22,26 +23,51 @@ type capacityResult struct {
 	At   time.Time
 }
 
+// maxPerProbeTimeout is the upper bound on a single probe's deadline.
+const maxPerProbeTimeout = 5 * time.Second
+
 // capacityProbeFunc is the package-level seam for capacity probes.
 var capacityProbeFunc = backup.SendGetCapacity
 
-// probeAllCapacities probes every conn best-effort.
-// A failed probe is recorded as OK=false.
-func probeAllCapacities(ctx context.Context, conns []*bsquic.Conn, now func() time.Time) map[string]capacityResult {
+// perProbeTimeout returns min(interval/4, maxPerProbeTimeout).
+func perProbeTimeout(interval time.Duration) time.Duration {
+	t := interval / 4
+	if t > maxPerProbeTimeout {
+		t = maxPerProbeTimeout
+	}
+	return t
+}
+
+// probeAllCapacities probes every conn concurrently, each bounded by
+// perProbe. A failed or timed-out probe is recorded as OK=false.
+func probeAllCapacities(ctx context.Context, conns []*bsquic.Conn, perProbe time.Duration, now func() time.Time) map[string]capacityResult {
 	out := make(map[string]capacityResult, len(conns))
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
 	for _, c := range conns {
 		pub := c.RemotePub()
 		if len(pub) == 0 {
 			continue
 		}
 		key := hex.EncodeToString(pub)
-		used, max, err := capacityProbeFunc(ctx, c)
-		if err != nil {
-			out[key] = capacityResult{OK: false}
-			continue
-		}
-		out[key] = capacityResult{Used: used, Max: max, OK: true, At: now()}
+		wg.Add(1)
+		go func(c *bsquic.Conn, key string) {
+			defer wg.Done()
+			pctx, cancel := context.WithTimeout(ctx, perProbe)
+			defer cancel()
+			used, max, err := capacityProbeFunc(pctx, c)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				out[key] = capacityResult{OK: false}
+				return
+			}
+			out[key] = capacityResult{Used: used, Max: max, OK: true, At: now()}
+		}(c, key)
 	}
+	wg.Wait()
 	return out
 }
 
@@ -150,7 +176,7 @@ func runSnapshotLoop(ctx context.Context, opts snapshotLoopOptions) {
 		if opts.ownBackupFn != nil {
 			base.OwnBackup = opts.ownBackupFn()
 		}
-		caps := probeAllCapacities(ctx, opts.connsFn(), opts.nowFn)
+		caps := probeAllCapacities(ctx, opts.connsFn(), perProbeTimeout(opts.interval), opts.nowFn)
 		snap := buildSnapshot(base, known, opts.reach, caps)
 		if err := WriteRuntimeSnapshot(opts.dataDir, snap); err != nil {
 			slog.WarnContext(ctx, "write runtime snapshot", "err", err)

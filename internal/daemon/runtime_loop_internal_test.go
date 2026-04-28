@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/hex"
 	"sort"
 	"sync/atomic"
@@ -287,5 +289,144 @@ func TestSnapshotLoop_NilOwnBackupFnLeavesZero(t *testing.T) {
 
 	if snap.OwnBackup != (RuntimeOwnBackupSnapshot{}) {
 		t.Errorf("OwnBackup = %+v, want zero value with nil ownBackupFn", snap.OwnBackup)
+	}
+}
+
+// newProbeConn dials a fresh listener and returns the dialer-side conn
+// plus the listener's pubkey (== conn.RemotePub()). The listener accepts
+// once and holds the conn until cleanup.
+func newProbeConn(t *testing.T) (*bsquic.Conn, ed25519.PublicKey) {
+	t.Helper()
+	listenerPub, listenerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("listener key: %v", err)
+	}
+	_, dialerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("dialer key: %v", err)
+	}
+
+	listener, err := bsquic.Listen("127.0.0.1:0", listenerPriv, nil, nil)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		c, err := listener.Accept(ctx)
+		if err == nil {
+			t.Cleanup(func() { _ = c.Close() })
+		}
+	}()
+
+	dialCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := bsquic.Dial(dialCtx, listener.Addr().String(), dialerPriv, listenerPub, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	return conn, listenerPub
+}
+
+// TestProbeAllCapacities_SlowProbeBoundedByTimeout asserts a slow probe
+// is cancelled by the per-probe timeout, recorded as OK:false, and does
+// not block fast probes from completing.
+func TestProbeAllCapacities_SlowProbeBoundedByTimeout(t *testing.T) {
+	slowConn, slowPub := newProbeConn(t)
+	fastConn, fastPub := newProbeConn(t)
+
+	timeout := 100 * time.Millisecond
+
+	orig := capacityProbeFunc
+	t.Cleanup(func() { capacityProbeFunc = orig })
+	capacityProbeFunc = func(ctx context.Context, c *bsquic.Conn) (int64, int64, error) {
+		if bytes.Equal(c.RemotePub(), slowPub) {
+			select {
+			case <-time.After(10 * time.Second):
+				return 0, 0, nil
+			case <-ctx.Done():
+				return 0, 0, ctx.Err()
+			}
+		}
+		return 100, 1000, nil
+	}
+
+	start := time.Now()
+	out := probeAllCapacities(context.Background(), []*bsquic.Conn{slowConn, fastConn}, timeout, time.Now)
+	elapsed := time.Since(start)
+
+	maxAcceptable := timeout + 500*time.Millisecond
+	if elapsed > maxAcceptable {
+		t.Fatalf("probeAllCapacities took %v, want < %v (timeout + slop)", elapsed, maxAcceptable)
+	}
+	if got, ok := out[hex.EncodeToString(slowPub)]; !ok || got.OK {
+		t.Errorf("slow peer = %+v, want present with OK=false", got)
+	}
+	got := out[hex.EncodeToString(fastPub)]
+	if !got.OK || got.Used != 100 || got.Max != 1000 {
+		t.Errorf("fast peer = %+v, want OK=true Used=100 Max=1000", got)
+	}
+}
+
+// TestProbeAllCapacities_FanOutIsConcurrent asserts probes run in parallel:
+// two probes that each take ~probeDelay finish in roughly probeDelay
+// wall-time, not 2*probeDelay.
+func TestProbeAllCapacities_FanOutIsConcurrent(t *testing.T) {
+	connA, _ := newProbeConn(t)
+	connB, _ := newProbeConn(t)
+
+	probeDelay := 80 * time.Millisecond
+	timeout := 500 * time.Millisecond
+
+	orig := capacityProbeFunc
+	t.Cleanup(func() { capacityProbeFunc = orig })
+	capacityProbeFunc = func(ctx context.Context, c *bsquic.Conn) (int64, int64, error) {
+		select {
+		case <-time.After(probeDelay):
+			return 1, 2, nil
+		case <-ctx.Done():
+			return 0, 0, ctx.Err()
+		}
+	}
+
+	start := time.Now()
+	out := probeAllCapacities(context.Background(), []*bsquic.Conn{connA, connB}, timeout, time.Now)
+	elapsed := time.Since(start)
+
+	if elapsed >= 2*probeDelay {
+		t.Fatalf("probeAllCapacities took %v with 2 conns × %v probe; serial behavior detected", elapsed, probeDelay)
+	}
+	if len(out) != 2 {
+		t.Fatalf("len(out) = %d, want 2 (got %+v)", len(out), out)
+	}
+	for k, v := range out {
+		if !v.OK || v.Used != 1 || v.Max != 2 {
+			t.Errorf("peer %s = %+v, want OK=true Used=1 Max=2", k, v)
+		}
+	}
+}
+
+// TestPerProbeTimeout asserts the helper's interval-driven timeout cap.
+func TestPerProbeTimeout(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval time.Duration
+		want     time.Duration
+	}{
+		{"short interval picks interval/4", 4 * time.Second, 1 * time.Second},
+		{"long interval caps at 5s", 60 * time.Second, 5 * time.Second},
+		{"exactly at 20s clamps at interval/4 = 5s", 20 * time.Second, 5 * time.Second},
+		{"22s caps at 5s", 22 * time.Second, 5 * time.Second},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := perProbeTimeout(tc.interval); got != tc.want {
+				t.Errorf("perProbeTimeout(%v) = %v, want %v", tc.interval, got, tc.want)
+			}
+		})
 	}
 }
