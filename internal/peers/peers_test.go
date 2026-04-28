@@ -353,6 +353,73 @@ func TestPeers_PersistAcrossReopen(t *testing.T) {
 	}
 }
 
+// TestOpenReadOnly_MissingFile_ErrorsWithoutCreating asserts the
+// read-only open errors on a missing path and creates no file.
+func TestOpenReadOnly_MissingFile_ErrorsWithoutCreating(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "absent.db")
+
+	if _, err := peers.OpenReadOnly(path); err == nil {
+		t.Fatal("OpenReadOnly succeeded against a missing file")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("OpenReadOnly created %s (Stat err = %v)", path, err)
+	}
+}
+
+// TestOpenReadOnly_ListReturnsEntries asserts List succeeds on a
+// populated store opened read-only.
+func TestOpenReadOnly_ListReturnsEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "populated.db")
+	rw, err := peers.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	pub := mustKey(t)
+	if err := rw.Add(peers.Peer{Addr: "10.0.0.7:7777", PubKey: pub, Role: peers.RoleStorage}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := rw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	ro, err := peers.OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+
+	listed, err := ro.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(listed) != 1 || listed[0].Addr != "10.0.0.7:7777" {
+		t.Errorf("List = %+v, want one 10.0.0.7:7777 entry", listed)
+	}
+}
+
+// TestOpenReadOnly_AddErrors asserts Add fails on a read-only Store.
+func TestOpenReadOnly_AddErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nowrite.db")
+	rw, err := peers.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := rw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	ro, err := peers.OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+
+	if err := ro.Add(peers.Peer{Addr: "x:1", PubKey: mustKey(t), Role: peers.RolePeer}); err == nil {
+		t.Error("Add on read-only Store succeeded")
+	}
+}
+
 func TestOpen_FailsWhenParentIsFile(t *testing.T) {
 	blocker := filepath.Join(t.TempDir(), "blocker")
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {

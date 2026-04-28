@@ -304,6 +304,72 @@ func TestOperationsAfterClose_Error(t *testing.T) {
 	}
 }
 
+// TestOpenReadOnly_MissingFile_ErrorsWithoutCreating asserts the
+// read-only open errors on a missing path and creates no file.
+func TestOpenReadOnly_MissingFile_ErrorsWithoutCreating(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "absent.db")
+
+	if _, err := index.OpenReadOnly(path); err == nil {
+		t.Fatal("OpenReadOnly succeeded against a missing file")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("OpenReadOnly created %s (Stat err = %v)", path, err)
+	}
+}
+
+// TestOpenReadOnly_ListReturnsEntries asserts List succeeds on a
+// populated file opened read-only.
+func TestOpenReadOnly_ListReturnsEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "populated.db")
+	rw, err := index.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := rw.Put(makeEntry(t, "/seed", 2)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := rw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	ro, err := index.OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+
+	entries, err := ro.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Path != "/seed" {
+		t.Errorf("List entries = %+v, want one /seed entry", entries)
+	}
+}
+
+// TestOpenReadOnly_PutErrors asserts Put fails on a read-only Index.
+func TestOpenReadOnly_PutErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nowrite.db")
+	rw, err := index.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := rw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	ro, err := index.OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+
+	if err := ro.Put(makeEntry(t, "/blocked", 1)); err == nil {
+		t.Error("Put on read-only Index succeeded")
+	}
+}
+
 // TestOpen_ConcurrentLockFails asserts a second Open on the same path errors fast while the first is still active.
 func TestOpen_ConcurrentLockFails(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "locked.db")

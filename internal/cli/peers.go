@@ -67,7 +67,7 @@ func printPeersFromSnapshot(out io.Writer, snap daemon.RuntimeSnapshot) error {
 }
 
 func printPeersFromStore(out io.Writer, dataDir string) error {
-	ps, err := peers.Open(filepath.Join(dataDir, peers.DefaultFilename))
+	ps, err := peers.OpenReadOnly(filepath.Join(dataDir, peers.DefaultFilename))
 	if err != nil {
 		return fmt.Errorf("open peers.db: %w", err)
 	}

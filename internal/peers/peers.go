@@ -154,6 +154,20 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+// OpenReadOnly opens an existing peer store at path with bbolt's shared
+// read lock. Errors on a missing file; never creates files, directories,
+// or buckets.
+func OpenReadOnly(path string) (*Store, error) {
+	db, err := bbolt.Open(path, filePerm, &bbolt.Options{
+		Timeout:  openLockTimeout,
+		ReadOnly: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open peer store %q (read-only): %w", path, err)
+	}
+	return &Store{db: db}, nil
+}
+
 // Close closes the underlying bbolt database. Operations on a closed
 // Store return errors.
 func (s *Store) Close() error { return s.db.Close() }

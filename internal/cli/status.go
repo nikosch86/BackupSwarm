@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"text/tabwriter"
 	"time"
@@ -35,9 +36,9 @@ func newStatusCmd(dataDir *string) *cobra.Command {
 }
 
 func runStatusCmd(dataDir string, out io.Writer) error {
-	id, _, err := node.Ensure(dataDir)
+	id, err := node.Load(dataDir)
 	if err != nil {
-		return fmt.Errorf("ensure identity: %w", err)
+		return fmt.Errorf("load identity: %w", err)
 	}
 
 	snap, snapErr := daemon.ReadRuntimeSnapshot(dataDir)
@@ -73,11 +74,14 @@ func runStatusCmd(dataDir string, out io.Writer) error {
 	})
 }
 
-// ownBackupFromIndex opens the index briefly, lists entries, and
-// returns the aggregated totals.
+// ownBackupFromIndex opens the index read-only and aggregates entries
+// into the snapshot totals. A missing index.db reports zero totals.
 func ownBackupFromIndex(dataDir string) (daemon.RuntimeOwnBackupSnapshot, error) {
-	idx, err := index.Open(filepath.Join(dataDir, "index.db"))
+	idx, err := index.OpenReadOnly(filepath.Join(dataDir, "index.db"))
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return daemon.RuntimeOwnBackupSnapshot{}, nil
+		}
 		return daemon.RuntimeOwnBackupSnapshot{}, fmt.Errorf("open index: %w", err)
 	}
 	defer func() { _ = idx.Close() }()

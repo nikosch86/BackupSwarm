@@ -14,7 +14,16 @@ import (
 	"backupswarm/internal/daemon"
 	"backupswarm/internal/index"
 	"backupswarm/internal/node"
+	"backupswarm/internal/peers"
 )
+
+// mustSeedIdentity provisions a node identity in dataDir.
+func mustSeedIdentity(t *testing.T, dataDir string) {
+	t.Helper()
+	if _, _, err := node.Ensure(dataDir); err != nil {
+		t.Fatalf("seed identity: %v", err)
+	}
+}
 
 func TestStatusCmd_RegisteredOnRoot(t *testing.T) {
 	root := NewRootCmd()
@@ -30,8 +39,25 @@ func TestStatusCmd_RegisteredOnRoot(t *testing.T) {
 	}
 }
 
+// TestStatusCmd_EmptyDataDir_ErrorsWithoutProvisioning asserts status
+// errors against an empty data dir without creating any files.
+func TestStatusCmd_EmptyDataDir_ErrorsWithoutProvisioning(t *testing.T) {
+	dataDir := t.TempDir()
+	err := runStatusCommandErr(t, dataDir)
+	if err == nil {
+		t.Fatal("status returned nil against an empty data dir")
+	}
+	for _, fname := range []string{"node.key", "node.pub", "node.xkey", "index.db", peers.DefaultFilename} {
+		if _, statErr := os.Stat(filepath.Join(dataDir, fname)); !errors.Is(statErr, os.ErrNotExist) {
+			t.Errorf("status provisioned %s (Stat err = %v)", fname, statErr)
+		}
+	}
+}
+
 func TestStatusCmd_FreshDataDir_NoDaemon_NoIndex(t *testing.T) {
-	out := runStatusCommand(t, t.TempDir())
+	dataDir := t.TempDir()
+	mustSeedIdentity(t, dataDir)
+	out := runStatusCommand(t, dataDir)
 	for _, want := range []string{"node_id", "data_dir", "daemon", "not running"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("status output missing %q\n--- output ---\n%s", want, out)
@@ -45,6 +71,7 @@ func TestStatusCmd_FreshDataDir_NoDaemon_NoIndex(t *testing.T) {
 
 func TestStatusCmd_WithIndexEntries_ReportsTotalsAndReplication(t *testing.T) {
 	dataDir := t.TempDir()
+	mustSeedIdentity(t, dataDir)
 	idx, err := index.Open(filepath.Join(dataDir, "index.db"))
 	if err != nil {
 		t.Fatalf("index.Open: %v", err)
@@ -94,6 +121,7 @@ func TestStatusCmd_WithIndexEntries_ReportsTotalsAndReplication(t *testing.T) {
 
 func TestStatusCmd_WithDaemonSnapshot_ReportsModeListenScan(t *testing.T) {
 	dataDir := t.TempDir()
+	mustSeedIdentity(t, dataDir)
 	when := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
 	snap := daemon.RuntimeSnapshot{
 		Mode:       "reconcile",
@@ -118,6 +146,7 @@ func TestStatusCmd_WithDaemonSnapshot_ReportsModeListenScan(t *testing.T) {
 
 func TestStatusCmd_QuotaRatio_OwnBackupNonZero(t *testing.T) {
 	dataDir := t.TempDir()
+	mustSeedIdentity(t, dataDir)
 	if err := daemon.WriteRuntimeSnapshot(dataDir, daemon.RuntimeSnapshot{
 		LocalStore: daemon.RuntimeStoreSnapshot{Used: 5000, Capacity: 0},
 		OwnBackup: daemon.RuntimeOwnBackupSnapshot{
@@ -142,6 +171,7 @@ func TestStatusCmd_QuotaRatio_OwnBackupNonZero(t *testing.T) {
 // the file when a snapshot is published.
 func TestStatusCmd_SnapshotPresent_DoesNotOpenIndex(t *testing.T) {
 	dataDir := t.TempDir()
+	mustSeedIdentity(t, dataDir)
 	if err := daemon.WriteRuntimeSnapshot(dataDir, daemon.RuntimeSnapshot{
 		Mode:       "reconcile",
 		ListenAddr: "127.0.0.1:7777",
@@ -168,6 +198,7 @@ func TestStatusCmd_SnapshotPresent_DoesNotOpenIndex(t *testing.T) {
 // computes own-backup totals from index.db when no runtime.json exists.
 func TestStatusCmd_NoSnapshot_FallsBackToIndex(t *testing.T) {
 	dataDir := t.TempDir()
+	mustSeedIdentity(t, dataDir)
 	idx, err := index.Open(filepath.Join(dataDir, "index.db"))
 	if err != nil {
 		t.Fatalf("index.Open: %v", err)
@@ -192,7 +223,9 @@ func TestStatusCmd_NoSnapshot_FallsBackToIndex(t *testing.T) {
 }
 
 func TestStatusCmd_QuotaRatio_NoOwnBackup(t *testing.T) {
-	out := runStatusCommand(t, t.TempDir())
+	dataDir := t.TempDir()
+	mustSeedIdentity(t, dataDir)
+	out := runStatusCommand(t, dataDir)
 	if !strings.Contains(out, "n/a") {
 		t.Errorf("expected 'n/a' ratio when no own backup, got:\n%s", out)
 	}
@@ -229,6 +262,7 @@ func TestStatusCmd_SnapshotReadFailureSurfaces(t *testing.T) {
 		t.Skip("root bypasses POSIX file-permission checks")
 	}
 	dataDir := t.TempDir()
+	mustSeedIdentity(t, dataDir)
 	if err := daemon.WriteRuntimeSnapshot(dataDir, daemon.RuntimeSnapshot{Mode: "reconcile"}); err != nil {
 		t.Fatalf("WriteRuntimeSnapshot: %v", err)
 	}
@@ -252,6 +286,7 @@ func TestStatusCmd_SnapshotReadFailureSurfaces(t *testing.T) {
 // and the "list index" wrap surfaces from runStatusCmd.
 func TestStatusCmd_FallbackListIndexFailureSurfaces(t *testing.T) {
 	dataDir := t.TempDir()
+	mustSeedIdentity(t, dataDir)
 	dbPath := filepath.Join(dataDir, "index.db")
 	idx, err := index.Open(dbPath)
 	if err != nil {
@@ -282,25 +317,31 @@ func TestStatusCmd_FallbackListIndexFailureSurfaces(t *testing.T) {
 	}
 }
 
-// TestStatusCmd_FallbackOpenIndexFailureSurfaces asserts an unwritable
-// parent dir blocks the no-snapshot fallback's index open and the
-// "open index" wrap surfaces from runStatusCmd.
+// TestStatusCmd_FallbackOpenIndexFailureSurfaces asserts an unreadable
+// index.db surfaces from the no-snapshot fallback wrapped as "open
+// index".
 func TestStatusCmd_FallbackOpenIndexFailureSurfaces(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses POSIX file-permission checks")
 	}
 	dataDir := t.TempDir()
-	if _, _, err := node.Ensure(dataDir); err != nil {
-		t.Fatalf("seed identity: %v", err)
+	mustSeedIdentity(t, dataDir)
+	idxPath := filepath.Join(dataDir, "index.db")
+	idx, err := index.Open(idxPath)
+	if err != nil {
+		t.Fatalf("seed index: %v", err)
 	}
-	if err := os.Chmod(dataDir, 0o500); err != nil {
-		t.Fatalf("chmod: %v", err)
+	if err := idx.Close(); err != nil {
+		t.Fatalf("seed index close: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(dataDir, 0o700) })
+	if err := os.Chmod(idxPath, 0o000); err != nil {
+		t.Fatalf("chmod index: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(idxPath, 0o600) })
 
-	err := runStatusCommandErr(t, dataDir)
+	err = runStatusCommandErr(t, dataDir)
 	if err == nil {
-		t.Fatal("status returned nil on unwritable data dir")
+		t.Fatal("status returned nil on unreadable index")
 	}
 	if !strings.Contains(err.Error(), "open index") {
 		t.Errorf("err = %q, want 'open index' wrap", err)

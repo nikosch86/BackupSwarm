@@ -94,6 +94,20 @@ func Open(path string) (*Index, error) {
 	return &Index{db: db}, nil
 }
 
+// OpenReadOnly opens an existing index at path with bbolt's shared read
+// lock. Errors on a missing file; never creates files, directories, or
+// buckets.
+func OpenReadOnly(path string) (*Index, error) {
+	db, err := bbolt.Open(path, filePerm, &bbolt.Options{
+		Timeout:  openLockTimeout,
+		ReadOnly: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open index %q (read-only): %w", path, err)
+	}
+	return &Index{db: db}, nil
+}
+
 // Close closes the underlying bbolt database. Operations on a closed
 // Index return an error.
 func (ix *Index) Close() error {

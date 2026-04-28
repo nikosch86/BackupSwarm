@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -138,10 +140,19 @@ func TestPeersCmd_FallsBackToPeersDBWhenNoSnapshot(t *testing.T) {
 	}
 }
 
-func TestPeersCmd_EmptyDataDir(t *testing.T) {
-	out := runPeersCommand(t, t.TempDir())
-	if !strings.Contains(out, "NODE_ID") {
-		t.Errorf("expected header even with no peers, got:\n%s", out)
+// TestPeersCmd_EmptyDataDir_ErrorsWithoutProvisioning asserts peers
+// errors against an empty data dir without creating peers.db.
+func TestPeersCmd_EmptyDataDir_ErrorsWithoutProvisioning(t *testing.T) {
+	dataDir := t.TempDir()
+	root := NewRootCmd()
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"--data-dir", dataDir, "peers"})
+	if err := root.Execute(); err == nil {
+		t.Fatal("peers returned nil against an empty data dir")
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, peers.DefaultFilename)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("peers provisioned %s (Stat err = %v)", peers.DefaultFilename, err)
 	}
 }
 
