@@ -11,18 +11,20 @@ import (
 
 func newRunCmd(dataDir *string) *cobra.Command {
 	var (
-		backupDir    string
-		listenAddr   string
-		chunkSize    int
-		scanInterval time.Duration
-		dialTimeout  time.Duration
-		restore      bool
-		purge        bool
-		invite       bool
-		tokenOut     string
-		noCA         bool
-		maxStorage   string
-		redundancy   int
+		backupDir         string
+		listenAddr        string
+		chunkSize         int
+		scanInterval      time.Duration
+		heartbeatInterval time.Duration
+		heartbeatMisses   int
+		dialTimeout       time.Duration
+		restore           bool
+		purge             bool
+		invite            bool
+		tokenOut          string
+		noCA              bool
+		maxStorage        string
+		redundancy        int
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -47,6 +49,9 @@ func newRunCmd(dataDir *string) *cobra.Command {
 			if redundancy < 1 {
 				return fmt.Errorf("--redundancy must be >= 1, got %d", redundancy)
 			}
+			if heartbeatMisses < 1 {
+				return fmt.Errorf("--heartbeat-misses must be >= 1, got %d", heartbeatMisses)
+			}
 			maxBytes, err := parseSize(maxStorage)
 			if err != nil {
 				return fmt.Errorf("--max-storage: %w", err)
@@ -62,6 +67,8 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				ListenAddr:         listenAddr,
 				ChunkSize:          chunkSize,
 				ScanInterval:       scanInterval,
+				HeartbeatInterval:  heartbeatInterval,
+				MissThreshold:      heartbeatMisses,
 				DialTimeout:        dialTimeout,
 				Restore:            restore,
 				Purge:              purge,
@@ -78,6 +85,8 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&listenAddr, "listen", "", "UDP address for the inbound QUIC listener, e.g. 0.0.0.0:7777 (required)")
 	cmd.Flags().IntVar(&chunkSize, "chunk-size", 1<<20, "Target chunk size in bytes (default 1 MiB)")
 	cmd.Flags().DurationVar(&scanInterval, "scan-interval", 60*time.Second, "Period between incremental scan passes")
+	cmd.Flags().DurationVar(&heartbeatInterval, "heartbeat-interval", 30*time.Second, "Period between liveness probes against every live conn")
+	cmd.Flags().IntVar(&heartbeatMisses, "heartbeat-misses", 3, "Consecutive missed heartbeats required to mark a peer unreachable (must be >= 1)")
 	cmd.Flags().DurationVar(&dialTimeout, "dial-timeout", 30*time.Second, "Timeout for the initial dial to the storage peer")
 	cmd.Flags().BoolVar(&restore, "restore", false, "Restore every indexed file under --backup-dir before the scan loop starts (required when backup-dir is empty but the index is populated)")
 	cmd.Flags().BoolVar(&purge, "purge", false, "Clear all indexed chunks from the swarm and reset the index (required alternative to --restore when backup-dir empty)")

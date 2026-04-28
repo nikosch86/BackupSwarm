@@ -166,6 +166,9 @@ type Options struct {
 	// ScanInterval is the period between scan passes. Zero uses a
 	// sensible default (60s).
 	ScanInterval time.Duration
+	// HeartbeatInterval is the period between liveness probes against
+	// every live conn. Zero uses a sensible default (30s).
+	HeartbeatInterval time.Duration
 	// Restore selects ModeRestore when the backup dir is empty but the
 	// index is populated.
 	Restore bool
@@ -188,8 +191,13 @@ type Options struct {
 	// mode transitions). nil is treated as io.Discard.
 	Progress io.Writer
 	// Reachability is the peer reachability map the daemon updates
-	// from connection lifecycle events. nil makes Run allocate one.
+	// from connection lifecycle events. nil makes Run allocate one
+	// using MissThreshold.
 	Reachability *swarm.ReachabilityMap
+	// MissThreshold is the consecutive miss count required to flip a
+	// peer from StateSuspect to StateUnreachable. Only consulted when
+	// Reachability is nil. Zero or negative uses swarm.DefaultMissThreshold.
+	MissThreshold int
 	// MaxStorageBytes caps the local chunk store; 0 means unlimited.
 	// PutChunk over the cap returns the "no_space" wire code.
 	MaxStorageBytes int64
@@ -199,8 +207,9 @@ type Options struct {
 }
 
 const (
-	defaultScanInterval = 60 * time.Second
-	defaultDialTimeout  = 30 * time.Second
+	defaultScanInterval      = 60 * time.Second
+	defaultHeartbeatInterval = 30 * time.Second
+	defaultDialTimeout       = 30 * time.Second
 
 	indexFileName = "index.db"
 	storeDirName  = "chunks"
@@ -216,6 +225,9 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	if opts.ScanInterval == 0 {
 		opts.ScanInterval = defaultScanInterval
+	}
+	if opts.HeartbeatInterval == 0 {
+		opts.HeartbeatInterval = defaultHeartbeatInterval
 	}
 	if opts.DialTimeout == 0 {
 		opts.DialTimeout = defaultDialTimeout
@@ -260,7 +272,11 @@ func Run(ctx context.Context, opts Options) error {
 
 	reach := opts.Reachability
 	if reach == nil {
-		reach = swarm.NewReachabilityMap()
+		n := opts.MissThreshold
+		if n <= 0 {
+			n = swarm.DefaultMissThreshold
+		}
+		reach = swarm.NewReachabilityMapWithThreshold(n)
 	}
 
 	// Classify before binding so flag-validation errors surface cleanly.
@@ -416,6 +432,22 @@ func Run(ctx context.Context, opts Options) error {
 	defer func() { _ = RemoveRuntimeSnapshot(opts.DataDir) }()
 	defer snapWG.Wait()
 	defer snapCancel()
+
+	// hbCtx bounds the heartbeat loop to daemon.Run's lifetime.
+	// Defer order: hbCancel → hbWG.Wait.
+	hbCtx, hbCancel := context.WithCancel(ctx)
+	var hbWG sync.WaitGroup
+	hbWG.Add(1)
+	go func() {
+		defer hbWG.Done()
+		runHeartbeatLoop(hbCtx, heartbeatLoopOptions{
+			interval: opts.HeartbeatInterval,
+			connsFn:  connSet.Snapshot,
+			reach:    reach,
+		})
+	}()
+	defer hbWG.Wait()
+	defer hbCancel()
 
 	// Pure storage-peer role: serve inbound chunks only, no scan loop.
 	if opts.BackupDir == "" {

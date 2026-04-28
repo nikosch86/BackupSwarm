@@ -223,6 +223,122 @@ func TestReachabilityMap_StateString(t *testing.T) {
 	}
 }
 
+func TestStateSuspect_String(t *testing.T) {
+	if got := swarm.StateSuspect.String(); got != "suspect" {
+		t.Errorf("StateSuspect.String() = %q, want %q", got, "suspect")
+	}
+}
+
+func TestRecordHeartbeat_SuccessSetsReachable(t *testing.T) {
+	rm := swarm.NewReachabilityMap()
+	pub := mustEd25519Pub(t)
+	rm.RecordHeartbeat(pub, true)
+	if got := rm.State(pub); got != swarm.StateReachable {
+		t.Errorf("after success got %v, want StateReachable", got)
+	}
+}
+
+func TestRecordHeartbeat_FirstMissTransitionsToSuspect(t *testing.T) {
+	rm := swarm.NewReachabilityMap()
+	pub := mustEd25519Pub(t)
+	rm.RecordHeartbeat(pub, false)
+	if got := rm.State(pub); got != swarm.StateSuspect {
+		t.Errorf("after first miss got %v, want StateSuspect", got)
+	}
+}
+
+func TestRecordHeartbeat_DefaultThresholdMissesGoUnreachable(t *testing.T) {
+	rm := swarm.NewReachabilityMap()
+	pub := mustEd25519Pub(t)
+	for i := 0; i < swarm.DefaultMissThreshold; i++ {
+		rm.RecordHeartbeat(pub, false)
+	}
+	if got := rm.State(pub); got != swarm.StateUnreachable {
+		t.Errorf("after %d misses got %v, want StateUnreachable", swarm.DefaultMissThreshold, got)
+	}
+}
+
+func TestRecordHeartbeat_RecoveryResetsCounter(t *testing.T) {
+	rm := swarm.NewReachabilityMap()
+	pub := mustEd25519Pub(t)
+	for i := 0; i < swarm.DefaultMissThreshold; i++ {
+		rm.RecordHeartbeat(pub, false)
+	}
+	if got := rm.State(pub); got != swarm.StateUnreachable {
+		t.Fatalf("setup: got %v, want StateUnreachable", got)
+	}
+	rm.RecordHeartbeat(pub, true)
+	if got := rm.State(pub); got != swarm.StateReachable {
+		t.Errorf("after recovery got %v, want StateReachable", got)
+	}
+	rm.RecordHeartbeat(pub, false)
+	if got := rm.State(pub); got != swarm.StateSuspect {
+		t.Errorf("recovery+1 miss got %v, want StateSuspect (counter must reset on success)", got)
+	}
+}
+
+func TestRecordHeartbeat_RecoveryFromSuspectResets(t *testing.T) {
+	rm := swarm.NewReachabilityMap()
+	pub := mustEd25519Pub(t)
+	rm.RecordHeartbeat(pub, false)
+	if got := rm.State(pub); got != swarm.StateSuspect {
+		t.Fatalf("setup: got %v, want StateSuspect", got)
+	}
+	rm.RecordHeartbeat(pub, true)
+	if got := rm.State(pub); got != swarm.StateReachable {
+		t.Errorf("recovery from suspect got %v, want StateReachable", got)
+	}
+}
+
+func TestRecordHeartbeat_NilPubIgnored(t *testing.T) {
+	rm := swarm.NewReachabilityMap()
+	rm.RecordHeartbeat(nil, true)
+	rm.RecordHeartbeat([]byte{}, false)
+	if got := rm.Snapshot(); len(got) != 0 {
+		t.Errorf("Snapshot len = %d after nil/empty heartbeat, want 0", len(got))
+	}
+}
+
+func TestRecordHeartbeat_CustomThreshold(t *testing.T) {
+	rm := swarm.NewReachabilityMapWithThreshold(2)
+	pub := mustEd25519Pub(t)
+	rm.RecordHeartbeat(pub, false)
+	if got := rm.State(pub); got != swarm.StateSuspect {
+		t.Errorf("first miss got %v, want StateSuspect", got)
+	}
+	rm.RecordHeartbeat(pub, false)
+	if got := rm.State(pub); got != swarm.StateUnreachable {
+		t.Errorf("second miss (threshold=2) got %v, want StateUnreachable", got)
+	}
+}
+
+func TestNewReachabilityMapWithThreshold_PanicsOnNonPositive(t *testing.T) {
+	for _, n := range []int{0, -1} {
+		func() {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("threshold=%d: expected panic", n)
+				}
+			}()
+			swarm.NewReachabilityMapWithThreshold(n)
+		}()
+	}
+}
+
+func TestMark_ResetsHeartbeatCounter(t *testing.T) {
+	rm := swarm.NewReachabilityMap()
+	pub := mustEd25519Pub(t)
+	rm.RecordHeartbeat(pub, false)
+	if got := rm.State(pub); got != swarm.StateSuspect {
+		t.Fatalf("setup: got %v, want StateSuspect", got)
+	}
+	rm.Mark(pub, swarm.StateReachable)
+	rm.RecordHeartbeat(pub, false)
+	if got := rm.State(pub); got != swarm.StateSuspect {
+		t.Errorf("after Mark+miss got %v, want StateSuspect (Mark must reset counter)", got)
+	}
+}
+
 func TestReachabilityMap_Concurrent(t *testing.T) {
 	rm := swarm.NewReachabilityMap()
 	pubs := make([]ed25519.PublicKey, 16)

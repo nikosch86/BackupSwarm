@@ -260,6 +260,45 @@ func TestRunCmd_AcceptsRedundancy(t *testing.T) {
 	}
 }
 
+// TestRunCmd_RegistersHeartbeatFlags asserts --heartbeat-interval and
+// --heartbeat-misses are exposed on the run subcommand.
+func TestRunCmd_RegistersHeartbeatFlags(t *testing.T) {
+	root := NewRootCmd()
+	var run *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Name() == "run" {
+			run = c
+			break
+		}
+	}
+	if run == nil {
+		t.Fatal("run subcommand missing")
+	}
+	if f := run.Flags().Lookup("heartbeat-interval"); f == nil {
+		t.Error("run is missing --heartbeat-interval flag")
+	}
+	if f := run.Flags().Lookup("heartbeat-misses"); f == nil {
+		t.Error("run is missing --heartbeat-misses flag")
+	}
+}
+
+// TestRunCmd_RejectsZeroHeartbeatMisses asserts --heartbeat-misses 0 fails fast.
+func TestRunCmd_RejectsZeroHeartbeatMisses(t *testing.T) {
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--heartbeat-misses", "0",
+	})
+	if err := root.Execute(); err == nil {
+		t.Error("run accepted --heartbeat-misses 0")
+	}
+}
+
 // TestRunCmd_RefusesWhenLocalEmptyIndexPopulated asserts run wraps daemon.ErrRefuseStart for an empty local with a populated index.
 func TestRunCmd_RefusesWhenLocalEmptyIndexPopulated(t *testing.T) {
 	dataDir := t.TempDir()

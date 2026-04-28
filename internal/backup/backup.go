@@ -462,6 +462,36 @@ func SendGetCapacity(ctx context.Context, conn *bsquic.Conn) (used, max int64, e
 	return sendGetCapacity(ctx, bsquicConnAdapter{c: conn})
 }
 
+// SendPing probes conn for liveness. Returns nil on success or a wrapped
+// transport / peer error.
+func SendPing(ctx context.Context, conn *bsquic.Conn) error {
+	return sendPing(ctx, bsquicConnAdapter{c: conn})
+}
+
+// sendPing opens a MsgPing stream (empty body — the type byte IS the
+// request) and reads the OK/Err response.
+func sendPing(ctx context.Context, conn streamOpener) error {
+	s, err := conn.OpenStream(ctx)
+	if err != nil {
+		return fmt.Errorf("open stream: %w", err)
+	}
+	if err := protocol.WriteMessageType(s, protocol.MsgPing); err != nil {
+		_ = s.Close()
+		return err
+	}
+	if err := s.Close(); err != nil {
+		return fmt.Errorf("close send side: %w", err)
+	}
+	appErr, err := protocol.ReadPingResponse(s)
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+	if appErr != "" {
+		return fmt.Errorf("peer rejected ping: %s", appErr)
+	}
+	return nil
+}
+
 // sendGetCapacity opens a MsgGetCapacity stream (empty body — the type
 // byte is the entire request) and reads the response.
 func sendGetCapacity(ctx context.Context, conn streamOpener) (used, max int64, err error) {
@@ -658,6 +688,8 @@ func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owne
 		return join(ctx, rw, ownerKey)
 	case protocol.MsgGetCapacity:
 		return handleGetCapacityStream(ctx, rw, st)
+	case protocol.MsgPing:
+		return handlePingStream(ctx, rw)
 	default:
 		return fmt.Errorf("unknown message type %d", msgType)
 	}
@@ -716,6 +748,11 @@ func handleDeleteChunkStream(ctx context.Context, rw io.ReadWriter, st *store.St
 // for future error states.
 func handleGetCapacityStream(_ context.Context, rw io.ReadWriter, st *store.Store) error {
 	return protocol.WriteGetCapacityResponse(rw, st.Used(), st.Capacity(), "")
+}
+
+// handlePingStream writes a single OK status byte onto rw.
+func handlePingStream(_ context.Context, rw io.ReadWriter) error {
+	return protocol.WritePingResponse(rw, "")
 }
 
 // handleGetChunkStream authorizes the get against owner (the TLS-

@@ -923,6 +923,15 @@ func TestSendGetCapacity_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestSendPing_RoundTrip exercises the liveness probe end-to-end
+// against a real QUIC peer.
+func TestSendPing_RoundTrip(t *testing.T) {
+	rig := newTestRig(t)
+	if err := backup.SendPing(context.Background(), rig.ownerConn); err != nil {
+		t.Errorf("SendPing: %v", err)
+	}
+}
+
 // TestRun_DefaultsNilProgress asserts a nil opts.Progress falls back to io.Discard without panicking.
 func TestRun_DefaultsNilProgress(t *testing.T) {
 	rig := newTestRig(t)

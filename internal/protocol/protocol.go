@@ -33,6 +33,10 @@ const (
 	// MsgGetCapacity prefixes a capacity-probe stream. The request body
 	// is empty; the response reports the peer's used and max bytes.
 	MsgGetCapacity MessageType = 0x06
+	// MsgPing prefixes a liveness-probe stream. The request body is empty
+	// (the type byte is the entire request); the response is a single
+	// OK/Err status frame.
+	MsgPing MessageType = 0x07
 )
 
 // WriteMessageType writes t as a single byte.

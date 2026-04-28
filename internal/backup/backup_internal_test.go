@@ -1515,6 +1515,26 @@ func TestDispatchStream_GetCapacityRoutesToHandler(t *testing.T) {
 	}
 }
 
+// TestDispatchStream_PingRoutesToHandler asserts the dispatcher
+// recognizes MsgPing and writes a single OK status byte.
+func TestDispatchStream_PingRoutesToHandler(t *testing.T) {
+	var inBuf bytes.Buffer
+	if err := protocol.WriteMessageType(&inBuf, protocol.MsgPing); err != nil {
+		t.Fatalf("WriteMessageType: %v", err)
+	}
+	rw := &fakeStream{writeErrAt: -1, rd: &inBuf}
+	if err := dispatchStream(context.Background(), rw, nil, []byte("any"), nil, nil); err != nil {
+		t.Fatalf("dispatchStream: %v", err)
+	}
+	appErr, err := protocol.ReadPingResponse(&rw.wbuf)
+	if err != nil {
+		t.Fatalf("ReadPingResponse: %v", err)
+	}
+	if appErr != "" {
+		t.Errorf("dispatched ping response appErr = %q, want empty", appErr)
+	}
+}
+
 // TestHandlePutChunkStream_VolumeFullReturnsCode caps the store at fewer
 // bytes than the request blob and asserts the wire response is the
 // "no_space" short code.
@@ -1817,6 +1837,98 @@ func TestSendGetCapacity_ReadResponseError(t *testing.T) {
 	_, _, err := sendGetCapacity(context.Background(), opener)
 	if err == nil {
 		t.Fatal("sendGetCapacity returned nil on empty response stream")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("read response")) {
+		t.Errorf("err = %q, want 'read response' prefix", err)
+	}
+}
+
+// pingOKFrame returns a Ping success frame.
+func pingOKFrame(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := protocol.WritePingResponse(&buf, ""); err != nil {
+		t.Fatalf("build ping ok frame: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// pingErrFrame returns a Ping application-error frame.
+func pingErrFrame(t *testing.T, msg string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := protocol.WritePingResponse(&buf, msg); err != nil {
+		t.Fatalf("build ping err frame: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestSendPing_SuccessPath(t *testing.T) {
+	stream := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(pingOKFrame(t))}
+	opener := &fakeOpener{stream: stream}
+
+	if err := sendPing(context.Background(), opener); err != nil {
+		t.Fatalf("sendPing: %v", err)
+	}
+	if !stream.closed {
+		t.Error("sendPing did not half-close stream")
+	}
+}
+
+func TestSendPing_AppErrorPropagation(t *testing.T) {
+	stream := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(pingErrFrame(t, "ping rejected"))}
+	opener := &fakeOpener{stream: stream}
+
+	err := sendPing(context.Background(), opener)
+	if err == nil {
+		t.Fatal("sendPing returned nil despite app-error frame")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("peer rejected ping")) {
+		t.Errorf("err = %q, want 'peer rejected ping' prefix", err)
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("ping rejected")) {
+		t.Errorf("err = %q, want peer message", err)
+	}
+}
+
+func TestSendPing_OpenStreamError(t *testing.T) {
+	sentinel := errors.New("open boom")
+	opener := &fakeOpener{openErr: sentinel}
+	err := sendPing(context.Background(), opener)
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+}
+
+func TestSendPing_WriteMessageTypeError(t *testing.T) {
+	sentinel := errors.New("type boom")
+	stream := &fakeStream{writeErrAt: 0, writeErr: sentinel}
+	opener := &fakeOpener{stream: stream}
+	err := sendPing(context.Background(), opener)
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+	if !stream.closed {
+		t.Error("sendPing did not close stream after type-write error")
+	}
+}
+
+func TestSendPing_CloseError(t *testing.T) {
+	sentinel := errors.New("close boom")
+	stream := &fakeStream{writeErrAt: -1, closeErr: sentinel}
+	opener := &fakeOpener{stream: stream}
+	err := sendPing(context.Background(), opener)
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+}
+
+func TestSendPing_ReadResponseError(t *testing.T) {
+	stream := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(nil)}
+	opener := &fakeOpener{stream: stream}
+	err := sendPing(context.Background(), opener)
+	if err == nil {
+		t.Fatal("sendPing returned nil on empty response stream")
 	}
 	if !bytes.Contains([]byte(err.Error()), []byte("read response")) {
 		t.Errorf("err = %q, want 'read response' prefix", err)
