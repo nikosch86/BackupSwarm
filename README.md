@@ -175,8 +175,8 @@ Makefile                   All development operations
 
 BackupSwarm holds itself to a few hard rules:
 
-- **No plaintext on the wire or at rest on remote nodes.** Chunks are encrypted with per-chunk symmetric keys; those keys are wrapped per-recipient.
-- **Every protocol message is signed** with the sender's Ed25519 key and verified before it is acted on; replay protection via timestamp + monotonic sequence number.
+- **No plaintext on the wire or at rest on remote nodes.** Each chunk is encrypted with a fresh per-chunk XChaCha20-Poly1305 key (random 24-byte nonce); the symmetric key is wrapped per-recipient via X25519 + `nacl/box.SealAnonymous`.
+- **Every connection is mutually authenticated.** QUIC uses TLS 1.3 with one of two per-swarm trust modes — a swarm-specific Ed25519 CA (default) or pinned-pubkey trust (`--no-ca` swarms). The peer's Ed25519 public key is verified inside the TLS callback in both modes, and the listener's `VerifyPeer` predicate then gates membership against `peers.db`. Application-layer per-message Ed25519 signatures and timestamp/sequence replay protection are not currently implemented (planned, M7.x).
 - **Private key material is protected by 0600 permissions.**
 - **No dependency with a known HIGH or CRITICAL vulnerability ships in the repo.** The `make security-scan` target (Trivy in Docker) enforces this — run it before opening a PR and in CI.
 
