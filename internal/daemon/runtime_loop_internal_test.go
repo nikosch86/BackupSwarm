@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"sort"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"backupswarm/internal/peers"
+	bsquic "backupswarm/internal/quic"
 	"backupswarm/internal/swarm"
 )
 
@@ -138,5 +140,100 @@ func TestBuildSnapshot_LastScanAtPreserved(t *testing.T) {
 	snap := buildSnapshot(RuntimeSnapshot{Mode: "reconcile", ListenAddr: "addr", LastScanAt: when}, nil, nil, nil)
 	if !snap.LastScanAt.Equal(when) {
 		t.Errorf("LastScanAt = %v, want %v", snap.LastScanAt, when)
+	}
+}
+
+func TestBuildSnapshot_OwnBackupPreserved(t *testing.T) {
+	own := RuntimeOwnBackupSnapshot{Files: 5, Bytes: 1024, Chunks: 7, ReplMin: 1, ReplMax: 3, ReplAvg: 2.0}
+	snap := buildSnapshot(RuntimeSnapshot{Mode: "reconcile", ListenAddr: "addr", OwnBackup: own}, nil, nil, nil)
+	if snap.OwnBackup != own {
+		t.Errorf("OwnBackup = %+v, want %+v", snap.OwnBackup, own)
+	}
+}
+
+// TestSnapshotLoop_OwnBackupFnLandsInPublishedSnapshot drives the loop
+// with a stubbed ownBackupFn and asserts the value reaches runtime.json.
+func TestSnapshotLoop_OwnBackupFnLandsInPublishedSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	fixed := RuntimeOwnBackupSnapshot{Files: 7, Bytes: 1234, Chunks: 11, ReplMin: 1, ReplMax: 3, ReplAvg: 2.0}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSnapshotLoop(ctx, snapshotLoopOptions{
+			dataDir:     dir,
+			interval:    time.Hour, // first publish runs synchronously before the ticker
+			listenAddr:  "addr",
+			modeFn:      func() string { return "reconcile" },
+			connsFn:     func() []*bsquic.Conn { return nil },
+			lastScanFn:  func() time.Time { return time.Time{} },
+			ownBackupFn: func() RuntimeOwnBackupSnapshot { return fixed },
+		})
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	var snap RuntimeSnapshot
+	for {
+		var err error
+		snap, err = ReadRuntimeSnapshot(dir)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatalf("snapshot never appeared: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if snap.OwnBackup != fixed {
+		t.Errorf("snap.OwnBackup = %+v, want %+v", snap.OwnBackup, fixed)
+	}
+}
+
+// TestSnapshotLoop_NilOwnBackupFnLeavesZero asserts a nil ownBackupFn
+// doesn't crash and leaves OwnBackup at its zero value.
+func TestSnapshotLoop_NilOwnBackupFnLeavesZero(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSnapshotLoop(ctx, snapshotLoopOptions{
+			dataDir:    dir,
+			interval:   time.Hour,
+			listenAddr: "addr",
+			modeFn:     func() string { return "storage-only" },
+			connsFn:    func() []*bsquic.Conn { return nil },
+			lastScanFn: func() time.Time { return time.Time{} },
+			// ownBackupFn intentionally nil
+		})
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	var snap RuntimeSnapshot
+	for {
+		var err error
+		snap, err = ReadRuntimeSnapshot(dir)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatalf("snapshot never appeared: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if snap.OwnBackup != (RuntimeOwnBackupSnapshot{}) {
+		t.Errorf("OwnBackup = %+v, want zero value with nil ownBackupFn", snap.OwnBackup)
 	}
 }

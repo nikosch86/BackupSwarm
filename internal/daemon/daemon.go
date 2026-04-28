@@ -390,6 +390,7 @@ func Run(ctx context.Context, opts Options) error {
 			connsFn:      connSet.Snapshot,
 			lastScanFn:   lastScanAtFn,
 			storeStatsFn: func() (int64, int64) { return st.Used(), st.Capacity() },
+			ownBackupFn:  ownBackupFromIndex(snapCtx, idx),
 			reach:        reach,
 			peerStore:    peerStore,
 		})

@@ -45,12 +45,13 @@ type RuntimePeerSnapshot struct {
 // Atomic-written to <data-dir>/runtime.json on every tick; removed on
 // shutdown.
 type RuntimeSnapshot struct {
-	Version    int                   `json:"version"`
-	Mode       string                `json:"mode"`
-	ListenAddr string                `json:"listen_addr"`
-	LastScanAt time.Time             `json:"last_scan_at"`
-	LocalStore RuntimeStoreSnapshot  `json:"local_store"`
-	Peers      []RuntimePeerSnapshot `json:"peers"`
+	Version    int                      `json:"version"`
+	Mode       string                   `json:"mode"`
+	ListenAddr string                   `json:"listen_addr"`
+	LastScanAt time.Time                `json:"last_scan_at"`
+	LocalStore RuntimeStoreSnapshot     `json:"local_store"`
+	OwnBackup  RuntimeOwnBackupSnapshot `json:"own_backup"`
+	Peers      []RuntimePeerSnapshot    `json:"peers"`
 }
 
 // WriteRuntimeSnapshot atomically writes s to <dir>/runtime.json.

@@ -116,6 +116,7 @@ type snapshotLoopOptions struct {
 	connsFn      func() []*bsquic.Conn
 	lastScanFn   func() time.Time
 	storeStatsFn func() (used, capacity int64)
+	ownBackupFn  func() RuntimeOwnBackupSnapshot
 	reach        *swarm.ReachabilityMap
 	peerStore    *peers.Store
 	nowFn        func() time.Time
@@ -145,6 +146,9 @@ func runSnapshotLoop(ctx context.Context, opts snapshotLoopOptions) {
 		if opts.storeStatsFn != nil {
 			used, capacity := opts.storeStatsFn()
 			base.LocalStore = RuntimeStoreSnapshot{Used: used, Capacity: capacity}
+		}
+		if opts.ownBackupFn != nil {
+			base.OwnBackup = opts.ownBackupFn()
 		}
 		caps := probeAllCapacities(ctx, opts.connsFn(), opts.nowFn)
 		snap := buildSnapshot(base, known, opts.reach, caps)

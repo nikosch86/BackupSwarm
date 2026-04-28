@@ -40,22 +40,19 @@ func runStatusCmd(dataDir string, out io.Writer) error {
 		return fmt.Errorf("ensure identity: %w", err)
 	}
 
-	idx, err := index.Open(filepath.Join(dataDir, "index.db"))
-	if err != nil {
-		return fmt.Errorf("open index: %w", err)
-	}
-	defer func() { _ = idx.Close() }()
-	entries, err := idx.List()
-	if err != nil {
-		return fmt.Errorf("list index: %w", err)
-	}
-	own := computeOwnBackup(entries)
-
 	snap, snapErr := daemon.ReadRuntimeSnapshot(dataDir)
 	if snapErr != nil && !errors.Is(snapErr, daemon.ErrNoRuntimeSnapshot) {
 		return fmt.Errorf("read runtime snapshot: %w", snapErr)
 	}
 	daemonRunning := snapErr == nil
+
+	own := snap.OwnBackup
+	if !daemonRunning {
+		own, err = ownBackupFromIndex(dataDir)
+		if err != nil {
+			return err
+		}
+	}
 
 	return writeStatus(out, statusReport{
 		NodeID:        id.ShortID(),
@@ -67,53 +64,28 @@ func runStatusCmd(dataDir string, out io.Writer) error {
 		StoreUsed:     snap.LocalStore.Used,
 		StoreCapacity: snap.LocalStore.Capacity,
 		StoreKnown:    daemonRunning,
-		OwnFiles:      own.files,
-		OwnBytes:      own.bytes,
-		OwnChunks:     own.chunks,
-		ReplMin:       own.replMin,
-		ReplMax:       own.replMax,
-		ReplAvg:       own.replAvg,
+		OwnFiles:      own.Files,
+		OwnBytes:      own.Bytes,
+		OwnChunks:     own.Chunks,
+		ReplMin:       own.ReplMin,
+		ReplMax:       own.ReplMax,
+		ReplAvg:       own.ReplAvg,
 	})
 }
 
-type ownBackupTotals struct {
-	files, chunks    int
-	bytes            int64
-	replMin, replMax int
-	replAvg          float64
-}
-
-// computeOwnBackup aggregates per-file totals and per-chunk replication
-// stats from the local index. Empty input returns the zero value.
-func computeOwnBackup(entries []index.FileEntry) ownBackupTotals {
-	var t ownBackupTotals
-	if len(entries) == 0 {
-		return t
+// ownBackupFromIndex opens the index briefly, lists entries, and
+// returns the aggregated totals.
+func ownBackupFromIndex(dataDir string) (daemon.RuntimeOwnBackupSnapshot, error) {
+	idx, err := index.Open(filepath.Join(dataDir, "index.db"))
+	if err != nil {
+		return daemon.RuntimeOwnBackupSnapshot{}, fmt.Errorf("open index: %w", err)
 	}
-	t.files = len(entries)
-	t.replMin = -1
-	var sumPeers int
-	for _, e := range entries {
-		t.bytes += e.Size
-		for _, c := range e.Chunks {
-			t.chunks++
-			r := len(c.Peers)
-			if t.replMin < 0 || r < t.replMin {
-				t.replMin = r
-			}
-			if r > t.replMax {
-				t.replMax = r
-			}
-			sumPeers += r
-		}
+	defer func() { _ = idx.Close() }()
+	entries, err := idx.List()
+	if err != nil {
+		return daemon.RuntimeOwnBackupSnapshot{}, fmt.Errorf("list index: %w", err)
 	}
-	if t.replMin < 0 {
-		t.replMin = 0
-	}
-	if t.chunks > 0 {
-		t.replAvg = float64(sumPeers) / float64(t.chunks)
-	}
-	return t
+	return daemon.ComputeOwnBackup(entries), nil
 }
 
 type statusReport struct {

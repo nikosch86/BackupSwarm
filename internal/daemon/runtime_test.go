@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"backupswarm/internal/daemon"
+	"backupswarm/internal/index"
 )
 
 func sampleSnapshot() daemon.RuntimeSnapshot {
@@ -206,6 +207,86 @@ func TestDaemon_PublishesAndRemovesRuntimeSnapshot(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, daemon.RuntimeSnapshotFilename)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("runtime.json still present after shutdown: %v", err)
+	}
+}
+
+// TestDaemon_RuntimeSnapshotCarriesOwnBackup pre-seeds index.db, starts
+// the daemon, and asserts runtime.json's OwnBackup matches the seed.
+func TestDaemon_RuntimeSnapshotCarriesOwnBackup(t *testing.T) {
+	dataDir := t.TempDir()
+	idx, err := index.Open(filepath.Join(dataDir, "index.db"))
+	if err != nil {
+		t.Fatalf("seed index.Open: %v", err)
+	}
+	pubA := []byte{0xa1}
+	pubB := []byte{0xb2}
+	if err := idx.Put(index.FileEntry{
+		Path: "f1", Size: 100, ModTime: time.Now(),
+		Chunks: []index.ChunkRef{{Size: 50, Peers: [][]byte{pubA, pubB}}},
+	}); err != nil {
+		t.Fatalf("seed Put: %v", err)
+	}
+	if err := idx.Put(index.FileEntry{
+		Path: "f2", Size: 300, ModTime: time.Now(),
+		Chunks: []index.ChunkRef{
+			{Size: 150, Peers: [][]byte{pubA}},
+			{Size: 150, Peers: [][]byte{pubA, pubB}},
+		},
+	}); err != nil {
+		t.Fatalf("seed Put 2: %v", err)
+	}
+	if err := idx.Close(); err != nil {
+		t.Fatalf("seed Close: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.Run(ctx, daemon.Options{
+			DataDir:      dataDir,
+			ListenAddr:   "127.0.0.1:0",
+			Progress:     io.Discard,
+			ScanInterval: 100 * time.Millisecond,
+		})
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	var snap daemon.RuntimeSnapshot
+	for {
+		var readErr error
+		snap, readErr = daemon.ReadRuntimeSnapshot(dataDir)
+		if readErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatalf("runtime.json never appeared (last err: %v)", readErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	want := daemon.RuntimeOwnBackupSnapshot{
+		Files:   2,
+		Bytes:   400,
+		Chunks:  3,
+		ReplMin: 1,
+		ReplMax: 2,
+		ReplAvg: float64(2+1+2) / 3.0,
+	}
+	if snap.OwnBackup != want {
+		t.Errorf("OwnBackup = %+v, want %+v", snap.OwnBackup, want)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("daemon.Run: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("daemon.Run did not return within 3s of cancel")
 	}
 }
 
