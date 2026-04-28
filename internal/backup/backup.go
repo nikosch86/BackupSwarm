@@ -455,6 +455,12 @@ func SendGetChunk(ctx context.Context, conn *bsquic.Conn, hash [32]byte) ([]byte
 	return sendGetChunk(ctx, bsquicConnAdapter{c: conn}, hash)
 }
 
+// SendChunk uploads blob via PutChunk and returns the peer-reported
+// content hash. Wraps any peer-reported application error.
+func SendChunk(ctx context.Context, conn *bsquic.Conn, blob []byte) ([32]byte, error) {
+	return sendChunk(ctx, bsquicConnAdapter{c: conn}, blob)
+}
+
 // SendGetCapacity probes conn for the peer's used/max byte counts;
 // max=0 reports the peer as unlimited. Wraps any peer-reported
 // application error.

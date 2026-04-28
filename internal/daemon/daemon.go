@@ -30,6 +30,7 @@ import (
 	"backupswarm/internal/peers"
 	"backupswarm/internal/protocol"
 	bsquic "backupswarm/internal/quic"
+	"backupswarm/internal/replication"
 	"backupswarm/internal/restore"
 	"backupswarm/internal/store"
 	"backupswarm/internal/swarm"
@@ -540,7 +541,36 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	return runScanLoop(ctx, scanOpts, opts.ScanInterval, serveErrCh, connsFn, sweep, func() {
 		lastScanAtNanos.Store(time.Now().UnixNano())
+		replicateOnce(ctx, idx, connsFn(), reach, opts.Redundancy, opts.Progress)
 	})
+}
+
+// replicateOnce runs one re-replication sweep against the live storage
+// conns. Errors log and return; replication is best-effort and never
+// blocks the scan cadence.
+func replicateOnce(ctx context.Context, idx *index.Index, conns []*bsquic.Conn, reach *swarm.ReachabilityMap, redundancy int, progress io.Writer) {
+	if redundancy <= 0 || idx == nil || reach == nil {
+		return
+	}
+	if err := replication.Run(ctx, replication.RunOptions{
+		Index:      idx,
+		Conns:      toReplicationConns(conns),
+		LostFn:     reach.IsLost,
+		Redundancy: redundancy,
+		Progress:   progress,
+	}); err != nil {
+		slog.WarnContext(ctx, "replication sweep failed", "err", err)
+	}
+}
+
+// toReplicationConns lifts each *bsquic.Conn into the replication.Conn
+// interface slice the package consumes.
+func toReplicationConns(conns []*bsquic.Conn) []replication.Conn {
+	repConns := make([]replication.Conn, len(conns))
+	for i, c := range conns {
+		repConns[i] = c
+	}
+	return repConns
 }
 
 // waitForServe blocks until ctx is cancelled (clean shutdown) or the
