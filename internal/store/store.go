@@ -82,6 +82,11 @@ type Store struct {
 	// of truth for the running tally.
 	usedMu sync.Mutex
 	used   int64
+
+	// hashLocks serializes the reserve+claim+write+commit window per
+	// content hash so concurrent identical Puts cannot double-reserve.
+	// Entries leak for the process lifetime; rebuilt fresh on startup.
+	hashLocks sync.Map
 }
 
 // New opens (or initializes) a store rooted at dir with no capacity
@@ -127,16 +132,12 @@ func (s *Store) Close() error {
 // Callers needing owner-authorized delete must use PutOwned instead.
 func (s *Store) Put(data []byte) ([sha256.Size]byte, error) {
 	hash := sha256.Sum256(data)
-	release, err := s.reserveForBlob(hash, int64(len(data)))
+	finish, err := s.reserveForBlob(hash, int64(len(data)))
 	if err != nil {
 		return hash, err
 	}
 	committed := false
-	defer func() {
-		if !committed {
-			release()
-		}
-	}()
+	defer func() { finish(committed) }()
 	if _, err := s.writeBlob(data, hash); err != nil {
 		return hash, err
 	}
@@ -149,16 +150,12 @@ func (s *Store) Put(data []byte) ([sha256.Size]byte, error) {
 // no recorded owner is treated as quarantined and also returns ErrOwnerMismatch.
 func (s *Store) PutOwned(data, owner []byte) ([sha256.Size]byte, error) {
 	hash := sha256.Sum256(data)
-	release, err := s.reserveForBlob(hash, int64(len(data)))
+	finish, err := s.reserveForBlob(hash, int64(len(data)))
 	if err != nil {
 		return hash, err
 	}
 	committed := false
-	defer func() {
-		if !committed {
-			release()
-		}
-	}()
+	defer func() { finish(committed) }()
 	if err := s.claimOwner(hash, owner); err != nil {
 		return hash, err
 	}
@@ -169,21 +166,40 @@ func (s *Store) PutOwned(data, owner []byte) ([sha256.Size]byte, error) {
 	return hash, nil
 }
 
-// reserveForBlob reserves n bytes when the blob is not yet on disk and
-// returns a release closure for rollback; an already-present blob gets
-// a no-op release.
-func (s *Store) reserveForBlob(hash [sha256.Size]byte, n int64) (release func(), err error) {
+// reserveForBlob takes the per-hash lock, reserves n bytes when the blob
+// is not yet on disk, and returns a finish closure that always unlocks
+// and rolls back the reservation when the caller did not commit.
+// An already-present blob gets the lock + a no-op rollback.
+func (s *Store) reserveForBlob(hash [sha256.Size]byte, n int64) (finish func(committed bool), err error) {
+	mu := s.lockForHash(hash)
+	mu.Lock()
 	has, err := s.blobOnDisk(hash)
 	if err != nil {
+		mu.Unlock()
 		return nil, err
 	}
 	if has {
-		return func() {}, nil
+		return func(bool) { mu.Unlock() }, nil
 	}
 	if err := s.reserve(n); err != nil {
+		mu.Unlock()
 		return nil, err
 	}
-	return func() { s.release(n) }, nil
+	return func(committed bool) {
+		if !committed {
+			s.release(n)
+		}
+		mu.Unlock()
+	}, nil
+}
+
+// lockForHash returns a per-hash mutex, lazily creating one on first use.
+func (s *Store) lockForHash(hash [sha256.Size]byte) *sync.Mutex {
+	if v, ok := s.hashLocks.Load(hash); ok {
+		return v.(*sync.Mutex)
+	}
+	actual, _ := s.hashLocks.LoadOrStore(hash, &sync.Mutex{})
+	return actual.(*sync.Mutex)
 }
 
 // writeBlob writes data to its content-addressed path. A populated

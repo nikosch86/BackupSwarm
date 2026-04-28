@@ -327,6 +327,69 @@ func TestPut_ConcurrentSameHash(t *testing.T) {
 	}
 }
 
+func TestPut_ConcurrentSameHash_NoCapacityDrift(t *testing.T) {
+	root := t.TempDir()
+	s, err := store.NewWithMax(root, 1<<20)
+	if err != nil {
+		t.Fatalf("NewWithMax: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	data := []byte("capacity drift bait")
+	const writers = 16
+
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := s.Put(data); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("concurrent Put: %v", err)
+	}
+	if got, want := s.Used(), int64(len(data)); got != want {
+		t.Errorf("Used() = %d after concurrent identical Puts, want %d", got, want)
+	}
+}
+
+func TestPutOwned_ConcurrentSameHash_NoCapacityDrift(t *testing.T) {
+	root := t.TempDir()
+	s, err := store.NewWithMax(root, 1<<20)
+	if err != nil {
+		t.Fatalf("NewWithMax: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	data := []byte("owned capacity drift bait")
+	owner := []byte("alice")
+	const writers = 16
+
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := s.PutOwned(data, owner); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("concurrent PutOwned: %v", err)
+	}
+	if got, want := s.Used(), int64(len(data)); got != want {
+		t.Errorf("Used() = %d after concurrent identical PutOwned, want %d", got, want)
+	}
+}
+
 func TestPut_ShardDirReadOnly(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("perm-based error injection requires POSIX")
