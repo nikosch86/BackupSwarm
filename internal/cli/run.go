@@ -17,6 +17,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		scanInterval      time.Duration
 		heartbeatInterval time.Duration
 		heartbeatMisses   int
+		gracePeriod       time.Duration
 		dialTimeout       time.Duration
 		restore           bool
 		purge             bool
@@ -52,6 +53,9 @@ func newRunCmd(dataDir *string) *cobra.Command {
 			if heartbeatMisses < 1 {
 				return fmt.Errorf("--heartbeat-misses must be >= 1, got %d", heartbeatMisses)
 			}
+			if gracePeriod < 0 {
+				return fmt.Errorf("--grace-period must be >= 0, got %v", gracePeriod)
+			}
 			maxBytes, err := parseSize(maxStorage)
 			if err != nil {
 				return fmt.Errorf("--max-storage: %w", err)
@@ -69,6 +73,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				ScanInterval:       scanInterval,
 				HeartbeatInterval:  heartbeatInterval,
 				MissThreshold:      heartbeatMisses,
+				GracePeriod:        gracePeriod,
 				DialTimeout:        dialTimeout,
 				Restore:            restore,
 				Purge:              purge,
@@ -87,6 +92,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().DurationVar(&scanInterval, "scan-interval", 60*time.Second, "Period between incremental scan passes")
 	cmd.Flags().DurationVar(&heartbeatInterval, "heartbeat-interval", 30*time.Second, "Period between liveness probes against every live conn")
 	cmd.Flags().IntVar(&heartbeatMisses, "heartbeat-misses", 3, "Consecutive missed heartbeats required to mark a peer unreachable (must be >= 1)")
+	cmd.Flags().DurationVar(&gracePeriod, "grace-period", 24*time.Hour, "Duration a peer must stay unreachable before being treated as lost (eligible for re-replication). 0 = lost immediately.")
 	cmd.Flags().DurationVar(&dialTimeout, "dial-timeout", 30*time.Second, "Timeout for the initial dial to the storage peer")
 	cmd.Flags().BoolVar(&restore, "restore", false, "Restore every indexed file under --backup-dir before the scan loop starts (required when backup-dir is empty but the index is populated)")
 	cmd.Flags().BoolVar(&purge, "purge", false, "Clear all indexed chunks from the swarm and reset the index (required alternative to --restore when backup-dir empty)")

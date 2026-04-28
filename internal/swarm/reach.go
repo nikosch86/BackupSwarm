@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sync"
+	"time"
 
 	bsquic "backupswarm/internal/quic"
 )
@@ -47,20 +48,25 @@ func (s State) String() string {
 // ReachabilityMap is the in-memory reachability state per known peer,
 // keyed by hex(pubkey). Safe for concurrent use.
 type ReachabilityMap struct {
-	mu            sync.Mutex
-	states        map[string]State
-	misses        map[string]int
-	missThreshold int
+	mu               sync.Mutex
+	states           map[string]State
+	misses           map[string]int
+	missThreshold    int
+	gracePeriod      time.Duration
+	now              func() time.Time
+	unreachableSince map[string]time.Time
+	lostEnabled      bool
 }
 
-// NewReachabilityMap returns a map using DefaultMissThreshold.
+// NewReachabilityMap returns a map using DefaultMissThreshold; IsLost
+// always returns false.
 func NewReachabilityMap() *ReachabilityMap {
 	return NewReachabilityMapWithThreshold(DefaultMissThreshold)
 }
 
-// NewReachabilityMapWithThreshold returns a map using n as the consecutive
-// miss count required for the StateSuspect → StateUnreachable transition.
-// n must be positive; non-positive values panic.
+// NewReachabilityMapWithThreshold returns a map using n as the
+// suspect→unreachable miss count; IsLost always returns false. n must
+// be positive; non-positive values panic.
 func NewReachabilityMapWithThreshold(n int) *ReachabilityMap {
 	if n <= 0 {
 		panic(fmt.Sprintf("swarm: miss threshold must be positive, got %d", n))
@@ -72,9 +78,33 @@ func NewReachabilityMapWithThreshold(n int) *ReachabilityMap {
 	}
 }
 
-// Mark records s as the latest state for pub and resets the per-peer
-// miss counter. Marking StateUnknown removes the entry. A nil or empty
-// pub is silently ignored.
+// NewReachabilityMapWithGrace returns a map where IsLost flips true
+// once a peer has been continuously StateUnreachable for grace; now nil
+// defaults to time.Now. missThreshold>0 and grace>=0 or panic.
+func NewReachabilityMapWithGrace(missThreshold int, grace time.Duration, now func() time.Time) *ReachabilityMap {
+	if missThreshold <= 0 {
+		panic(fmt.Sprintf("swarm: miss threshold must be positive, got %d", missThreshold))
+	}
+	if grace < 0 {
+		panic(fmt.Sprintf("swarm: grace must be non-negative, got %v", grace))
+	}
+	if now == nil {
+		now = time.Now
+	}
+	return &ReachabilityMap{
+		states:           make(map[string]State),
+		misses:           make(map[string]int),
+		missThreshold:    missThreshold,
+		gracePeriod:      grace,
+		now:              now,
+		unreachableSince: make(map[string]time.Time),
+		lostEnabled:      true,
+	}
+}
+
+// Mark records s for pub, resets the per-peer miss counter, stamps or
+// clears the grace timer on transitions into/out of StateUnreachable,
+// and is a no-op for nil/empty pub. StateUnknown removes the entry.
 func (r *ReachabilityMap) Mark(pub []byte, s State) {
 	if len(pub) == 0 {
 		return
@@ -85,15 +115,18 @@ func (r *ReachabilityMap) Mark(pub []byte, s State) {
 	if s == StateUnknown {
 		delete(r.states, key)
 		delete(r.misses, key)
+		r.clearUnreachableSince(key)
 		return
 	}
+	prev := r.states[key]
 	r.states[key] = s
 	delete(r.misses, key)
+	r.maintainUnreachableSince(key, prev, s)
 }
 
-// RecordHeartbeat updates pub's state from a single heartbeat outcome.
-// ok=true sets StateReachable and resets the miss counter; consecutive
-// misses set StateSuspect, then StateUnreachable at missThreshold.
+// RecordHeartbeat sets StateReachable on ok=true (resets misses) and
+// StateSuspect→StateUnreachable as consecutive misses cross
+// missThreshold. Stamps and clears the grace timer like Mark.
 func (r *ReachabilityMap) RecordHeartbeat(pub []byte, ok bool) {
 	if len(pub) == 0 {
 		return
@@ -101,17 +134,89 @@ func (r *ReachabilityMap) RecordHeartbeat(pub []byte, ok bool) {
 	key := hex.EncodeToString(pub)
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	prev := r.states[key]
 	if ok {
 		r.states[key] = StateReachable
 		delete(r.misses, key)
+		r.maintainUnreachableSince(key, prev, StateReachable)
 		return
 	}
 	r.misses[key]++
 	if r.misses[key] >= r.missThreshold {
 		r.states[key] = StateUnreachable
+		r.maintainUnreachableSince(key, prev, StateUnreachable)
 		return
 	}
 	r.states[key] = StateSuspect
+	r.maintainUnreachableSince(key, prev, StateSuspect)
+}
+
+// maintainUnreachableSince stamps or clears the grace timer based on the
+// state transition. Caller holds r.mu.
+func (r *ReachabilityMap) maintainUnreachableSince(key string, prev, next State) {
+	if !r.lostEnabled {
+		return
+	}
+	if next == StateUnreachable {
+		if prev != StateUnreachable {
+			r.unreachableSince[key] = r.now()
+		}
+		return
+	}
+	delete(r.unreachableSince, key)
+}
+
+// clearUnreachableSince drops the grace timer entry for key. Caller
+// holds r.mu.
+func (r *ReachabilityMap) clearUnreachableSince(key string) {
+	if !r.lostEnabled {
+		return
+	}
+	delete(r.unreachableSince, key)
+}
+
+// IsLost reports whether pub has been continuously StateUnreachable
+// for at least the configured grace period. Always false for nil/empty
+// pub, non-Unreachable peers, and maps without grace machinery.
+func (r *ReachabilityMap) IsLost(pub []byte) bool {
+	if len(pub) == 0 {
+		return false
+	}
+	key := hex.EncodeToString(pub)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.lostEnabled {
+		return false
+	}
+	if r.states[key] != StateUnreachable {
+		return false
+	}
+	since := r.unreachableSince[key]
+	return r.now().Sub(since) >= r.gracePeriod
+}
+
+// LostPubs returns a fresh copy of every pubkey for which IsLost is
+// currently true. Returns an empty slice on maps without grace-period
+// machinery.
+func (r *ReachabilityMap) LostPubs() [][]byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.lostEnabled {
+		return nil
+	}
+	now := r.now()
+	out := make([][]byte, 0, len(r.unreachableSince))
+	for k, since := range r.unreachableSince {
+		if now.Sub(since) < r.gracePeriod {
+			continue
+		}
+		raw, err := hex.DecodeString(k)
+		if err != nil {
+			continue
+		}
+		out = append(out, bytes.Clone(raw))
+	}
+	return out
 }
 
 // MarkConn records s for conn.RemotePub(). A nil conn or empty remote

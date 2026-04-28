@@ -6,9 +6,17 @@ import (
 	"crypto/rand"
 	"sync"
 	"testing"
+	"time"
 
 	"backupswarm/internal/swarm"
 )
+
+// manualClock is a test-only time source for grace-period arithmetic.
+type manualClock struct{ t time.Time }
+
+func newManualClock() *manualClock             { return &manualClock{t: time.Unix(1_000_000, 0)} }
+func (c *manualClock) Now() time.Time          { return c.t }
+func (c *manualClock) Advance(d time.Duration) { c.t = c.t.Add(d) }
 
 func mustEd25519Pub(t *testing.T) ed25519.PublicKey {
 	t.Helper()
@@ -339,6 +347,326 @@ func TestMark_ResetsHeartbeatCounter(t *testing.T) {
 	}
 }
 
+func TestNewReachabilityMapWithGrace_PanicsOnNonPositiveThreshold(t *testing.T) {
+	clock := newManualClock()
+	for _, n := range []int{0, -1} {
+		func() {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("threshold=%d: expected panic", n)
+				}
+			}()
+			swarm.NewReachabilityMapWithGrace(n, time.Hour, clock.Now)
+		}()
+	}
+}
+
+func TestNewReachabilityMapWithGrace_PanicsOnNegativeGrace(t *testing.T) {
+	clock := newManualClock()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Errorf("grace=-1s: expected panic")
+		}
+	}()
+	swarm.NewReachabilityMapWithGrace(3, -1*time.Second, clock.Now)
+}
+
+func TestNewReachabilityMapWithGrace_NilNowDefaultsToTimeNow(t *testing.T) {
+	rm := swarm.NewReachabilityMapWithGrace(3, time.Hour, nil)
+	pub := mustEd25519Pub(t)
+	rm.Mark(pub, swarm.StateUnreachable)
+	// IsLost must not panic with nil now; by default the freshly-stamped
+	// timestamp is now() so IsLost is false until grace elapses.
+	if rm.IsLost(pub) {
+		t.Error("IsLost with nil now and grace=1h returned true on fresh transition")
+	}
+}
+
+func TestIsLost_StateUnknownReturnsFalse(t *testing.T) {
+	clock := newManualClock()
+	rm := swarm.NewReachabilityMapWithGrace(3, time.Hour, clock.Now)
+	pub := mustEd25519Pub(t)
+	if rm.IsLost(pub) {
+		t.Error("IsLost on Unknown peer = true, want false")
+	}
+}
+
+func TestIsLost_StateReachableReturnsFalse(t *testing.T) {
+	clock := newManualClock()
+	rm := swarm.NewReachabilityMapWithGrace(3, time.Hour, clock.Now)
+	pub := mustEd25519Pub(t)
+	rm.Mark(pub, swarm.StateReachable)
+	clock.Advance(48 * time.Hour)
+	if rm.IsLost(pub) {
+		t.Error("IsLost on Reachable peer = true, want false")
+	}
+}
+
+func TestIsLost_StateSuspectReturnsFalse(t *testing.T) {
+	clock := newManualClock()
+	rm := swarm.NewReachabilityMapWithGrace(3, time.Hour, clock.Now)
+	pub := mustEd25519Pub(t)
+	rm.RecordHeartbeat(pub, false)
+	if got := rm.State(pub); got != swarm.StateSuspect {
+		t.Fatalf("setup: state = %v, want StateSuspect", got)
+	}
+	clock.Advance(48 * time.Hour)
+	if rm.IsLost(pub) {
+		t.Error("IsLost on Suspect peer = true, want false")
+	}
+}
+
+func TestIsLost_UnreachableBeforeGraceReturnsFalse(t *testing.T) {
+	clock := newManualClock()
+	rm := swarm.NewReachabilityMapWithGrace(3, time.Hour, clock.Now)
+	pub := mustEd25519Pub(t)
+	rm.Mark(pub, swarm.StateUnreachable)
+	clock.Advance(30 * time.Minute)
+	if rm.IsLost(pub) {
+		t.Error("IsLost before grace elapsed = true, want false")
+	}
+}
+
+func TestIsLost_UnreachableAtGraceBoundaryReturnsTrue(t *testing.T) {
+	clock := newManualClock()
+	grace := time.Hour
+	rm := swarm.NewReachabilityMapWithGrace(3, grace, clock.Now)
+	pub := mustEd25519Pub(t)
+	rm.Mark(pub, swarm.StateUnreachable)
+	clock.Advance(grace) // exactly at the boundary
+	if !rm.IsLost(pub) {
+		t.Error("IsLost at grace boundary = false, want true")
+	}
+}
+
+func TestIsLost_UnreachablePastGraceReturnsTrue(t *testing.T) {
+	clock := newManualClock()
+	rm := swarm.NewReachabilityMapWithGrace(3, time.Hour, clock.Now)
+	pub := mustEd25519Pub(t)
+	rm.Mark(pub, swarm.StateUnreachable)
+	clock.Advance(2 * time.Hour)
+	if !rm.IsLost(pub) {
+		t.Error("IsLost past grace = false, want true")
+	}
+}
+
+func TestIsLost_RecoveryClearsTimer(t *testing.T) {
+	clock := newManualClock()
+	rm := swarm.NewReachabilityMapWithGrace(3, time.Hour, clock.Now)
+	pub := mustEd25519Pub(t)
+	rm.Mark(pub, swarm.StateUnreachable)
+	clock.Advance(30 * time.Minute)
+	rm.Mark(pub, swarm.StateReachable)
+	clock.Advance(2 * time.Hour) // would be past grace if timer hadn't cleared
+	if rm.IsLost(pub) {
+		t.Error("IsLost after recovery = true, want false (timer must clear on transition out)")
+	}
+}
+
+func TestIsLost_RecoveryViaHeartbeatClearsTimer(t *testing.T) {
+	clock := newManualClock()
+	rm := swarm.NewReachabilityMapWithGrace(3, time.Hour, clock.Now)
+	pub := mustEd25519Pub(t)
+	rm.Mark(pub, swarm.StateUnreachable)
+	rm.RecordHeartbeat(pub, true) // ok=true → StateReachable
+	clock.Advance(2 * time.Hour)
+	if rm.IsLost(pub) {
+		t.Error("IsLost after heartbeat recovery = true, want false")
+	}
+}
+
+func TestIsLost_ReflapResetsTimer(t *testing.T) {
+	clock := newManualClock()
+	grace := time.Hour
+	rm := swarm.NewReachabilityMapWithGrace(3, grace, clock.Now)
+	pub := mustEd25519Pub(t)
+
+	rm.Mark(pub, swarm.StateUnreachable)
+	clock.Advance(50 * time.Minute)
+	rm.Mark(pub, swarm.StateReachable) // clears timer
+	clock.Advance(50 * time.Minute)
+	rm.Mark(pub, swarm.StateUnreachable) // fresh timer at t = +100m
+	clock.Advance(30 * time.Minute)      // timer at +30m relative to fresh start
+	if rm.IsLost(pub) {
+		t.Error("IsLost after reflap before fresh grace = true, want false")
+	}
+	clock.Advance(31 * time.Minute) // total elapsed since fresh start = 61m > grace
+	if !rm.IsLost(pub) {
+		t.Error("IsLost after reflap past fresh grace = false, want true")
+	}
+}
+
+func TestIsLost_RepeatedUnreachableMarkPreservesOriginalTimer(t *testing.T) {
+	clock := newManualClock()
+	grace := time.Hour
+	rm := swarm.NewReachabilityMapWithGrace(3, grace, clock.Now)
+	pub := mustEd25519Pub(t)
+
+	rm.Mark(pub, swarm.StateUnreachable) // since = t0
+	clock.Advance(50 * time.Minute)
+	rm.Mark(pub, swarm.StateUnreachable) // must NOT reset since-time
+	clock.Advance(11 * time.Minute)      // 61m total > grace
+	if !rm.IsLost(pub) {
+		t.Error("IsLost: repeated Unreachable mark reset the timer; want preserved")
+	}
+}
+
+func TestIsLost_HeartbeatTransitionToUnreachableStartsTimer(t *testing.T) {
+	clock := newManualClock()
+	grace := time.Hour
+	rm := swarm.NewReachabilityMapWithGrace(3, grace, clock.Now)
+	pub := mustEd25519Pub(t)
+
+	for i := 0; i < swarm.DefaultMissThreshold; i++ {
+		rm.RecordHeartbeat(pub, false)
+	}
+	if got := rm.State(pub); got != swarm.StateUnreachable {
+		t.Fatalf("setup: state = %v, want StateUnreachable", got)
+	}
+	clock.Advance(30 * time.Minute)
+	if rm.IsLost(pub) {
+		t.Error("IsLost before grace = true, want false")
+	}
+	clock.Advance(31 * time.Minute) // total 61m > grace
+	if !rm.IsLost(pub) {
+		t.Error("IsLost past grace via heartbeat path = false, want true")
+	}
+}
+
+func TestIsLost_HeartbeatRepeatedFailurePreservesOriginalTimer(t *testing.T) {
+	clock := newManualClock()
+	grace := time.Hour
+	rm := swarm.NewReachabilityMapWithGrace(3, grace, clock.Now)
+	pub := mustEd25519Pub(t)
+
+	for i := 0; i < swarm.DefaultMissThreshold; i++ {
+		rm.RecordHeartbeat(pub, false)
+	}
+	clock.Advance(50 * time.Minute)
+	rm.RecordHeartbeat(pub, false) // already Unreachable; further misses must not reset since-time
+	clock.Advance(11 * time.Minute)
+	if !rm.IsLost(pub) {
+		t.Error("IsLost: extra failed heartbeats reset the timer; want preserved")
+	}
+}
+
+func TestIsLost_GraceZeroTreatsUnreachableAsLostImmediately(t *testing.T) {
+	clock := newManualClock()
+	rm := swarm.NewReachabilityMapWithGrace(3, 0, clock.Now)
+	pub := mustEd25519Pub(t)
+	rm.Mark(pub, swarm.StateUnreachable)
+	if !rm.IsLost(pub) {
+		t.Error("IsLost with grace=0 immediately after transition = false, want true")
+	}
+}
+
+func TestIsLost_NilPubReturnsFalse(t *testing.T) {
+	clock := newManualClock()
+	rm := swarm.NewReachabilityMapWithGrace(3, time.Hour, clock.Now)
+	if rm.IsLost(nil) || rm.IsLost([]byte{}) {
+		t.Error("IsLost(nil/empty) = true, want false")
+	}
+}
+
+func TestIsLost_LegacyConstructorAlwaysReturnsFalse(t *testing.T) {
+	// NewReachabilityMap and NewReachabilityMapWithThreshold do not enable
+	// the grace-period machinery; IsLost must remain false even for an
+	// Unreachable peer (callers that need lost-detection must opt in via
+	// NewReachabilityMapWithGrace).
+	for _, rm := range []*swarm.ReachabilityMap{
+		swarm.NewReachabilityMap(),
+		swarm.NewReachabilityMapWithThreshold(2),
+	} {
+		pub := mustEd25519Pub(t)
+		rm.Mark(pub, swarm.StateUnreachable)
+		if rm.IsLost(pub) {
+			t.Error("IsLost on map without grace enabled = true, want false")
+		}
+	}
+}
+
+func TestLostPubs_LegacyConstructorReturnsNil(t *testing.T) {
+	for _, rm := range []*swarm.ReachabilityMap{
+		swarm.NewReachabilityMap(),
+		swarm.NewReachabilityMapWithThreshold(2),
+	} {
+		pub := mustEd25519Pub(t)
+		rm.Mark(pub, swarm.StateUnreachable)
+		if got := rm.LostPubs(); got != nil {
+			t.Errorf("LostPubs on map without grace enabled = %v, want nil", got)
+		}
+	}
+}
+
+func TestLostPubs_FiltersByGrace(t *testing.T) {
+	clock := newManualClock()
+	grace := time.Hour
+	rm := swarm.NewReachabilityMapWithGrace(3, grace, clock.Now)
+	pubReachable := mustEd25519Pub(t)
+	pubFresh := mustEd25519Pub(t)
+	pubLost1 := mustEd25519Pub(t)
+	pubLost2 := mustEd25519Pub(t)
+
+	rm.Mark(pubLost1, swarm.StateUnreachable) // since = t=0
+	clock.Advance(90 * time.Minute)           // Lost1 elapsed = 90m
+	rm.Mark(pubLost2, swarm.StateUnreachable) // since = t=90m
+	clock.Advance(70 * time.Minute)           // Lost1 = 160m, Lost2 = 70m (both > grace)
+	rm.Mark(pubReachable, swarm.StateReachable)
+	rm.Mark(pubFresh, swarm.StateUnreachable) // since = t=160m, elapsed = 0
+
+	got := rm.LostPubs()
+	if len(got) != 2 {
+		t.Fatalf("LostPubs len = %d, want 2", len(got))
+	}
+	hasLost1 := false
+	hasLost2 := false
+	for _, p := range got {
+		if bytes.Equal(p, pubLost1) {
+			hasLost1 = true
+		}
+		if bytes.Equal(p, pubLost2) {
+			hasLost2 = true
+		}
+		if bytes.Equal(p, pubReachable) || bytes.Equal(p, pubFresh) {
+			t.Errorf("LostPubs included a non-lost peer")
+		}
+	}
+	if !hasLost1 || !hasLost2 {
+		t.Errorf("LostPubs missing entries: hasLost1=%v hasLost2=%v", hasLost1, hasLost2)
+	}
+}
+
+func TestLostPubs_AreCopies(t *testing.T) {
+	clock := newManualClock()
+	rm := swarm.NewReachabilityMapWithGrace(3, time.Hour, clock.Now)
+	pub := mustEd25519Pub(t)
+	rm.Mark(pub, swarm.StateUnreachable)
+	clock.Advance(2 * time.Hour)
+	got := rm.LostPubs()
+	if len(got) != 1 {
+		t.Fatalf("LostPubs len = %d, want 1", len(got))
+	}
+	for i := range got[0] {
+		got[0][i] = 0
+	}
+	again := rm.LostPubs()
+	if len(again) != 1 || bytes.Equal(again[0], make([]byte, len(again[0]))) {
+		t.Error("internal state corrupted by mutating LostPubs result")
+	}
+}
+
+func TestMarkUnknown_ClearsLostTimer(t *testing.T) {
+	clock := newManualClock()
+	rm := swarm.NewReachabilityMapWithGrace(3, time.Hour, clock.Now)
+	pub := mustEd25519Pub(t)
+	rm.Mark(pub, swarm.StateUnreachable)
+	clock.Advance(2 * time.Hour)
+	rm.Mark(pub, swarm.StateUnknown) // delete entry
+	if rm.IsLost(pub) {
+		t.Error("IsLost after Mark(Unknown) = true, want false (entry deleted)")
+	}
+}
+
 func TestReachabilityMap_Concurrent(t *testing.T) {
 	rm := swarm.NewReachabilityMap()
 	pubs := make([]ed25519.PublicKey, 16)
@@ -361,6 +689,33 @@ func TestReachabilityMap_Concurrent(t *testing.T) {
 			_ = rm.IsReachable(pub)
 			_ = rm.ReachablePubs()
 			_ = rm.Snapshot()
+		}(i)
+	}
+	wg.Wait()
+}
+
+func TestReachabilityMap_GraceConcurrent(t *testing.T) {
+	clock := newManualClock()
+	rm := swarm.NewReachabilityMapWithGrace(3, time.Hour, clock.Now)
+	pubs := make([]ed25519.PublicKey, 16)
+	for i := range pubs {
+		pubs[i] = mustEd25519Pub(t)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			pub := pubs[idx%len(pubs)]
+			state := swarm.StateReachable
+			if idx%2 == 0 {
+				state = swarm.StateUnreachable
+			}
+			rm.Mark(pub, state)
+			rm.RecordHeartbeat(pub, idx%3 == 0)
+			_ = rm.IsLost(pub)
+			_ = rm.LostPubs()
 		}(i)
 	}
 	wg.Wait()

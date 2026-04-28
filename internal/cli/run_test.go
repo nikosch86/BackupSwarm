@@ -299,6 +299,73 @@ func TestRunCmd_RejectsZeroHeartbeatMisses(t *testing.T) {
 	}
 }
 
+// TestRunCmd_RegistersGracePeriodFlag asserts --grace-period is exposed
+// on the run subcommand.
+func TestRunCmd_RegistersGracePeriodFlag(t *testing.T) {
+	root := NewRootCmd()
+	var run *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Name() == "run" {
+			run = c
+			break
+		}
+	}
+	if run == nil {
+		t.Fatal("run subcommand missing")
+	}
+	f := run.Flags().Lookup("grace-period")
+	if f == nil {
+		t.Fatal("run is missing --grace-period flag")
+	}
+	if f.DefValue != "24h0m0s" {
+		t.Errorf("--grace-period default = %q, want 24h0m0s", f.DefValue)
+	}
+}
+
+// TestRunCmd_RejectsNegativeGracePeriod asserts --grace-period -1m fails fast.
+func TestRunCmd_RejectsNegativeGracePeriod(t *testing.T) {
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--grace-period", "-1m",
+	})
+	if err := root.Execute(); err == nil {
+		t.Error("run accepted --grace-period -1m")
+	}
+}
+
+// TestRunCmd_AcceptsZeroGracePeriod asserts --grace-period 0 (lost-immediately) is allowed.
+func TestRunCmd_AcceptsZeroGracePeriod(t *testing.T) {
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--grace-period", "0",
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("run with --grace-period 0 returned err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit within 5s of cancel")
+	}
+}
+
 // TestRunCmd_RefusesWhenLocalEmptyIndexPopulated asserts run wraps daemon.ErrRefuseStart for an empty local with a populated index.
 func TestRunCmd_RefusesWhenLocalEmptyIndexPopulated(t *testing.T) {
 	dataDir := t.TempDir()

@@ -198,6 +198,10 @@ type Options struct {
 	// peer from StateSuspect to StateUnreachable. Only consulted when
 	// Reachability is nil. Zero or negative uses swarm.DefaultMissThreshold.
 	MissThreshold int
+	// GracePeriod is the duration a peer must stay StateUnreachable
+	// before being flagged as lost. Only consulted when Reachability
+	// is nil. Zero uses 24h; negative is rejected.
+	GracePeriod time.Duration
 	// MaxStorageBytes caps the local chunk store; 0 means unlimited.
 	// PutChunk over the cap returns the "no_space" wire code.
 	MaxStorageBytes int64
@@ -210,6 +214,7 @@ const (
 	defaultScanInterval      = 60 * time.Second
 	defaultHeartbeatInterval = 30 * time.Second
 	defaultDialTimeout       = 30 * time.Second
+	defaultGracePeriod       = 24 * time.Hour
 
 	indexFileName = "index.db"
 	storeDirName  = "chunks"
@@ -228,6 +233,12 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	if opts.HeartbeatInterval == 0 {
 		opts.HeartbeatInterval = defaultHeartbeatInterval
+	}
+	if opts.GracePeriod == 0 {
+		opts.GracePeriod = defaultGracePeriod
+	}
+	if opts.GracePeriod < 0 {
+		return fmt.Errorf("grace period must be non-negative, got %v", opts.GracePeriod)
 	}
 	if opts.DialTimeout == 0 {
 		opts.DialTimeout = defaultDialTimeout
@@ -276,7 +287,7 @@ func Run(ctx context.Context, opts Options) error {
 		if n <= 0 {
 			n = swarm.DefaultMissThreshold
 		}
-		reach = swarm.NewReachabilityMapWithThreshold(n)
+		reach = swarm.NewReachabilityMapWithGrace(n, opts.GracePeriod, nil)
 	}
 
 	// Classify before binding so flag-validation errors surface cleanly.

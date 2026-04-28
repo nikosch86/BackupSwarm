@@ -267,6 +267,22 @@ func TestRun_RefusesWhenBackupDirEmptyButIndexPopulated(t *testing.T) {
 	}
 }
 
+// TestRun_RejectsNegativeGracePeriod asserts daemon.Run errors before
+// touching any state when GracePeriod is negative.
+func TestRun_RejectsNegativeGracePeriod(t *testing.T) {
+	err := daemon.Run(context.Background(), daemon.Options{
+		DataDir:     t.TempDir(),
+		BackupDir:   t.TempDir(),
+		ListenAddr:  "127.0.0.1:0",
+		ChunkSize:   1 << 20,
+		GracePeriod: -1 * time.Second,
+		Progress:    io.Discard,
+	})
+	if err == nil {
+		t.Fatal("Run accepted negative GracePeriod")
+	}
+}
+
 // TestRun_IdleStorageOnlyExitsOnContextCancel asserts a no-peer daemon blocks until context cancellation and returns nil.
 func TestRun_IdleStorageOnlyExitsOnContextCancel(t *testing.T) {
 	dataDir := t.TempDir()
