@@ -129,7 +129,7 @@ func TestRun_MultiPeer_RedundancyEqualsPoolSize_AllPeersGetChunk(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	if err := backup.Run(context.Background(), backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        rig.ownerConns,
 		Redundancy:   3,
 		RecipientPub: rig.recipientPub,
@@ -140,7 +140,7 @@ func TestRun_MultiPeer_RedundancyEqualsPoolSize_AllPeersGetChunk(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	entry, err := rig.ownerIndex.Get(path)
+	entry, err := rig.ownerIndex.Get(filepath.Base(path))
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestRun_MultiPeer_RedundancyOne_OnePeerHoldsChunk(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	if err := backup.Run(context.Background(), backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        rig.ownerConns,
 		Redundancy:   1,
 		RecipientPub: rig.recipientPub,
@@ -175,7 +175,7 @@ func TestRun_MultiPeer_RedundancyOne_OnePeerHoldsChunk(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	entry, err := rig.ownerIndex.Get(path)
+	entry, err := rig.ownerIndex.Get(filepath.Base(path))
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestRun_MultiPeer_DefaultRedundancyIsOne(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	if err := backup.Run(context.Background(), backup.RunOptions{
-		Path:  path,
+		Path:  root,
 		Conns: rig.ownerConns,
 		// Redundancy unset → defaults to 1.
 		RecipientPub: rig.recipientPub,
@@ -206,7 +206,7 @@ func TestRun_MultiPeer_DefaultRedundancyIsOne(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	entry, _ := rig.ownerIndex.Get(path)
+	entry, _ := rig.ownerIndex.Get(filepath.Base(path))
 	if len(entry.Chunks[0].Peers) != 1 {
 		t.Errorf("default redundancy: want 1 peer recorded, got %d", len(entry.Chunks[0].Peers))
 	}
@@ -219,7 +219,7 @@ func TestRun_MultiPeer_RedundancyExceedsPool(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	err := backup.Run(context.Background(), backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        rig.ownerConns,
 		Redundancy:   5,
 		RecipientPub: rig.recipientPub,
@@ -250,7 +250,7 @@ func TestRun_MultiPeer_NoConns(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	err = backup.Run(context.Background(), backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        nil,
 		Redundancy:   1,
 		RecipientPub: rpub,
@@ -272,7 +272,7 @@ func TestRun_MultiPeer_DistributesAcrossChunks(t *testing.T) {
 	writeFile(t, path, (1<<20)*30) // 30 chunks
 
 	if err := backup.Run(context.Background(), backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        rig.ownerConns,
 		Redundancy:   1,
 		RecipientPub: rig.recipientPub,
@@ -284,7 +284,7 @@ func TestRun_MultiPeer_DistributesAcrossChunks(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	entry, _ := rig.ownerIndex.Get(path)
+	entry, _ := rig.ownerIndex.Get(filepath.Base(path))
 	if len(entry.Chunks) != 30 {
 		t.Fatalf("want 30 chunks, got %d", len(entry.Chunks))
 	}
@@ -353,7 +353,7 @@ func TestRun_MultiPeer_FullPeerExcludedFromPlacement(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	if err := backup.Run(context.Background(), backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{connA, connB},
 		Redundancy:   1,
 		RecipientPub: rpub,
@@ -364,7 +364,7 @@ func TestRun_MultiPeer_FullPeerExcludedFromPlacement(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	entry, _ := idx.Get(path)
+	entry, _ := idx.Get(filepath.Base(path))
 	ref := entry.Chunks[0]
 	hasA, _ := peerA.store.Has(ref.CiphertextHash)
 	hasB, _ := peerB.store.Has(ref.CiphertextHash)
@@ -386,7 +386,7 @@ func TestPrune_MultiPeer_NotFoundCountsAsSuccess(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	if err := backup.Run(context.Background(), backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        rig.ownerConns,
 		Redundancy:   2,
 		RecipientPub: rig.recipientPub,
@@ -396,7 +396,7 @@ func TestPrune_MultiPeer_NotFoundCountsAsSuccess(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	entry, _ := rig.ownerIndex.Get(path)
+	entry, _ := rig.ownerIndex.Get(filepath.Base(path))
 	ref := entry.Chunks[0]
 
 	// Drop the blob from peer 0 directly so its delete will return not_found.
@@ -414,7 +414,7 @@ func TestPrune_MultiPeer_NotFoundCountsAsSuccess(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	if _, err := rig.ownerIndex.Get(path); !errors.Is(err, index.ErrFileNotFound) {
+	if _, err := rig.ownerIndex.Get(filepath.Base(path)); !errors.Is(err, index.ErrFileNotFound) {
 		t.Errorf("entry not removed despite peer 0 not_found + peer 1 success: %v", err)
 	}
 }
@@ -429,7 +429,7 @@ func TestPrune_MultiPeer_NoLiveConnBranchTriggers(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	if err := backup.Run(context.Background(), backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        rig.ownerConns,
 		Redundancy:   2,
 		RecipientPub: rig.recipientPub,
@@ -452,7 +452,7 @@ func TestPrune_MultiPeer_NoLiveConnBranchTriggers(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	if _, err := rig.ownerIndex.Get(path); !errors.Is(err, index.ErrFileNotFound) {
+	if _, err := rig.ownerIndex.Get(filepath.Base(path)); !errors.Is(err, index.ErrFileNotFound) {
 		t.Errorf("entry not removed despite peer 0 success: %v", err)
 	}
 }
@@ -467,7 +467,7 @@ func TestPrune_MultiPeer_AllPeersOffline(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	if err := backup.Run(context.Background(), backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        rig.ownerConns,
 		Redundancy:   1,
 		RecipientPub: rig.recipientPub,
@@ -508,7 +508,7 @@ func TestPrune_MultiPeer_AllPeersOffline(t *testing.T) {
 		t.Fatal("Prune succeeded when no recorded peer had a live conn")
 	}
 	// Entry should NOT be deleted; user can retry next sweep.
-	if _, err := rig.ownerIndex.Get(path); errors.Is(err, index.ErrFileNotFound) {
+	if _, err := rig.ownerIndex.Get(filepath.Base(path)); errors.Is(err, index.ErrFileNotFound) {
 		t.Error("entry deleted despite no successful peer delete")
 	}
 }
@@ -552,7 +552,7 @@ func TestProbeCandidates_FullPeerSkipped(t *testing.T) {
 
 	// Pool=[full peer], R=1 → no candidates left after probe → ErrInsufficientPeers.
 	err = backup.Run(context.Background(), backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{conn},
 		Redundancy:   1,
 		RecipientPub: rpub,
@@ -575,7 +575,7 @@ func TestPrune_MultiPeer_DeletesFromAllPeers(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	if err := backup.Run(context.Background(), backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        rig.ownerConns,
 		Redundancy:   3,
 		RecipientPub: rig.recipientPub,
@@ -585,7 +585,7 @@ func TestPrune_MultiPeer_DeletesFromAllPeers(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	entry, _ := rig.ownerIndex.Get(path)
+	entry, _ := rig.ownerIndex.Get(filepath.Base(path))
 	ref := entry.Chunks[0]
 
 	if err := os.Remove(path); err != nil {
@@ -605,7 +605,7 @@ func TestPrune_MultiPeer_DeletesFromAllPeers(t *testing.T) {
 			t.Errorf("peer %d still has blob after Prune", i)
 		}
 	}
-	if _, err := rig.ownerIndex.Get(path); !errors.Is(err, index.ErrFileNotFound) {
+	if _, err := rig.ownerIndex.Get(filepath.Base(path)); !errors.Is(err, index.ErrFileNotFound) {
 		t.Errorf("index entry not removed: err = %v", err)
 	}
 }

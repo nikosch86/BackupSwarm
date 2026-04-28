@@ -1,7 +1,11 @@
 // Package restore fetches each indexed chunk from a storage peer, decrypts
 // it, verifies its plaintext hash against the index, and reassembles the
 // file at filepath.Join(Dest, entry.Path). Dirs are 0700, files 0600; a
-// hash mismatch aborts before any further writes for that file.
+// hash mismatch aborts before any further writes for that file. Index
+// entries carry paths relative to the configured backup root (set by
+// backup.Run); restore rejects absolute or `..`-bearing entries up front
+// and routes every filesystem operation through an *os.Root rooted at
+// Dest, so no tampered entry can escape the destination tree.
 package restore
 
 import (
@@ -13,7 +17,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
+	"time"
 
 	"backupswarm/internal/backup"
 	"backupswarm/internal/crypto"
@@ -39,10 +45,15 @@ type writableFile interface {
 
 // Test-only seams; production never reassigns these.
 var (
-	openFileFunc = func(name string, flag int, perm os.FileMode) (writableFile, error) {
-		return os.OpenFile(name, flag, perm)
+	openRootFunc = func(name string) (*os.Root, error) {
+		return os.OpenRoot(name)
 	}
-	chtimesFunc = os.Chtimes
+	openInRootFunc = func(root *os.Root, name string, flag int, perm os.FileMode) (writableFile, error) {
+		return root.OpenFile(name, flag, perm)
+	}
+	chtimesInRootFunc = func(root *os.Root, name string, atime, mtime time.Time) error {
+		return root.Chtimes(name, atime, mtime)
+	}
 )
 
 // Options configures a restore invocation.
@@ -60,6 +71,24 @@ type Options struct {
 	RecipientPub, RecipientPriv *[crypto.RecipientKeySize]byte
 	// Progress receives per-file progress lines. nil is treated as io.Discard.
 	Progress io.Writer
+}
+
+// normalizeRel validates an index entry path. Index entries are written
+// relative to the configured backup root; any absolute path or `..`
+// segment indicates a tampered entry and is rejected before any I/O.
+func normalizeRel(p string) (string, error) {
+	if p == "" {
+		return "", errors.New("empty entry path")
+	}
+	if filepath.IsAbs(p) {
+		return "", fmt.Errorf("entry path is absolute")
+	}
+	for _, part := range strings.Split(filepath.ToSlash(p), "/") {
+		if part == ".." {
+			return "", fmt.Errorf("entry path contains '..' segment")
+		}
+	}
+	return filepath.Clean(p), nil
 }
 
 // Run restores every indexed file under opts.Dest. Stops at the first
@@ -82,23 +111,36 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("index list: %w", err)
 	}
+	if err := os.MkdirAll(opts.Dest, dirPerm); err != nil {
+		return fmt.Errorf("create dest %q: %w", opts.Dest, err)
+	}
+	root, err := openRootFunc(opts.Dest)
+	if err != nil {
+		return fmt.Errorf("open dest %q: %w", opts.Dest, err)
+	}
+	defer root.Close()
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := restoreFile(ctx, opts, entry, connByPub); err != nil {
+		rel, err := normalizeRel(entry.Path)
+		if err != nil {
+			return fmt.Errorf("restore %q: %w", entry.Path, err)
+		}
+		if err := restoreFile(ctx, opts, root, rel, entry, connByPub); err != nil {
 			return fmt.Errorf("restore %q: %w", entry.Path, err)
 		}
 	}
 	return nil
 }
 
-func restoreFile(ctx context.Context, opts Options, entry index.FileEntry, connByPub map[string]*bsquic.Conn) error {
-	outPath := filepath.Join(opts.Dest, entry.Path)
-	if err := os.MkdirAll(filepath.Dir(outPath), dirPerm); err != nil {
-		return fmt.Errorf("mkdir parent: %w", err)
+func restoreFile(ctx context.Context, opts Options, root *os.Root, rel string, entry index.FileEntry, connByPub map[string]*bsquic.Conn) error {
+	if dir := filepath.Dir(rel); dir != "." {
+		if err := root.MkdirAll(dir, dirPerm); err != nil {
+			return fmt.Errorf("mkdir parent: %w", err)
+		}
 	}
-	f, err := openFileFunc(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, filePerm)
+	f, err := openInRootFunc(root, rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, filePerm)
 	if err != nil {
 		return fmt.Errorf("create: %w", err)
 	}
@@ -132,7 +174,7 @@ func restoreFile(ctx context.Context, opts Options, entry index.FileEntry, connB
 	}
 	// Preserve mtime so the next scan's stat-match incremental-skips
 	// this file rather than re-chunking and orphaning old ciphertext.
-	if err := chtimesFunc(outPath, entry.ModTime, entry.ModTime); err != nil {
+	if err := chtimesInRootFunc(root, rel, entry.ModTime, entry.ModTime); err != nil {
 		return fmt.Errorf("chtimes: %w", err)
 	}
 	fmt.Fprintf(opts.Progress, "restored %s (%d chunks)\n", entry.Path, len(entry.Chunks))

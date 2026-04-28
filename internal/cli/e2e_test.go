@@ -92,7 +92,7 @@ func TestE2E_BackupAndRestoreRoundTrip(t *testing.T) {
 
 	waitForBlobs(t, filepath.Join(dataB, "chunks"), expectedBlobs, 20*time.Second)
 	for _, f := range fixtures {
-		line := "backed up " + filepath.Join(srcDir, f.rel)
+		line := "backed up " + f.rel
 		waitForSubstring(t, aStdout, line, 20*time.Second)
 	}
 
@@ -116,7 +116,7 @@ func TestE2E_BackupAndRestoreRoundTrip(t *testing.T) {
 	}
 
 	// Phase 5: byte-for-byte equality between source and restored tree.
-	assertTreesEqual(t, srcDir, filepath.Join(restoreRoot, srcDir))
+	assertTreesEqual(t, srcDir, restoreRoot)
 }
 
 // TestE2E_ThenRunFlags_BackupAndRestoreRoundTrip drives the --then-run flow with a token exchanged via a shared file and asserts byte-for-byte tree equality after restore.
@@ -190,7 +190,7 @@ func TestE2E_ThenRunFlags_BackupAndRestoreRoundTrip(t *testing.T) {
 
 	waitForBlobs(t, filepath.Join(dataB, "chunks"), expectedBlobs, 20*time.Second)
 	for _, f := range fixtures {
-		waitForSubstring(t, aStdout, "backed up "+filepath.Join(srcDir, f.rel), 20*time.Second)
+		waitForSubstring(t, aStdout, "backed up "+f.rel, 20*time.Second)
 	}
 
 	cancelA()
@@ -211,7 +211,7 @@ func TestE2E_ThenRunFlags_BackupAndRestoreRoundTrip(t *testing.T) {
 		t.Fatalf("node B (invite --then-run): %v", err)
 	}
 
-	assertTreesEqual(t, srcDir, filepath.Join(restoreRoot, srcDir))
+	assertTreesEqual(t, srcDir, restoreRoot)
 }
 
 // reserveLocalUDPAddr binds a 127.0.0.1 UDP socket on a kernel-assigned port and returns the "host:port" string.

@@ -609,7 +609,7 @@ func TestRun_IndexPutError(t *testing.T) {
 	})
 
 	err = Run(context.Background(), RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{conn},
 		RecipientPub: recipientPub,
 		Index:        idx,
@@ -677,7 +677,7 @@ func TestPrune_IndexDeleteError(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if err := Run(context.Background(), RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{conn},
 		RecipientPub: recipientPub,
 		Index:        idx,

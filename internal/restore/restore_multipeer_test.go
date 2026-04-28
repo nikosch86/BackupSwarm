@@ -95,7 +95,7 @@ func TestRestore_MultiPeer_PicksCorrectConn(t *testing.T) {
 	}
 	// Backup with redundancy=2, so both peers hold the chunk.
 	if err := backup.Run(context.Background(), backup.RunOptions{
-		Path:         srcPath,
+		Path:         src,
 		Conns:        []*bsquic.Conn{connA, connB},
 		Redundancy:   2,
 		RecipientPub: rpub,
@@ -118,7 +118,7 @@ func TestRestore_MultiPeer_PicksCorrectConn(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("restore.Run: %v", err)
 	}
-	got, err := os.ReadFile(filepath.Join(dest, srcPath))
+	got, err := os.ReadFile(filepath.Join(dest, filepath.Base(srcPath)))
 	if err != nil {
 		t.Fatalf("read restored: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestRestore_MultiPeer_FallbackOnUnreachablePeer(t *testing.T) {
 		t.Fatalf("write src: %v", err)
 	}
 	if err := backup.Run(context.Background(), backup.RunOptions{
-		Path:         srcPath,
+		Path:         src,
 		Conns:        []*bsquic.Conn{connA, connB},
 		Redundancy:   2,
 		RecipientPub: rpub,
@@ -198,7 +198,7 @@ func TestRestore_MultiPeer_FallbackOnUnreachablePeer(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("restore.Run with peerA dead: %v", err)
 	}
-	got, err := os.ReadFile(filepath.Join(dest, srcPath))
+	got, err := os.ReadFile(filepath.Join(dest, filepath.Base(srcPath)))
 	if err != nil {
 		t.Fatalf("read restored: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestRestore_MultiPeer_NoMatchingConn(t *testing.T) {
 		t.Fatalf("write src: %v", err)
 	}
 	if err := backup.Run(context.Background(), backup.RunOptions{
-		Path:         srcPath,
+		Path:         src,
 		Conns:        []*bsquic.Conn{connA},
 		Redundancy:   1,
 		RecipientPub: rpub,

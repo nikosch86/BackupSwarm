@@ -24,10 +24,12 @@ func newRestoreCmd(dataDir *string) *cobra.Command {
 	var dialTimeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "restore <dest>",
-		Short: "Fetch every indexed file from known storage peers and reassemble it under <dest>",
+		Short: "Fetch every indexed file from known storage peers and reassemble the tree under <dest>",
 		Long: "Read the local index and the storage peers recorded in peers.db, dial each, " +
 			"fetch every chunk from a peer that holds it, decrypt it, verify its plaintext " +
-			"hash, and write the file to <dest>/<original-absolute-path>. <dest> must be absolute.",
+			"hash, and write each file under <dest> at its path relative to the original " +
+			"backup root. <dest> must be absolute. Every filesystem operation is rooted at " +
+			"<dest>, so a tampered index can never redirect writes outside the destination.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dest := args[0]

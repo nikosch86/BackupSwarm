@@ -138,7 +138,7 @@ func TestScanOnce_BackupAndPrune(t *testing.T) {
 	if err := daemon.ScanOnce(context.Background(), opts); err != nil {
 		t.Fatalf("ScanOnce #1: %v", err)
 	}
-	entry, err := rig.ownerIndex.Get(goner)
+	entry, err := rig.ownerIndex.Get(filepath.Base(goner))
 	if err != nil {
 		t.Fatalf("Get goner: %v", err)
 	}
@@ -151,10 +151,10 @@ func TestScanOnce_BackupAndPrune(t *testing.T) {
 	if err := daemon.ScanOnce(context.Background(), opts); err != nil {
 		t.Fatalf("ScanOnce #2: %v", err)
 	}
-	if _, err := rig.ownerIndex.Get(goner); !errors.Is(err, index.ErrFileNotFound) {
+	if _, err := rig.ownerIndex.Get(filepath.Base(goner)); !errors.Is(err, index.ErrFileNotFound) {
 		t.Errorf("goner still in index after prune: %v", err)
 	}
-	if _, err := rig.ownerIndex.Get(keep); err != nil {
+	if _, err := rig.ownerIndex.Get(filepath.Base(keep)); err != nil {
 		t.Errorf("keep lost from index: %v", err)
 	}
 	for _, ref := range entry.Chunks {

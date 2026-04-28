@@ -76,12 +76,12 @@ The daemon reads the storage peer from `<data-dir>/peers.db` (populated by
 Two ways to restore, assuming the storage peer (`node A` above) is up:
 
 ```bash
-# Standalone one-shot: reassemble every indexed file under <dest>.
-# Paths are rewritten as Dest + original-absolute-path.
+# Standalone one-shot: reassemble every indexed file under <dest>,
+# preserving the relative tree under the original backup root.
 ./bin/backupswarm --data-dir /tmp/bs-b restore /tmp/rescue
 
-# Or via the daemon: empty backup dir + --restore restores to the
-# original locations before the scan loop starts.
+# Or via the daemon: empty backup dir + --restore restores each
+# file under the configured --backup-dir before the scan loop starts.
 rm -rf /tmp/bs-b-src/*
 ./bin/backupswarm --data-dir /tmp/bs-b run \
     --backup-dir /tmp/bs-b-src \
@@ -89,10 +89,13 @@ rm -rf /tmp/bs-b-src/*
     --restore
 ```
 
-Each chunk's post-decrypt plaintext hash is verified against the
-index's `PlaintextHash`; a mismatch aborts the restore. Restored
-files keep their original mtime so the daemon's incremental scan
-does not re-upload them.
+Index entries are stored as paths relative to the configured backup
+root, and every restore filesystem operation runs through an
+`*os.Root` rooted at the destination — a tampered index can never
+direct writes outside the destination tree. Each chunk's post-decrypt
+plaintext hash is verified against the index's `PlaintextHash`; a
+mismatch aborts the restore. Restored files keep their original
+mtime so the daemon's incremental scan does not re-upload them.
 
 ## Makefile Targets
 

@@ -459,12 +459,13 @@ func Run(ctx context.Context, opts Options) error {
 		}
 		fmt.Fprintln(opts.Progress, "purge complete; daemon continuing in idle mode")
 	case ModeRestore:
-		// Dest "/" puts each indexed file back at its absolute path. The
-		// backup dir is empty by definition of ModeRestore, so no
-		// collision with existing user data. Preserving ModTime lets the
-		// next scan incremental-skip each restored file.
+		// Restore writes each file under opts.BackupDir, the same root
+		// the daemon uses for backup. Index entries are stored relative
+		// to that root, so a tampered entry can only redirect writes
+		// inside the configured tree — never to system paths the user
+		// did not opt to back up.
 		if err := restore.Run(ctx, restore.Options{
-			Dest:          "/",
+			Dest:          opts.BackupDir,
 			Conns:         storageConns,
 			Index:         idx,
 			RecipientPub:  rk.PublicKey,

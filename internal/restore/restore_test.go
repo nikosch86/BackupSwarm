@@ -93,16 +93,20 @@ func newRestoreRig(t *testing.T) *restoreRig {
 	}
 }
 
-func (r *restoreRig) backupFile(path string, data []byte) {
+// backupFile writes data to <root>/<rel> (mkdir-as-needed) and runs
+// backup.Run with opts.Path = root, so the indexed entry.Path is rel.
+// Returns rel for use in restore-side assertions.
+func (r *restoreRig) backupFile(root, rel string, data []byte) string {
 	r.t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	full := filepath.Join(root, rel)
+	if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
 		r.t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := os.WriteFile(full, data, 0o600); err != nil {
 		r.t.Fatalf("write seed file: %v", err)
 	}
 	opts := backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{r.ownerConn},
 		RecipientPub: r.recipientPub,
 		Index:        r.ownerIndex,
@@ -112,15 +116,15 @@ func (r *restoreRig) backupFile(path string, data []byte) {
 	if err := backup.Run(context.Background(), opts); err != nil {
 		r.t.Fatalf("backup seed: %v", err)
 	}
+	return rel
 }
 
 // TestRun_PreservesModTime asserts restored files carry the mtime recorded in the index entry.
 func TestRun_PreservesModTime(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
-	srcPath := filepath.Join(srcRoot, "timed.bin")
-	rig.backupFile(srcPath, []byte("timed payload"))
-	entry, err := rig.ownerIndex.Get(srcPath)
+	rel := rig.backupFile(srcRoot, "timed.bin", []byte("timed payload"))
+	entry, err := rig.ownerIndex.Get(rel)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -136,7 +140,7 @@ func TestRun_PreservesModTime(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("restore.Run: %v", err)
 	}
-	info, err := os.Stat(filepath.Join(dest, srcPath))
+	info, err := os.Stat(filepath.Join(dest, rel))
 	if err != nil {
 		t.Fatalf("stat restored: %v", err)
 	}
@@ -150,9 +154,8 @@ func TestRun_PreservesModTime(t *testing.T) {
 func TestRun_RestoresSingleFile(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
-	srcPath := filepath.Join(srcRoot, "alpha.bin")
 	data := bytes.Repeat([]byte("ALPHA"), 1<<18) // ~1.25 MiB, two chunks
-	rig.backupFile(srcPath, data)
+	rel := rig.backupFile(srcRoot, "alpha.bin", data)
 
 	dest := t.TempDir()
 	opts := restore.Options{
@@ -167,7 +170,7 @@ func TestRun_RestoresSingleFile(t *testing.T) {
 		t.Fatalf("restore.Run: %v", err)
 	}
 
-	restored := filepath.Join(dest, srcPath)
+	restored := filepath.Join(dest, rel)
 	got, err := os.ReadFile(restored)
 	if err != nil {
 		t.Fatalf("read restored file: %v", err)
@@ -182,13 +185,13 @@ func TestRun_RestoresDirectoryTree(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
 	files := map[string][]byte{
-		filepath.Join(srcRoot, "a.txt"):         []byte("alpha bytes"),
-		filepath.Join(srcRoot, "sub", "b.txt"):  bytes.Repeat([]byte("B"), 1<<20),
-		filepath.Join(srcRoot, "sub", "c.bin"):  bytes.Repeat([]byte{0xcc}, 1<<21),
-		filepath.Join(srcRoot, "deep", "d.log"): []byte(""), // zero-byte file
+		"a.txt":                        []byte("alpha bytes"),
+		filepath.Join("sub", "b.txt"):  bytes.Repeat([]byte("B"), 1<<20),
+		filepath.Join("sub", "c.bin"):  bytes.Repeat([]byte{0xcc}, 1<<21),
+		filepath.Join("deep", "d.log"): []byte(""), // zero-byte file
 	}
-	for p, d := range files {
-		rig.backupFile(p, d)
+	for rel, d := range files {
+		rig.backupFile(srcRoot, rel, d)
 	}
 
 	dest := t.TempDir()
@@ -203,14 +206,14 @@ func TestRun_RestoresDirectoryTree(t *testing.T) {
 		t.Fatalf("restore.Run: %v", err)
 	}
 
-	for original, want := range files {
-		got, err := os.ReadFile(filepath.Join(dest, original))
+	for rel, want := range files {
+		got, err := os.ReadFile(filepath.Join(dest, rel))
 		if err != nil {
-			t.Errorf("read %s: %v", original, err)
+			t.Errorf("read %s: %v", rel, err)
 			continue
 		}
 		if !bytes.Equal(got, want) {
-			t.Errorf("%s: bytes differ after restore", original)
+			t.Errorf("%s: bytes differ after restore", rel)
 		}
 	}
 }
@@ -219,10 +222,9 @@ func TestRun_RestoresDirectoryTree(t *testing.T) {
 func TestRun_RestoreVerifiesPlaintextHash(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
-	srcPath := filepath.Join(srcRoot, "tampered.bin")
-	rig.backupFile(srcPath, []byte("untampered original bytes"))
+	rel := rig.backupFile(srcRoot, "tampered.bin", []byte("untampered original bytes"))
 
-	entry, err := rig.ownerIndex.Get(srcPath)
+	entry, err := rig.ownerIndex.Get(rel)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -252,10 +254,9 @@ func TestRun_RestoreVerifiesPlaintextHash(t *testing.T) {
 func TestRun_PeerMissingBlob(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
-	srcPath := filepath.Join(srcRoot, "orphan.bin")
-	rig.backupFile(srcPath, []byte("will-be-deleted-from-peer"))
+	rel := rig.backupFile(srcRoot, "orphan.bin", []byte("will-be-deleted-from-peer"))
 
-	entry, err := rig.ownerIndex.Get(srcPath)
+	entry, err := rig.ownerIndex.Get(rel)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -306,8 +307,7 @@ func TestRun_EmptyIndex(t *testing.T) {
 func TestRun_ProgressOutput(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
-	path := filepath.Join(srcRoot, "logged.bin")
-	rig.backupFile(path, []byte("logged payload"))
+	rig.backupFile(srcRoot, "logged.bin", []byte("logged payload"))
 
 	var out bytes.Buffer
 	if err := restore.Run(context.Background(), restore.Options{
@@ -329,7 +329,7 @@ func TestRun_ProgressOutput(t *testing.T) {
 func TestRun_NilProgress(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
-	rig.backupFile(filepath.Join(srcRoot, "f.bin"), []byte("n"))
+	rig.backupFile(srcRoot, "f.bin", []byte("n"))
 
 	if err := restore.Run(context.Background(), restore.Options{
 		Dest:          t.TempDir(),
@@ -346,7 +346,7 @@ func TestRun_NilProgress(t *testing.T) {
 func TestRun_ContextCancellation(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
-	rig.backupFile(filepath.Join(srcRoot, "f.bin"), []byte("x"))
+	rig.backupFile(srcRoot, "f.bin", []byte("x"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -402,10 +402,9 @@ func TestRun_IndexListError(t *testing.T) {
 func TestRun_UnmarshalError(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
-	srcPath := filepath.Join(srcRoot, "corrupt.bin")
-	rig.backupFile(srcPath, []byte("real bytes"))
+	rel := rig.backupFile(srcRoot, "corrupt.bin", []byte("real bytes"))
 
-	entry, err := rig.ownerIndex.Get(srcPath)
+	entry, err := rig.ownerIndex.Get(rel)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -439,8 +438,7 @@ func TestRun_UnmarshalError(t *testing.T) {
 func TestRun_DecryptError(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
-	srcPath := filepath.Join(srcRoot, "wrong-key.bin")
-	rig.backupFile(srcPath, []byte("encrypted with rig key"))
+	rig.backupFile(srcRoot, "wrong-key.bin", []byte("encrypted with rig key"))
 
 	wrongPub, wrongPriv, err := crypto.GenerateRecipientKey()
 	if err != nil {
@@ -463,6 +461,39 @@ func TestRun_DecryptError(t *testing.T) {
 	}
 }
 
+// TestRun_DestCreateError nests Dest under a 0o500 parent so the up-front
+// os.MkdirAll(opts.Dest) fails; Run must surface a "create dest" wrap.
+func TestRun_DestCreateError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses POSIX file-permission checks")
+	}
+	rig := newRestoreRig(t)
+	srcRoot := t.TempDir()
+	rig.backupFile(srcRoot, "f.bin", []byte("x"))
+
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+
+	dest := filepath.Join(parent, "sub")
+	err := restore.Run(context.Background(), restore.Options{
+		Dest:          dest,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
+		Index:         rig.ownerIndex,
+		RecipientPub:  rig.recipientPub,
+		RecipientPriv: rig.recipientPriv,
+		Progress:      io.Discard,
+	})
+	if err == nil {
+		t.Fatal("restore.Run accepted Dest under read-only parent")
+	}
+	if !strings.Contains(err.Error(), "create dest") {
+		t.Errorf("err = %q, want 'create dest' mention", err)
+	}
+}
+
 // TestRun_MkdirError points Dest at a read-only tree and asserts restoreFile surfaces the mkdir failure.
 func TestRun_MkdirError(t *testing.T) {
 	if os.Geteuid() == 0 {
@@ -470,7 +501,7 @@ func TestRun_MkdirError(t *testing.T) {
 	}
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
-	rig.backupFile(filepath.Join(srcRoot, "f.bin"), []byte("x"))
+	rig.backupFile(srcRoot, "sub/f.bin", []byte("x"))
 
 	ro := t.TempDir()
 	if err := os.Chmod(ro, 0o500); err != nil {
@@ -497,8 +528,7 @@ func TestRun_MkdirError(t *testing.T) {
 func TestRun_RefusesSymlinkAtTarget(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
-	srcPath := filepath.Join(srcRoot, "victim.bin")
-	rig.backupFile(srcPath, []byte("plaintext that must not leak"))
+	rel := rig.backupFile(srcRoot, "victim.bin", []byte("plaintext that must not leak"))
 
 	dest := t.TempDir()
 	sentinelPath := filepath.Join(t.TempDir(), "sentinel")
@@ -507,10 +537,7 @@ func TestRun_RefusesSymlinkAtTarget(t *testing.T) {
 		t.Fatalf("write sentinel: %v", err)
 	}
 
-	target := filepath.Join(dest, srcPath)
-	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-		t.Fatalf("mkdir parent: %v", err)
-	}
+	target := filepath.Join(dest, rel)
 	if err := os.Symlink(sentinelPath, target); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
@@ -555,11 +582,159 @@ func TestRun_NoConns(t *testing.T) {
 	}
 }
 
+// TestRun_RejectsDotDotInEntryPath plants a sentinel outside Dest and a
+// tampered entry.Path containing `..` segments that, after Clean, would
+// resolve to the sentinel. Restore must error before any I/O lands; the
+// sentinel bytes must remain unchanged.
+func TestRun_RejectsDotDotInEntryPath(t *testing.T) {
+	rig := newRestoreRig(t)
+	srcRoot := t.TempDir()
+	rel := rig.backupFile(srcRoot, "real.bin", []byte("real bytes"))
+
+	sentinelDir := t.TempDir()
+	sentinelPath := filepath.Join(sentinelDir, "secret")
+	sentinelOriginal := []byte("must remain untouched")
+	if err := os.WriteFile(sentinelPath, sentinelOriginal, 0o600); err != nil {
+		t.Fatalf("seed sentinel: %v", err)
+	}
+
+	dest := t.TempDir()
+	tampered, err := filepath.Rel(dest, sentinelPath)
+	if err != nil {
+		t.Fatalf("Rel: %v", err)
+	}
+	entry, err := rig.ownerIndex.Get(rel)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	entry.Path = tampered
+	if err := rig.ownerIndex.Put(entry); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	err = restore.Run(context.Background(), restore.Options{
+		Dest:          dest,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
+		Index:         rig.ownerIndex,
+		RecipientPub:  rig.recipientPub,
+		RecipientPriv: rig.recipientPriv,
+		Progress:      io.Discard,
+	})
+	if err == nil {
+		t.Fatal("restore.Run accepted entry.Path with '..' segments")
+	}
+
+	got, readErr := os.ReadFile(sentinelPath)
+	if readErr != nil {
+		t.Fatalf("read sentinel: %v", readErr)
+	}
+	if !bytes.Equal(got, sentinelOriginal) {
+		t.Errorf("sentinel was overwritten via path traversal: %q", got)
+	}
+}
+
+// TestRun_RejectsParentSymlinkRedirect pre-plants <Dest>/sub as a symlink
+// to a sentinel-target dir outside Dest, then tampers the index entry to
+// a relative path that walks through the symlink. The rooted handle must
+// reject the operation; the sentinel target must stay unchanged.
+func TestRun_RejectsParentSymlinkRedirect(t *testing.T) {
+	rig := newRestoreRig(t)
+	srcRoot := t.TempDir()
+	rel := rig.backupFile(srcRoot, "victim.bin", []byte("plaintext that must not leak"))
+
+	sentinelDir := t.TempDir()
+	sentinelPath := filepath.Join(sentinelDir, "leaf.bin")
+	sentinelOriginal := []byte("untouched original")
+	if err := os.WriteFile(sentinelPath, sentinelOriginal, 0o600); err != nil {
+		t.Fatalf("seed sentinel: %v", err)
+	}
+
+	dest := t.TempDir()
+	if err := os.Symlink(sentinelDir, filepath.Join(dest, "sub")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	entry, err := rig.ownerIndex.Get(rel)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	entry.Path = "sub/leaf.bin"
+	if err := rig.ownerIndex.Put(entry); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	err = restore.Run(context.Background(), restore.Options{
+		Dest:          dest,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
+		Index:         rig.ownerIndex,
+		RecipientPub:  rig.recipientPub,
+		RecipientPriv: rig.recipientPriv,
+		Progress:      io.Discard,
+	})
+	if err == nil {
+		t.Fatal("restore.Run followed parent symlink to write outside Dest")
+	}
+
+	got, readErr := os.ReadFile(sentinelPath)
+	if readErr != nil {
+		t.Fatalf("read sentinel: %v", readErr)
+	}
+	if !bytes.Equal(got, sentinelOriginal) {
+		t.Errorf("sentinel target overwritten through parent symlink: %q", got)
+	}
+}
+
+// TestRun_RejectsAbsoluteEntryPath plants a sentinel at an absolute
+// system-looking path and tampers entry.Path to that absolute path. The
+// boundary check must reject before any I/O — entries are rel-only.
+func TestRun_RejectsAbsoluteEntryPath(t *testing.T) {
+	rig := newRestoreRig(t)
+	srcRoot := t.TempDir()
+	rel := rig.backupFile(srcRoot, "real.bin", []byte("real bytes"))
+
+	sentinelDir := t.TempDir()
+	sentinelPath := filepath.Join(sentinelDir, "system-file")
+	sentinelOriginal := []byte("system payload, untouched")
+	if err := os.WriteFile(sentinelPath, sentinelOriginal, 0o600); err != nil {
+		t.Fatalf("seed sentinel: %v", err)
+	}
+
+	entry, err := rig.ownerIndex.Get(rel)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	entry.Path = sentinelPath
+	if err := rig.ownerIndex.Put(entry); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	dest := t.TempDir()
+	err = restore.Run(context.Background(), restore.Options{
+		Dest:          dest,
+		Conns:         []*bsquic.Conn{rig.ownerConn},
+		Index:         rig.ownerIndex,
+		RecipientPub:  rig.recipientPub,
+		RecipientPriv: rig.recipientPriv,
+		Progress:      io.Discard,
+	})
+	if err == nil {
+		t.Fatal("restore.Run accepted absolute entry.Path")
+	}
+
+	got, readErr := os.ReadFile(sentinelPath)
+	if readErr != nil {
+		t.Fatalf("read sentinel: %v", readErr)
+	}
+	if !bytes.Equal(got, sentinelOriginal) {
+		t.Errorf("real sentinel overwritten — escape happened: %q", got)
+	}
+}
+
 // TestRun_GetChunkError asserts a closed conn surfaces the transport err.
 func TestRun_GetChunkError(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
-	rig.backupFile(filepath.Join(srcRoot, "f.bin"), []byte("bytes"))
+	rig.backupFile(srcRoot, "f.bin", []byte("bytes"))
 	_ = rig.ownerConn.Close()
 
 	err := restore.Run(context.Background(), restore.Options{

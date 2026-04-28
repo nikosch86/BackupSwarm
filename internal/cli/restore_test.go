@@ -104,9 +104,9 @@ func TestRestoreCmd_EndToEnd(t *testing.T) {
 	t.Cleanup(func() { _ = ix.Close() })
 
 	srcRoot := t.TempDir()
-	srcPath := filepath.Join(srcRoot, "doc.bin")
+	srcRel := "doc.bin"
 	wantBytes := bytes.Repeat([]byte("Z"), 1<<18)
-	if err := os.WriteFile(srcPath, wantBytes, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(srcRoot, srcRel), wantBytes, 0o600); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
 	_ = rk
@@ -119,7 +119,7 @@ func TestRestoreCmd_EndToEnd(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 	if err := backup.Run(context.Background(), backup.RunOptions{
-		Path:         srcPath,
+		Path:         srcRoot,
 		Conns:        []*bsquic.Conn{ownerConn},
 		RecipientPub: rk.PublicKey,
 		Index:        ix,
@@ -145,7 +145,7 @@ func TestRestoreCmd_EndToEnd(t *testing.T) {
 		t.Fatalf("restore execute: %v", err)
 	}
 
-	restored, err := os.ReadFile(filepath.Join(dest, srcPath))
+	restored, err := os.ReadFile(filepath.Join(dest, srcRel))
 	if err != nil {
 		t.Fatalf("read restored: %v", err)
 	}

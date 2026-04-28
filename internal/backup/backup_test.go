@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -122,7 +123,7 @@ func TestRun_SingleFileSmall(t *testing.T) {
 	data := writeFile(t, path, 1<<20)
 
 	opts := backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{rig.ownerConn},
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
@@ -133,7 +134,7 @@ func TestRun_SingleFileSmall(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	entry, err := rig.ownerIndex.Get(path)
+	entry, err := rig.ownerIndex.Get(filepath.Base(path))
 	if err != nil {
 		t.Fatalf("Index.Get: %v", err)
 	}
@@ -163,7 +164,7 @@ func TestRun_EmptyFile(t *testing.T) {
 	}
 
 	opts := backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{rig.ownerConn},
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
@@ -174,7 +175,7 @@ func TestRun_EmptyFile(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	entry, err := rig.ownerIndex.Get(path)
+	entry, err := rig.ownerIndex.Get(filepath.Base(path))
 	if err != nil {
 		t.Fatalf("Index.Get: %v", err)
 	}
@@ -190,7 +191,7 @@ func TestRun_MultiChunkFile(t *testing.T) {
 	data := writeFile(t, path, (1<<20)*3+42)
 
 	opts := backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{rig.ownerConn},
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
@@ -201,7 +202,7 @@ func TestRun_MultiChunkFile(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	entry, err := rig.ownerIndex.Get(path)
+	entry, err := rig.ownerIndex.Get(filepath.Base(path))
 	if err != nil {
 		t.Fatalf("Index.Get: %v", err)
 	}
@@ -223,13 +224,13 @@ func TestRun_MultiChunkFile(t *testing.T) {
 func TestRun_DirectoryWalk(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
-	wantPaths := []string{
-		filepath.Join(root, "a.txt"),
-		filepath.Join(root, "sub", "b.txt"),
-		filepath.Join(root, "sub", "deep", "c.txt"),
+	relPaths := []string{
+		"a.txt",
+		filepath.Join("sub", "b.txt"),
+		filepath.Join("sub", "deep", "c.txt"),
 	}
-	for _, p := range wantPaths {
-		writeFile(t, p, 1<<20)
+	for _, rel := range relPaths {
+		writeFile(t, filepath.Join(root, rel), 1<<20)
 	}
 
 	opts := backup.RunOptions{
@@ -253,9 +254,9 @@ func TestRun_DirectoryWalk(t *testing.T) {
 		gotPaths[i] = e.Path
 	}
 	sort.Strings(gotPaths)
-	sort.Strings(wantPaths)
-	if fmt.Sprint(gotPaths) != fmt.Sprint(wantPaths) {
-		t.Errorf("indexed paths = %v, want %v", gotPaths, wantPaths)
+	sort.Strings(relPaths)
+	if fmt.Sprint(gotPaths) != fmt.Sprint(relPaths) {
+		t.Errorf("indexed paths = %v, want %v", gotPaths, relPaths)
 	}
 }
 
@@ -267,7 +268,7 @@ func TestPrune_RemovesMissingFileFromSwarmAndIndex(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	opts := backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{rig.ownerConn},
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
@@ -277,7 +278,7 @@ func TestPrune_RemovesMissingFileFromSwarmAndIndex(t *testing.T) {
 	if err := backup.Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	entry, err := rig.ownerIndex.Get(path)
+	entry, err := rig.ownerIndex.Get(filepath.Base(path))
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -307,7 +308,7 @@ func TestPrune_RemovesMissingFileFromSwarmAndIndex(t *testing.T) {
 			t.Errorf("chunk %d: peer still has blob after Prune", i)
 		}
 	}
-	if _, err := rig.ownerIndex.Get(path); !errors.Is(err, index.ErrFileNotFound) {
+	if _, err := rig.ownerIndex.Get(filepath.Base(path)); !errors.Is(err, index.ErrFileNotFound) {
 		t.Errorf("index entry for deleted path err = %v, want ErrFileNotFound", err)
 	}
 }
@@ -320,7 +321,7 @@ func TestPrune_LeavesPresentFilesAlone(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	opts := backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{rig.ownerConn},
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
@@ -330,7 +331,7 @@ func TestPrune_LeavesPresentFilesAlone(t *testing.T) {
 	if err := backup.Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	entry, err := rig.ownerIndex.Get(path)
+	entry, err := rig.ownerIndex.Get(filepath.Base(path))
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -353,34 +354,34 @@ func TestPrune_LeavesPresentFilesAlone(t *testing.T) {
 			t.Errorf("chunk %d: peer lost blob for still-present file", i)
 		}
 	}
-	if _, err := rig.ownerIndex.Get(path); err != nil {
+	if _, err := rig.ownerIndex.Get(filepath.Base(path)); err != nil {
 		t.Errorf("index entry for still-present path removed: %v", err)
 	}
 }
 
-// TestPrune_IgnoresEntriesOutsideRoot asserts Prune leaves entries whose paths are not under Root untouched.
-func TestPrune_IgnoresEntriesOutsideRoot(t *testing.T) {
+// TestPrune_IgnoresTamperedEntries asserts Prune skips index entries
+// whose Path is absolute or contains `..` segments (a tampered entry,
+// since backup.Run only writes rel-to-Root paths). The entry is left
+// in place so the operator can investigate.
+func TestPrune_IgnoresTamperedEntries(t *testing.T) {
 	rig := newTestRig(t)
-	outside := filepath.Join(t.TempDir(), "not-under-root.bin")
-	writeFile(t, outside, 1<<20)
-	opts := backup.RunOptions{
-		Path:         outside,
-		Conns:        []*bsquic.Conn{rig.ownerConn},
-		RecipientPub: rig.recipientPub,
-		Index:        rig.ownerIndex,
-		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
+	tamperedPaths := []string{
+		filepath.Join(t.TempDir(), "absolute.bin"),
+		".." + string(filepath.Separator) + "escape.bin",
 	}
-	if err := backup.Run(context.Background(), opts); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if err := os.Remove(outside); err != nil {
-		t.Fatalf("rm: %v", err)
+	for _, p := range tamperedPaths {
+		if err := rig.ownerIndex.Put(index.FileEntry{
+			Path:    p,
+			Size:    1,
+			ModTime: time.Now(),
+			Chunks:  []index.ChunkRef{{CiphertextHash: [32]byte{0xaa}, Size: 10}},
+		}); err != nil {
+			t.Fatalf("seed tampered entry %q: %v", p, err)
+		}
 	}
 
-	emptyRoot := t.TempDir()
 	pruneOpts := backup.PruneOptions{
-		Root:     emptyRoot,
+		Root:     t.TempDir(),
 		Conns:    []*bsquic.Conn{rig.ownerConn},
 		Index:    rig.ownerIndex,
 		Progress: io.Discard,
@@ -388,8 +389,10 @@ func TestPrune_IgnoresEntriesOutsideRoot(t *testing.T) {
 	if err := backup.Prune(context.Background(), pruneOpts); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	if _, err := rig.ownerIndex.Get(outside); err != nil {
-		t.Errorf("entry outside Prune's Root removed: %v", err)
+	for _, p := range tamperedPaths {
+		if _, err := rig.ownerIndex.Get(p); err != nil {
+			t.Errorf("tampered entry %q removed by Prune: %v", p, err)
+		}
 	}
 }
 
@@ -431,7 +434,7 @@ func TestRun_Incremental(t *testing.T) {
 			writeFile(t, path, 1<<20)
 
 			opts := backup.RunOptions{
-				Path:         path,
+				Path:         root,
 				Conns:        []*bsquic.Conn{rig.ownerConn},
 				RecipientPub: rig.recipientPub,
 				Index:        rig.ownerIndex,
@@ -441,7 +444,7 @@ func TestRun_Incremental(t *testing.T) {
 			if err := backup.Run(context.Background(), opts); err != nil {
 				t.Fatalf("Run #1: %v", err)
 			}
-			firstEntry, err := rig.ownerIndex.Get(path)
+			firstEntry, err := rig.ownerIndex.Get(filepath.Base(path))
 			if err != nil {
 				t.Fatalf("Get #1: %v", err)
 			}
@@ -453,7 +456,7 @@ func TestRun_Incremental(t *testing.T) {
 			if err := backup.Run(context.Background(), opts); err != nil {
 				t.Fatalf("Run #2: %v", err)
 			}
-			secondEntry, err := rig.ownerIndex.Get(path)
+			secondEntry, err := rig.ownerIndex.Get(filepath.Base(path))
 			if err != nil {
 				t.Fatalf("Get #2: %v", err)
 			}
@@ -493,7 +496,7 @@ func TestRun_RecordsStatFields(t *testing.T) {
 	}
 
 	opts := backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{rig.ownerConn},
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
@@ -503,7 +506,7 @@ func TestRun_RecordsStatFields(t *testing.T) {
 	if err := backup.Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	entry, err := rig.ownerIndex.Get(path)
+	entry, err := rig.ownerIndex.Get(filepath.Base(path))
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -522,7 +525,7 @@ func TestRun_RecordsPeerPubKey(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	opts := backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{rig.ownerConn},
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
@@ -532,7 +535,7 @@ func TestRun_RecordsPeerPubKey(t *testing.T) {
 	if err := backup.Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	entry, err := rig.ownerIndex.Get(path)
+	entry, err := rig.ownerIndex.Get(filepath.Base(path))
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -558,7 +561,7 @@ func TestRun_ContextCancellation(t *testing.T) {
 	cancel()
 
 	opts := backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{rig.ownerConn},
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
@@ -578,7 +581,7 @@ func TestRun_ProgressOutput(t *testing.T) {
 
 	var progress bytes.Buffer
 	opts := backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{rig.ownerConn},
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
@@ -608,6 +611,52 @@ func TestRun_RejectsMissingPath(t *testing.T) {
 	}
 }
 
+// TestRun_RejectsEmptyPath asserts an empty opts.Path is rejected with a
+// "Path is empty" message before any I/O is attempted.
+func TestRun_RejectsEmptyPath(t *testing.T) {
+	rig := newTestRig(t)
+	opts := backup.RunOptions{
+		Path:         "",
+		Conns:        []*bsquic.Conn{rig.ownerConn},
+		RecipientPub: rig.recipientPub,
+		Index:        rig.ownerIndex,
+		ChunkSize:    1 << 20,
+		Progress:     io.Discard,
+	}
+	err := backup.Run(context.Background(), opts)
+	if err == nil {
+		t.Fatal("Run accepted empty Path")
+	}
+	if !strings.Contains(err.Error(), "Path is empty") {
+		t.Errorf("err = %q, want 'Path is empty' mention", err)
+	}
+}
+
+// TestRun_RejectsRegularFilePath asserts a regular-file opts.Path is
+// rejected with a "not a directory" message; backup is directory-only.
+func TestRun_RejectsRegularFilePath(t *testing.T) {
+	rig := newTestRig(t)
+	root := t.TempDir()
+	file := filepath.Join(root, "single.bin")
+	writeFile(t, file, 1<<10)
+
+	opts := backup.RunOptions{
+		Path:         file,
+		Conns:        []*bsquic.Conn{rig.ownerConn},
+		RecipientPub: rig.recipientPub,
+		Index:        rig.ownerIndex,
+		ChunkSize:    1 << 20,
+		Progress:     io.Discard,
+	}
+	err := backup.Run(context.Background(), opts)
+	if err == nil {
+		t.Fatal("Run accepted a regular-file Path")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("err = %q, want 'not a directory' mention", err)
+	}
+}
+
 func TestRun_RejectsInvalidChunkSize(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
@@ -615,7 +664,7 @@ func TestRun_RejectsInvalidChunkSize(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	opts := backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{rig.ownerConn},
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
@@ -646,7 +695,7 @@ func TestServe_ConcurrentRuns(t *testing.T) {
 		go func(path string) {
 			defer wg.Done()
 			opts := backup.RunOptions{
-				Path:         path,
+				Path:         root,
 				Conns:        []*bsquic.Conn{rig.ownerConn},
 				RecipientPub: rig.recipientPub,
 				Index:        rig.ownerIndex,
@@ -692,10 +741,10 @@ func TestRun_SkipsSymlinks(t *testing.T) {
 	if err := backup.Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if _, err := rig.ownerIndex.Get(symlink); !errors.Is(err, index.ErrFileNotFound) {
+	if _, err := rig.ownerIndex.Get(filepath.Base(symlink)); !errors.Is(err, index.ErrFileNotFound) {
 		t.Errorf("symlink %q should not have been indexed", symlink)
 	}
-	if _, err := rig.ownerIndex.Get(realFile); err != nil {
+	if _, err := rig.ownerIndex.Get(filepath.Base(realFile)); err != nil {
 		t.Errorf("real file should have been indexed: %v", err)
 	}
 	if !bytes.Contains(progress.Bytes(), []byte("skip")) {
@@ -714,7 +763,7 @@ func TestRun_PropagatesIndexError(t *testing.T) {
 	}
 
 	opts := backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{rig.ownerConn},
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
@@ -782,7 +831,7 @@ func TestRun_PeerErrorPropagation(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	opts := backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{ownerConn},
 		RecipientPub: recipientPub,
 		Index:        ownerIndex,
@@ -882,7 +931,7 @@ func TestRun_DefaultsNilProgress(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	opts := backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{rig.ownerConn},
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
@@ -902,7 +951,7 @@ func TestRun_NilRecipientPubFailsEncrypt(t *testing.T) {
 	writeFile(t, path, 1<<20)
 
 	err := backup.Run(context.Background(), backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{rig.ownerConn},
 		RecipientPub: nil,
 		Index:        rig.ownerIndex,
@@ -929,7 +978,7 @@ func TestRun_OpenFileError(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
 
 	opts := backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{rig.ownerConn},
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
@@ -991,7 +1040,7 @@ func TestPrune_ContextCancelled(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
 	if err := rig.ownerIndex.Put(index.FileEntry{
-		Path:   filepath.Join(root, "ghost.bin"),
+		Path:   "ghost.bin",
 		Size:   1,
 		Chunks: []index.ChunkRef{{CiphertextHash: [32]byte{0x01}, Size: 10}},
 	}); err != nil {
@@ -1020,7 +1069,7 @@ func TestPrune_SendDeleteChunkError(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
 	if err := rig.ownerIndex.Put(index.FileEntry{
-		Path:   filepath.Join(root, "ghost.bin"),
+		Path:   "ghost.bin",
 		Size:   1,
 		Chunks: []index.ChunkRef{{CiphertextHash: [32]byte{0x11}, Size: 10}},
 	}); err != nil {
@@ -1055,9 +1104,8 @@ func TestPrune_NonNotFoundPeerErrorLogsAndFails(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	path := filepath.Join(root, "ghost.bin")
 	if err := rig.ownerIndex.Put(index.FileEntry{
-		Path:    path,
+		Path:    "ghost.bin",
 		Size:    int64(len(blob)),
 		ModTime: time.Now(),
 		Chunks: []index.ChunkRef{{
@@ -1114,7 +1162,7 @@ func TestPrune_NilProgressDefaultsToDiscard(t *testing.T) {
 	path := filepath.Join(root, "vanish.bin")
 	writeFile(t, path, 1<<20)
 	if err := backup.Run(context.Background(), backup.RunOptions{
-		Path:         path,
+		Path:         root,
 		Conns:        []*bsquic.Conn{rig.ownerConn},
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
@@ -1150,7 +1198,7 @@ func TestPrune_StatError(t *testing.T) {
 	path := filepath.Join(sub, "hidden.bin")
 	writeFile(t, path, 1<<20)
 	if err := rig.ownerIndex.Put(index.FileEntry{
-		Path:   path,
+		Path:   filepath.Join("locked", "hidden.bin"),
 		Size:   1,
 		Chunks: []index.ChunkRef{{CiphertextHash: [32]byte{0xbb}, Size: 10}},
 	}); err != nil {

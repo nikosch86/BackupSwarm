@@ -21,20 +21,20 @@ import (
 	"backupswarm/internal/store"
 )
 
-// withOpenFileFunc swaps openFileFunc for the duration of a test.
-func withOpenFileFunc(t *testing.T, fn func(name string, flag int, perm os.FileMode) (writableFile, error)) {
+// withOpenInRootFunc swaps openInRootFunc for the duration of a test.
+func withOpenInRootFunc(t *testing.T, fn func(root *os.Root, name string, flag int, perm os.FileMode) (writableFile, error)) {
 	t.Helper()
-	prev := openFileFunc
-	openFileFunc = fn
-	t.Cleanup(func() { openFileFunc = prev })
+	prev := openInRootFunc
+	openInRootFunc = fn
+	t.Cleanup(func() { openInRootFunc = prev })
 }
 
-// withChtimesFunc swaps chtimesFunc for the duration of a test.
-func withChtimesFunc(t *testing.T, fn func(name string, atime time.Time, mtime time.Time) error) {
+// withChtimesInRootFunc swaps chtimesInRootFunc for the duration of a test.
+func withChtimesInRootFunc(t *testing.T, fn func(root *os.Root, name string, atime time.Time, mtime time.Time) error) {
 	t.Helper()
-	prev := chtimesFunc
-	chtimesFunc = fn
-	t.Cleanup(func() { chtimesFunc = prev })
+	prev := chtimesInRootFunc
+	chtimesInRootFunc = fn
+	t.Cleanup(func() { chtimesInRootFunc = prev })
 }
 
 // fakeWritableFile wraps a real *os.File and lets tests inject Write or Close failures.
@@ -107,12 +107,11 @@ func seedRig(t *testing.T) Options {
 	}
 
 	src := t.TempDir()
-	path := filepath.Join(src, "seed.bin")
-	if err := os.WriteFile(path, []byte("seed"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(src, "seed.bin"), []byte("seed"), 0o600); err != nil {
 		t.Fatalf("write seed: %v", err)
 	}
 	if err := backup.Run(context.Background(), backup.RunOptions{
-		Path:         path,
+		Path:         src,
 		Conns:        []*bsquic.Conn{ownerConn},
 		RecipientPub: recipientPub,
 		Index:        idx,
@@ -137,8 +136,8 @@ func TestRestoreFile_WriteFailure(t *testing.T) {
 	opts.Dest = t.TempDir()
 
 	sentinel := errors.New("forced write failure")
-	withOpenFileFunc(t, func(name string, flag int, perm os.FileMode) (writableFile, error) {
-		real, err := os.OpenFile(name, flag, perm)
+	withOpenInRootFunc(t, func(root *os.Root, name string, flag int, perm os.FileMode) (writableFile, error) {
+		real, err := root.OpenFile(name, flag, perm)
 		if err != nil {
 			return nil, err
 		}
@@ -163,8 +162,8 @@ func TestRestoreFile_CloseFailure(t *testing.T) {
 	opts.Dest = t.TempDir()
 
 	sentinel := errors.New("forced close failure")
-	withOpenFileFunc(t, func(name string, flag int, perm os.FileMode) (writableFile, error) {
-		real, err := os.OpenFile(name, flag, perm)
+	withOpenInRootFunc(t, func(root *os.Root, name string, flag int, perm os.FileMode) (writableFile, error) {
+		real, err := root.OpenFile(name, flag, perm)
 		if err != nil {
 			return nil, err
 		}
@@ -189,7 +188,7 @@ func TestRestoreFile_ChtimesFailure(t *testing.T) {
 	opts.Dest = t.TempDir()
 
 	sentinel := errors.New("forced chtimes failure")
-	withChtimesFunc(t, func(name string, atime, mtime time.Time) error {
+	withChtimesInRootFunc(t, func(root *os.Root, name string, atime, mtime time.Time) error {
 		return sentinel
 	})
 
@@ -237,15 +236,64 @@ func TestRestoreFile_ContextCancelledInChunkLoop(t *testing.T) {
 		connByPub[hex.EncodeToString(c.RemotePub())] = c
 	}
 
+	root, err := os.OpenRoot(opts.Dest)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+
+	rel, err := normalizeRel(entries[0].Path)
+	if err != nil {
+		t.Fatalf("normalizeRel: %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err = restoreFile(ctx, opts, entries[0], connByPub)
+	err = restoreFile(ctx, opts, root, rel, entries[0], connByPub)
 	if err == nil {
 		t.Fatal("restoreFile returned nil despite cancelled ctx")
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want context.Canceled", err)
+	}
+}
+
+// TestNormalizeRel_TableDriven covers the rel-path validation rules:
+// empty, absolute, and `..`-bearing entries all error; clean relative
+// paths pass through.
+func TestNormalizeRel_TableDriven(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"empty", "", "", true},
+		{"dotdot_prefix", "../etc/passwd", "", true},
+		{"dotdot_middle", "foo/../bar", "", true},
+		{"dotdot_only", "..", "", true},
+		{"absolute", "/etc/passwd", "", true},
+		{"absolute_with_dotdot", "/foo/../etc/passwd", "", true},
+		{"relative_clean", "foo/bar", "foo/bar", false},
+		{"single_dot", ".", ".", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := normalizeRel(c.in)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("normalizeRel(%q) = %q, want error", c.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalizeRel(%q) errored: %v", c.in, err)
+			}
+			if got != c.want {
+				t.Errorf("normalizeRel(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
 	}
 }
 

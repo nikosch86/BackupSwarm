@@ -434,9 +434,8 @@ func TestPurgeAll_PruneFailurePropagates(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = idx.Close() })
 
-	ghost := filepath.Join(t.TempDir(), "ghost.bin")
 	if err := idx.Put(index.FileEntry{
-		Path: ghost,
+		Path: "ghost.bin",
 		Size: 1,
 		Chunks: []index.ChunkRef{
 			{CiphertextHash: [32]byte{0xaa}, Size: 10},

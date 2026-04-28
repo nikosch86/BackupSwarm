@@ -51,7 +51,7 @@ func TestBackupFile_ContextCancelled(t *testing.T) {
 		Index:        idx,
 		ChunkSize:    1 << 20,
 	}
-	err = backupFile(ctx, opts, path, nil, mrand.New(mrand.NewPCG(1, 2)))
+	err = backupFile(ctx, opts, path, filepath.Base(path), nil, mrand.New(mrand.NewPCG(1, 2)))
 	if err == nil {
 		t.Fatal("backupFile returned nil despite cancelled ctx")
 	}

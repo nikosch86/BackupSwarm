@@ -15,6 +15,7 @@ import (
 	mrand "math/rand/v2"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,7 +46,9 @@ var (
 
 // RunOptions is the owner-side configuration for a backup invocation.
 type RunOptions struct {
-	// Path is the file or directory to backup.
+	// Path is the directory to back up. Must exist and be a directory.
+	// Each indexed file's entry.Path is recorded relative to Path so a
+	// subsequent restore stays bounded to the same configured root.
 	Path string
 	// Conns are the live QUIC connections to candidate storage peers.
 	// Each invocation probes capacity per conn and picks Redundancy
@@ -72,9 +75,10 @@ type RunOptions struct {
 	Rng placement.Rng
 }
 
-// Run backs up everything under opts.Path across opts.Conns. Directories
-// are walked recursively; regular files are split, encrypted, shipped, and
-// indexed. Symlinks and special files are skipped (with a progress note).
+// Run backs up every regular file under opts.Path across opts.Conns.
+// opts.Path must be an existing directory; each file's entry.Path is
+// recorded relative to it. Symlinks and special files are skipped (with
+// a progress note).
 func Run(ctx context.Context, opts RunOptions) error {
 	if opts.Progress == nil {
 		opts.Progress = io.Discard
@@ -85,9 +89,15 @@ func Run(ctx context.Context, opts RunOptions) error {
 	if len(opts.Conns) == 0 {
 		return errors.New("backup: no peer conns provided")
 	}
+	if opts.Path == "" {
+		return errors.New("backup: opts.Path is empty")
+	}
 	info, err := os.Stat(opts.Path)
 	if err != nil {
 		return fmt.Errorf("stat %q: %w", opts.Path, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("backup: opts.Path %q is not a directory", opts.Path)
 	}
 
 	candidates := probeCandidates(ctx, opts.Conns)
@@ -100,9 +110,6 @@ func Run(ctx context.Context, opts RunOptions) error {
 		rng = mrand.New(mrand.NewPCG(uint64(time.Now().UnixNano()), 0xc0ffee))
 	}
 
-	if !info.IsDir() {
-		return backupFile(ctx, opts, opts.Path, candidates, rng)
-	}
 	return filepath.WalkDir(opts.Path, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -117,11 +124,18 @@ func Run(ctx context.Context, opts RunOptions) error {
 			fmt.Fprintf(opts.Progress, "skip non-regular file %s\n", path)
 			return nil
 		}
-		return backupFile(ctx, opts, path, candidates, rng)
+		rel, err := filepath.Rel(opts.Path, path)
+		if err != nil {
+			return fmt.Errorf("rel %q under %q: %w", path, opts.Path, err)
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("backup: walk produced path %q outside root %q", path, opts.Path)
+		}
+		return backupFile(ctx, opts, path, rel, candidates, rng)
 	})
 }
 
-func backupFile(ctx context.Context, opts RunOptions, path string, candidates []candidate, rng placement.Rng) error {
+func backupFile(ctx context.Context, opts RunOptions, path, rel string, candidates []candidate, rng placement.Rng) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -137,13 +151,13 @@ func backupFile(ctx context.Context, opts RunOptions, path string, candidates []
 	}
 
 	// Incremental skip: stat-matching index entry means unchanged file.
-	if existing, err := opts.Index.Get(path); err == nil {
+	if existing, err := opts.Index.Get(rel); err == nil {
 		if existing.Size == info.Size() && existing.ModTime.Equal(info.ModTime()) {
-			fmt.Fprintf(opts.Progress, "unchanged %s\n", path)
+			fmt.Fprintf(opts.Progress, "unchanged %s\n", rel)
 			return nil
 		}
 	} else if !errors.Is(err, index.ErrFileNotFound) {
-		return fmt.Errorf("index get %q: %w", path, err)
+		return fmt.Errorf("index get %q: %w", rel, err)
 	}
 
 	chunks, err := chunk.Split(f, opts.ChunkSize)
@@ -152,7 +166,7 @@ func backupFile(ctx context.Context, opts RunOptions, path string, candidates []
 	}
 
 	entry := index.FileEntry{
-		Path:    path,
+		Path:    rel,
 		Size:    info.Size(),
 		ModTime: info.ModTime(),
 		Chunks:  make([]index.ChunkRef, 0, len(chunks)),
@@ -163,15 +177,15 @@ func backupFile(ctx context.Context, opts RunOptions, path string, candidates []
 		}
 		encrypted, err := crypto.Encrypt(c.Data, opts.RecipientPub)
 		if err != nil {
-			return fmt.Errorf("encrypt chunk %d of %q: %w", i, path, err)
+			return fmt.Errorf("encrypt chunk %d of %q: %w", i, rel, err)
 		}
 		blob, err := encrypted.MarshalBinary()
 		if err != nil {
-			return fmt.Errorf("marshal chunk %d of %q: %w", i, path, err)
+			return fmt.Errorf("marshal chunk %d of %q: %w", i, rel, err)
 		}
 		peers, hash, err := placeChunk(ctx, candidates, opts.Redundancy, blob, rng)
 		if err != nil {
-			return fmt.Errorf("place chunk %d of %q: %w", i, path, err)
+			return fmt.Errorf("place chunk %d of %q: %w", i, rel, err)
 		}
 		entry.Chunks = append(entry.Chunks, index.ChunkRef{
 			PlaintextHash:  c.Hash,
@@ -181,9 +195,9 @@ func backupFile(ctx context.Context, opts RunOptions, path string, candidates []
 		})
 	}
 	if err := indexPutFunc(opts.Index, entry); err != nil {
-		return fmt.Errorf("index put %q: %w", path, err)
+		return fmt.Errorf("index put %q: %w", rel, err)
 	}
-	fmt.Fprintf(opts.Progress, "backed up %s (%d chunks)\n", path, len(chunks))
+	fmt.Fprintf(opts.Progress, "backed up %s (%d chunks)\n", rel, len(chunks))
 	return nil
 }
 
@@ -298,9 +312,8 @@ func Prune(ctx context.Context, opts PruneOptions) error {
 	if len(opts.Conns) == 0 {
 		return errors.New("prune: no peer conns provided")
 	}
-	rootAbs, err := filepath.Abs(opts.Root)
-	if err != nil {
-		return fmt.Errorf("absolute root %q: %w", opts.Root, err)
+	if opts.Root == "" {
+		return errors.New("prune: opts.Root is empty")
 	}
 	entries, err := opts.Index.List()
 	if err != nil {
@@ -314,18 +327,17 @@ func Prune(ctx context.Context, opts PruneOptions) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		pathAbs, err := filepath.Abs(entry.Path)
-		if err != nil {
-			return fmt.Errorf("absolute path %q: %w", entry.Path, err)
-		}
-		rel, err := filepath.Rel(rootAbs, pathAbs)
-		if err != nil || rel == ".." || len(rel) >= 3 && rel[:3] == ".."+string(os.PathSeparator) {
+		// Index entries are rel-to-Root by construction (backup.Run); a
+		// tampered entry that escapes is skipped rather than deleted so
+		// the operator can investigate.
+		if filepath.IsAbs(entry.Path) || entry.Path == ".." || strings.HasPrefix(entry.Path, ".."+string(filepath.Separator)) {
 			continue
 		}
-		if _, statErr := os.Stat(entry.Path); statErr == nil {
+		fullPath := filepath.Join(opts.Root, entry.Path)
+		if _, statErr := os.Stat(fullPath); statErr == nil {
 			continue
 		} else if !errors.Is(statErr, os.ErrNotExist) {
-			return fmt.Errorf("stat %q: %w", entry.Path, statErr)
+			return fmt.Errorf("stat %q: %w", fullPath, statErr)
 		}
 		for _, ref := range entry.Chunks {
 			if err := ctx.Err(); err != nil {
