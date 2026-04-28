@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"sort"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -193,6 +194,57 @@ func TestSnapshotLoop_OwnBackupFnLandsInPublishedSnapshot(t *testing.T) {
 	if snap.OwnBackup != fixed {
 		t.Errorf("snap.OwnBackup = %+v, want %+v", snap.OwnBackup, fixed)
 	}
+}
+
+// TestSnapshotLoop_ModeFnReadEachTick asserts runSnapshotLoop calls
+// modeFn fresh on every publish, so a value swap between ticks lands
+// in the next runtime.json.
+func TestSnapshotLoop_ModeFnReadEachTick(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var mode atomic.Pointer[string]
+	initial := "restore"
+	mode.Store(&initial)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSnapshotLoop(ctx, snapshotLoopOptions{
+			dataDir:    dir,
+			interval:   30 * time.Millisecond,
+			listenAddr: "addr",
+			modeFn:     func() string { return *mode.Load() },
+			connsFn:    func() []*bsquic.Conn { return nil },
+			lastScanFn: func() time.Time { return time.Time{} },
+		})
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	awaitSnapshotMode(t, dir, "restore")
+
+	next := "reconcile"
+	mode.Store(&next)
+	awaitSnapshotMode(t, dir, "reconcile")
+}
+
+// awaitSnapshotMode polls runtime.json in dir until snap.Mode == want
+// or 2s elapses.
+func awaitSnapshotMode(t *testing.T, dir, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snap, err := ReadRuntimeSnapshot(dir)
+		if err == nil && snap.Mode == want {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	snap, _ := ReadRuntimeSnapshot(dir)
+	t.Fatalf("snapshot.Mode = %q, want %q", snap.Mode, want)
 }
 
 // TestSnapshotLoop_NilOwnBackupFnLeavesZero asserts a nil ownBackupFn

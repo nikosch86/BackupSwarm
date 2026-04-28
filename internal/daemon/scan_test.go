@@ -572,6 +572,153 @@ func TestRun_PurgeMode(t *testing.T) {
 	}
 }
 
+// TestRun_ModeTransitionsToReconcileAfterRestore asserts runtime.json
+// reports Mode == "reconcile" once the daemon falls through from a
+// completed ModeRestore into the scan loop.
+func TestRun_ModeTransitionsToReconcileAfterRestore(t *testing.T) {
+	peer := newPeerRig(t)
+	dataDir := t.TempDir()
+	backupDir := t.TempDir()
+	filePath := filepath.Join(backupDir, "restored.bin")
+	writeFile(t, filePath, 1<<20)
+	seedPeer(t, dataDir, peer.addr, peer.pub)
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	done1 := make(chan error, 1)
+	go func() {
+		done1 <- daemon.Run(ctx1, daemon.Options{
+			DataDir:      dataDir,
+			BackupDir:    backupDir,
+			ListenAddr:   "127.0.0.1:0",
+			ChunkSize:    1 << 20,
+			ScanInterval: 50 * time.Millisecond,
+			Progress:     io.Discard,
+		})
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if hasShardDir(mustReadDir(t, peer.storeRoot)) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel1()
+	<-done1
+
+	if err := os.Remove(filePath); err != nil {
+		t.Fatalf("rm original: %v", err)
+	}
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := make(chan error, 1)
+	go func() {
+		done2 <- daemon.Run(ctx2, daemon.Options{
+			DataDir:      dataDir,
+			BackupDir:    backupDir,
+			ListenAddr:   "127.0.0.1:0",
+			ChunkSize:    1 << 20,
+			ScanInterval: 50 * time.Millisecond,
+			Restore:      true,
+			Progress:     io.Discard,
+		})
+	}()
+	defer func() {
+		cancel2()
+		<-done2
+	}()
+
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(filePath); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := os.Stat(filePath); err != nil {
+		t.Fatalf("file never restored: %v", err)
+	}
+
+	deadline = time.Now().Add(3 * time.Second)
+	var snap daemon.RuntimeSnapshot
+	for time.Now().Before(deadline) {
+		var err error
+		snap, err = daemon.ReadRuntimeSnapshot(dataDir)
+		if err == nil && snap.Mode == "reconcile" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Errorf("snapshot.Mode after restore = %q, want %q", snap.Mode, "reconcile")
+}
+
+// TestRun_ModeTransitionsToIdleAfterPurge asserts runtime.json reports
+// Mode == "idle" once the daemon falls through from a completed
+// ModePurge into the scan loop.
+func TestRun_ModeTransitionsToIdleAfterPurge(t *testing.T) {
+	peer := newPeerRig(t)
+	dataDir := t.TempDir()
+	backupDir := t.TempDir()
+	filePath := filepath.Join(backupDir, "doomed.bin")
+	writeFile(t, filePath, 1<<20)
+	seedPeer(t, dataDir, peer.addr, peer.pub)
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	done1 := make(chan error, 1)
+	go func() {
+		done1 <- daemon.Run(ctx1, daemon.Options{
+			DataDir:      dataDir,
+			BackupDir:    backupDir,
+			ListenAddr:   "127.0.0.1:0",
+			ChunkSize:    1 << 20,
+			ScanInterval: 50 * time.Millisecond,
+			Progress:     io.Discard,
+		})
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if hasShardDir(mustReadDir(t, peer.storeRoot)) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel1()
+	<-done1
+
+	if err := os.Remove(filePath); err != nil {
+		t.Fatalf("rm: %v", err)
+	}
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := make(chan error, 1)
+	go func() {
+		done2 <- daemon.Run(ctx2, daemon.Options{
+			DataDir:      dataDir,
+			BackupDir:    backupDir,
+			ListenAddr:   "127.0.0.1:0",
+			ChunkSize:    1 << 20,
+			ScanInterval: 50 * time.Millisecond,
+			Purge:        true,
+			Progress:     io.Discard,
+		})
+	}()
+	defer func() {
+		cancel2()
+		<-done2
+	}()
+
+	deadline = time.Now().Add(3 * time.Second)
+	var snap daemon.RuntimeSnapshot
+	for time.Now().Before(deadline) {
+		var err error
+		snap, err = daemon.ReadRuntimeSnapshot(dataDir)
+		if err == nil && snap.Mode == "idle" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Errorf("snapshot.Mode after purge = %q, want %q", snap.Mode, "idle")
+}
+
 func hasShardDir(entries []os.DirEntry) bool {
 	for _, e := range entries {
 		if e.IsDir() && len(e.Name()) == 2 {

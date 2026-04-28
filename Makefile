@@ -101,40 +101,54 @@ docker-compose-up:
 docker-compose-down:
 	docker compose down -v
 
-## docker-compose-test: end-to-end smoke test of the containerised 3-node swarm
-# Brings the swarm up detached, asserts (1) node-b accepted both joiners
-# (two "peer joined" events), (2) node-a backed up the seeded tree, and
-# (3) node-a observed node-c's PeerJoined via the daemon's broadcast +
-# the dispatcher's announcement-forwarding path ("applied announcement").
+## docker-compose-test: end-to-end smoke test of the containerised 4-node swarm
+# Brings the swarm up detached and asserts: node-b accepted all three
+# joiners ("peer joined" >= 3), node-a backed up the seeded tree,
+# node-a observed both forwarded announcements ("applied announcement"
+# >= 2), and node-a dialed every announced peer ("dialed peer" >= 3).
 docker-compose-test:
 	docker compose up -d --build
-	@echo "waiting for node-b to accept both joiners..."
-	@for i in $$(seq 1 60); do \
+	@echo "waiting for node-b to accept all three joiners..."
+	@for i in $$(seq 1 90); do \
 		count=$$(docker compose logs node-b 2>/dev/null | grep -c '"msg":"peer joined"'); \
-		if [ "$$count" -ge 2 ]; then break; fi; \
+		if [ "$$count" -ge 3 ]; then break; fi; \
 		sleep 1; \
 	done
 	@count=$$(docker compose logs node-b 2>/dev/null | grep -c '"msg":"peer joined"'); \
-	if [ "$$count" -lt 2 ]; then \
-		echo "node-b only logged $$count 'peer joined' events; want >=2"; \
+	if [ "$$count" -lt 3 ]; then \
+		echo "node-b only logged $$count 'peer joined' events; want >=3"; \
 		docker compose logs node-b; docker compose down -v; exit 1; \
 	fi
 	@echo "waiting for node-a to complete at least one scan pass..."
 	@for i in $$(seq 1 60); do \
-		if docker compose logs node-a 2>/dev/null | grep -q 'backed up /backup/'; then break; fi; \
+		if docker compose logs node-a 2>/dev/null | grep -q 'backed up '; then break; fi; \
 		sleep 1; \
 	done
-	@docker compose logs node-a 2>/dev/null | grep -q 'backed up /backup/' || \
+	@docker compose logs node-a 2>/dev/null | grep -q 'backed up ' || \
 		{ echo "node-a never logged 'backed up'"; docker compose logs node-a; docker compose down -v; exit 1; }
-	@echo "waiting for node-a to observe the forwarded PeerJoined for node-c..."
-	@for i in $$(seq 1 60); do \
-		if docker compose logs node-a 2>/dev/null | grep -q '"msg":"applied announcement"'; then break; fi; \
+	@echo "waiting for node-a to observe both forwarded PeerJoined announcements..."
+	@for i in $$(seq 1 90); do \
+		count=$$(docker compose logs node-a 2>/dev/null | grep -c '"msg":"applied announcement"'); \
+		if [ "$$count" -ge 2 ]; then break; fi; \
 		sleep 1; \
 	done
-	@docker compose logs node-a 2>/dev/null | grep -q '"msg":"applied announcement"' || \
-		{ echo "node-a never observed an 'applied announcement' line; broadcast/forwarding broke"; \
-		  docker compose logs node-a; docker compose logs node-b; docker compose down -v; exit 1; }
-	@echo "docker-compose-test: 3-node swarm formed; node-a backed up the seeded tree and saw node-c's announcement"
+	@count=$$(docker compose logs node-a 2>/dev/null | grep -c '"msg":"applied announcement"'); \
+	if [ "$$count" -lt 2 ]; then \
+		echo "node-a only logged $$count 'applied announcement' events; want >=2 (node-c + node-d)"; \
+		docker compose logs node-a; docker compose logs node-b; docker compose down -v; exit 1; \
+	fi
+	@echo "waiting for node-a to dial every announced peer..."
+	@for i in $$(seq 1 90); do \
+		count=$$(docker compose logs node-a 2>/dev/null | grep -c '"msg":"dialed peer"'); \
+		if [ "$$count" -ge 3 ]; then break; fi; \
+		sleep 1; \
+	done
+	@count=$$(docker compose logs node-a 2>/dev/null | grep -c '"msg":"dialed peer"'); \
+	if [ "$$count" -lt 3 ]; then \
+		echo "node-a only logged $$count 'dialed peer' events; want >=3 (node-b at startup + node-c + node-d post-startup)"; \
+		docker compose logs node-a; docker compose down -v; exit 1; \
+	fi
+	@echo "docker-compose-test: 4-node swarm formed; node-a backed up the seeded tree, saw both forwarded announcements, and dialed each announced peer"
 	docker compose down -v
 
 ## trivy-deps: scan source tree for vulnerable deps, secrets, and misconfigs (HIGH+CRITICAL)

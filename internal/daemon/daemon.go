@@ -377,11 +377,14 @@ func Run(ctx context.Context, opts Options) error {
 	serveErrCh := make(chan error, 1)
 	go func() { serveErrCh <- backup.Serve(ctx, listener, st, router.HandleStream, joinHandler, obs) }()
 
-	// modeStr is fixed once at startup; the snapshot reports the entry mode.
-	modeStr := "storage-only"
+	// modeStr is the snapshot's published Mode, swapped after a
+	// one-shot restore/purge completes.
+	var modeStr atomic.Pointer[string]
+	initialMode := "storage-only"
 	if opts.BackupDir != "" {
-		modeStr = modeName(mode)
+		initialMode = modeName(mode)
 	}
+	modeStr.Store(&initialMode)
 	var lastScanAtNanos atomic.Int64
 	lastScanAtFn := func() time.Time {
 		v := lastScanAtNanos.Load()
@@ -401,7 +404,7 @@ func Run(ctx context.Context, opts Options) error {
 			dataDir:      opts.DataDir,
 			interval:     opts.ScanInterval,
 			listenAddr:   listener.Addr().String(),
-			modeFn:       func() string { return modeStr },
+			modeFn:       func() string { return *modeStr.Load() },
 			connsFn:      connSet.Snapshot,
 			lastScanFn:   lastScanAtFn,
 			storeStatsFn: func() (int64, int64) { return st.Used(), st.Capacity() },
@@ -458,6 +461,8 @@ func Run(ctx context.Context, opts Options) error {
 			return fmt.Errorf("purge: %w", err)
 		}
 		fmt.Fprintln(opts.Progress, "purge complete; daemon continuing in idle mode")
+		idleMode := "idle"
+		modeStr.Store(&idleMode)
 	case ModeRestore:
 		// Restore writes each file under opts.BackupDir, the same root
 		// the daemon uses for backup. Index entries are stored relative
@@ -475,6 +480,8 @@ func Run(ctx context.Context, opts Options) error {
 			return fmt.Errorf("restore: %w", err)
 		}
 		fmt.Fprintln(opts.Progress, "restore complete; daemon continuing in reconcile mode")
+		reconcileMode := "reconcile"
+		modeStr.Store(&reconcileMode)
 	}
 
 	scanOpts := ScanOnceOptions{
