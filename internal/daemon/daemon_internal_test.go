@@ -7,6 +7,7 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,8 +15,10 @@ import (
 	"backupswarm/internal/index"
 	"backupswarm/internal/invites"
 	"backupswarm/internal/peers"
+	"backupswarm/internal/protocol"
 	bsquic "backupswarm/internal/quic"
 	"backupswarm/internal/store"
+	"backupswarm/internal/swarm"
 )
 
 // openPickStoragePeerStore opens a fresh peers.db and registers a
@@ -288,31 +291,224 @@ func TestListDialablePeers_ListFailureSurfacesWrapped(t *testing.T) {
 	}
 }
 
-// TestPickStorageConns_OnlyStorageCandidates asserts pickStorageConns
-// returns conns for every IsStorageCandidate and skips RolePeer entries.
-func TestPickStorageConns_OnlyStorageCandidates(t *testing.T) {
-	rolePub := mustGenPub(t)
-	introPub := mustGenPub(t)
-	storagePub := mustGenPub(t)
-	dialed := []dialedPeer{
-		{peer: peers.Peer{Addr: "a", PubKey: rolePub, Role: peers.RolePeer}},
-		{peer: peers.Peer{Addr: "b", PubKey: introPub, Role: peers.RoleIntroducer}},
-		{peer: peers.Peer{Addr: "c", PubKey: storagePub, Role: peers.RoleStorage}},
+// connDialRig binds one listener and accepts N inbound conns, each
+// with a distinct RemotePub from the corresponding dialer.
+type connDialRig struct {
+	listener *bsquic.Listener
+	conns    []*bsquic.Conn
+	pubs     []ed25519.PublicKey
+}
+
+func setupConnDialRig(t *testing.T, n int) *connDialRig {
+	t.Helper()
+	_, listenerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("listener key: %v", err)
 	}
-	got := pickStorageConns(dialed)
+	listenerPub := listenerPriv.Public().(ed25519.PublicKey)
+	l, err := bsquic.Listen("127.0.0.1:0", listenerPriv, nil, nil)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	rig := &connDialRig{listener: l}
+	for i := 0; i < n; i++ {
+		dialPub, dialPriv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatalf("dialer %d key: %v", i, err)
+		}
+		dialErr := make(chan error, 1)
+		dialOut := make(chan *bsquic.Conn, 1)
+		go func() {
+			dctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			c, err := bsquic.Dial(dctx, l.Addr().String(), dialPriv, listenerPub, nil)
+			if err != nil {
+				dialErr <- err
+				return
+			}
+			dialOut <- c
+		}()
+		actx, acancel := context.WithTimeout(context.Background(), 5*time.Second)
+		accepted, err := l.Accept(actx)
+		acancel()
+		if err != nil {
+			t.Fatalf("Accept %d: %v", i, err)
+		}
+		var dialedConn *bsquic.Conn
+		select {
+		case dialedConn = <-dialOut:
+		case err := <-dialErr:
+			t.Fatalf("Dial %d: %v", i, err)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("Dial %d timed out", i)
+		}
+		t.Cleanup(func() {
+			_ = dialedConn.Close()
+			_ = accepted.Close()
+		})
+		rig.conns = append(rig.conns, accepted)
+		rig.pubs = append(rig.pubs, dialPub)
+	}
+	return rig
+}
+
+// TestLiveStorageConns_FiltersByRole asserts the live filter keeps
+// conns whose remote pubkey maps to RoleStorage / RoleIntroducer in
+// peers.db and drops RolePeer + unknown pubkeys.
+func TestLiveStorageConns_FiltersByRole(t *testing.T) {
+	rig := setupConnDialRig(t, 4)
+	ps := openPickStoragePeerStore(t)
+	if err := ps.Add(peers.Peer{Addr: "1", PubKey: rig.pubs[0], Role: peers.RoleStorage}); err != nil {
+		t.Fatalf("Add storage: %v", err)
+	}
+	if err := ps.Add(peers.Peer{Addr: "2", PubKey: rig.pubs[1], Role: peers.RoleIntroducer}); err != nil {
+		t.Fatalf("Add introducer: %v", err)
+	}
+	if err := ps.Add(peers.Peer{Addr: "3", PubKey: rig.pubs[2], Role: peers.RolePeer}); err != nil {
+		t.Fatalf("Add peer: %v", err)
+	}
+	// rig.pubs[3] intentionally absent from peers.db.
+	cs := swarm.NewConnSet()
+	for _, c := range rig.conns {
+		cs.Add(c)
+	}
+
+	got := liveStorageConns(cs, ps)
 	if len(got) != 2 {
-		t.Fatalf("got %d conns, want 2 (introducer + storage)", len(got))
+		t.Fatalf("got %d conns, want 2 (storage + introducer)", len(got))
+	}
+	wantPubs := map[string]bool{
+		string(rig.pubs[0]): false,
+		string(rig.pubs[1]): false,
+	}
+	for _, c := range got {
+		wantPubs[string(c.RemotePub())] = true
+	}
+	for k, seen := range wantPubs {
+		if !seen {
+			t.Errorf("pubkey %x missing from live storage conns", []byte(k)[:8])
+		}
 	}
 }
 
-// TestPickStorageConns_EmptyList asserts pickStorageConns returns an
-// empty slice when the dialed list has only RolePeer entries.
-func TestPickStorageConns_EmptyList(t *testing.T) {
-	dialed := []dialedPeer{
-		{peer: peers.Peer{Addr: "a", PubKey: mustGenPub(t), Role: peers.RolePeer}},
+// shouldImmediateDialAnnouncement builds a PeerJoined announcement
+// for the predicate tests; tests override Kind per-case.
+func shouldImmediateDialAnnouncement(pub ed25519.PublicKey, addr string) protocol.PeerAnnouncement {
+	var ann protocol.PeerAnnouncement
+	ann.Kind = protocol.AnnouncePeerJoined
+	copy(ann.PubKey[:], pub)
+	ann.Role = byte(peers.RolePeer)
+	ann.Addr = addr
+	return ann
+}
+
+// TestShouldImmediateDial_HappyPath asserts a Joined kind with an
+// Addr and an in-store peer is selected for dial.
+func TestShouldImmediateDial_HappyPath(t *testing.T) {
+	ps := openPickStoragePeerStore(t)
+	pub := mustGenPub(t)
+	if err := ps.Add(peers.Peer{Addr: "1.2.3.4:5555", PubKey: pub, Role: peers.RolePeer}); err != nil {
+		t.Fatalf("Add: %v", err)
 	}
-	if got := pickStorageConns(dialed); len(got) != 0 {
-		t.Errorf("pickStorageConns = %+v, want empty for non-storage list", got)
+	dialer := &outboundDialer{connSet: swarm.NewConnSet(), reach: swarm.NewReachabilityMap()}
+	ann := shouldImmediateDialAnnouncement(pub, "1.2.3.4:5555")
+	got, ok := shouldImmediateDial(ann, swarm.NewConnSet(), ps, dialer)
+	if !ok {
+		t.Fatal("shouldImmediateDial = false; want true")
+	}
+	if got.Addr != "1.2.3.4:5555" {
+		t.Errorf("got peer addr %q, want %q", got.Addr, "1.2.3.4:5555")
+	}
+}
+
+// TestShouldImmediateDial_SkipsNonJoinedKinds asserts Left and
+// AddressChanged announcements are no-ops.
+func TestShouldImmediateDial_SkipsNonJoinedKinds(t *testing.T) {
+	ps := openPickStoragePeerStore(t)
+	pub := mustGenPub(t)
+	if err := ps.Add(peers.Peer{Addr: "1.2.3.4:5555", PubKey: pub, Role: peers.RolePeer}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	dialer := &outboundDialer{connSet: swarm.NewConnSet(), reach: swarm.NewReachabilityMap()}
+	for _, kind := range []protocol.AnnouncementKind{protocol.AnnouncePeerLeft, protocol.AnnounceAddressChanged} {
+		ann := shouldImmediateDialAnnouncement(pub, "1.2.3.4:5555")
+		ann.Kind = kind
+		if _, ok := shouldImmediateDial(ann, swarm.NewConnSet(), ps, dialer); ok {
+			t.Errorf("kind %d: shouldImmediateDial = true; want false", kind)
+		}
+	}
+}
+
+// TestShouldImmediateDial_SkipsEmptyAddr asserts an announcement
+// without an Addr (no dial target) is a no-op.
+func TestShouldImmediateDial_SkipsEmptyAddr(t *testing.T) {
+	ps := openPickStoragePeerStore(t)
+	pub := mustGenPub(t)
+	if err := ps.Add(peers.Peer{Addr: "", PubKey: pub, Role: peers.RolePeer}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	dialer := &outboundDialer{connSet: swarm.NewConnSet(), reach: swarm.NewReachabilityMap()}
+	ann := shouldImmediateDialAnnouncement(pub, "")
+	if _, ok := shouldImmediateDial(ann, swarm.NewConnSet(), ps, dialer); ok {
+		t.Error("empty Addr accepted")
+	}
+}
+
+// TestShouldImmediateDial_SkipsConnSetMatch asserts no dial when
+// connSet already holds a conn for the announced pubkey.
+func TestShouldImmediateDial_SkipsConnSetMatch(t *testing.T) {
+	rig := setupConnDialRig(t, 1)
+	pub := rig.pubs[0]
+	ps := openPickStoragePeerStore(t)
+	if err := ps.Add(peers.Peer{Addr: "1.2.3.4:5555", PubKey: pub, Role: peers.RolePeer}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	cs := swarm.NewConnSet()
+	cs.Add(rig.conns[0])
+	dialer := &outboundDialer{connSet: swarm.NewConnSet(), reach: swarm.NewReachabilityMap()}
+	ann := shouldImmediateDialAnnouncement(pub, "1.2.3.4:5555")
+	if _, ok := shouldImmediateDial(ann, cs, ps, dialer); ok {
+		t.Error("dial proposed despite live conn for announced pubkey")
+	}
+}
+
+// TestShouldImmediateDial_SkipsDialerHasConn asserts no dial when the
+// dialer is already tracking a conn for the announced pubkey.
+func TestShouldImmediateDial_SkipsDialerHasConn(t *testing.T) {
+	rig := setupConnDialRig(t, 1)
+	pub := rig.pubs[0]
+	ps := openPickStoragePeerStore(t)
+	if err := ps.Add(peers.Peer{Addr: "1.2.3.4:5555", PubKey: pub, Role: peers.RolePeer}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	dialer := &outboundDialer{connSet: swarm.NewConnSet(), reach: swarm.NewReachabilityMap()}
+	dialer.conns = append(dialer.conns, rig.conns[0])
+	ann := shouldImmediateDialAnnouncement(pub, "1.2.3.4:5555")
+	if _, ok := shouldImmediateDial(ann, swarm.NewConnSet(), ps, dialer); ok {
+		t.Error("dial proposed despite dialer already tracking the pubkey")
+	}
+}
+
+// TestShouldImmediateDial_SkipsUnknownPeer asserts no dial when the
+// announced pubkey is absent from peerStore.
+func TestShouldImmediateDial_SkipsUnknownPeer(t *testing.T) {
+	ps := openPickStoragePeerStore(t)
+	pub := mustGenPub(t) // not added
+	dialer := &outboundDialer{connSet: swarm.NewConnSet(), reach: swarm.NewReachabilityMap()}
+	ann := shouldImmediateDialAnnouncement(pub, "1.2.3.4:5555")
+	if _, ok := shouldImmediateDial(ann, swarm.NewConnSet(), ps, dialer); ok {
+		t.Error("dial proposed for pubkey not in peerStore")
+	}
+}
+
+// TestLiveStorageConns_EmptyConnSet asserts an empty connSet returns
+// an empty (non-nil) slice without consulting peers.db.
+func TestLiveStorageConns_EmptyConnSet(t *testing.T) {
+	ps := openPickStoragePeerStore(t)
+	got := liveStorageConns(swarm.NewConnSet(), ps)
+	if len(got) != 0 {
+		t.Errorf("got %d conns, want 0 on empty connSet", len(got))
 	}
 }
 
@@ -450,5 +646,126 @@ func TestPurgeAll_PruneFailurePropagates(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "list index") {
 		t.Errorf("err = %q, want Prune-side error, got list-index wrap", err)
+	}
+}
+
+// immediateDialRig wraps a real listener + Serve loop with an accepts
+// counter for OnApplied closure tests.
+type immediateDialRig struct {
+	addr    string
+	pub     ed25519.PublicKey
+	accepts atomic.Int32
+}
+
+// newImmediateDialRig binds 127.0.0.1:0, opens a fresh chunk store, and
+// runs backup.Serve with a ConnObserver that bumps accepts on inbound
+// conns. Cleanup is registered via t.Cleanup.
+func newImmediateDialRig(t *testing.T) *immediateDialRig {
+	t.Helper()
+	peerStore, err := store.New(filepath.Join(t.TempDir(), "peer-chunks"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = peerStore.Close() })
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("peer key: %v", err)
+	}
+	listener, err := bsquic.Listen("127.0.0.1:0", priv, nil, nil)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	rig := &immediateDialRig{addr: listener.Addr().String(), pub: pub}
+	obs := &backup.ConnObserver{
+		OnAccept: func(*bsquic.Conn) { rig.accepts.Add(1) },
+	}
+	serveCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = backup.Serve(serveCtx, listener, peerStore, nil, nil, obs) }()
+	return rig
+}
+
+// newImmediateDialDialer builds an outboundDialer with a fresh priv key,
+// chunk store, and modest dial timeout.
+func newImmediateDialDialer(t *testing.T, ctx context.Context) *outboundDialer {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("dialer key: %v", err)
+	}
+	st, err := store.New(filepath.Join(t.TempDir(), "dialer-chunks"))
+	if err != nil {
+		t.Fatalf("dialer store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return &outboundDialer{
+		ctx:     ctx,
+		priv:    priv,
+		timeout: 3 * time.Second,
+		st:      st,
+		connSet: swarm.NewConnSet(),
+		reach:   swarm.NewReachabilityMap(),
+	}
+}
+
+// TestMakeImmediateDialOnApplied_DialsOnPeerJoined asserts the closure
+// spawns a dial that the target rig accepts when given a PeerJoined
+// announcement matching a peer in peerStore.
+func TestMakeImmediateDialOnApplied_DialsOnPeerJoined(t *testing.T) {
+	rig := newImmediateDialRig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	dialer := newImmediateDialDialer(t, ctx)
+	t.Cleanup(dialer.CloseAll)
+
+	ps := openPickStoragePeerStore(t)
+	if err := ps.Add(peers.Peer{Addr: rig.addr, PubKey: rig.pub, Role: peers.RoleStorage}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	onApplied := makeImmediateDialOnApplied(ps, swarm.NewConnSet(), dialer)
+	ann := shouldImmediateDialAnnouncement(rig.pub, rig.addr)
+	onApplied(ctx, ann)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if rig.accepts.Load() >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := rig.accepts.Load(); got < 1 {
+		t.Errorf("rig accepts = %d, want >= 1 (closure must trigger a dial)", got)
+	}
+}
+
+// TestMakeImmediateDialOnApplied_NoDialOnNonJoined asserts an
+// AddressChanged announcement does not trigger a dial — the closure
+// short-circuits via shouldImmediateDial.
+func TestMakeImmediateDialOnApplied_NoDialOnNonJoined(t *testing.T) {
+	rig := newImmediateDialRig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	dialer := newImmediateDialDialer(t, ctx)
+	t.Cleanup(dialer.CloseAll)
+
+	ps := openPickStoragePeerStore(t)
+	if err := ps.Add(peers.Peer{Addr: rig.addr, PubKey: rig.pub, Role: peers.RoleStorage}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	onApplied := makeImmediateDialOnApplied(ps, swarm.NewConnSet(), dialer)
+	ann := shouldImmediateDialAnnouncement(rig.pub, rig.addr)
+	ann.Kind = protocol.AnnounceAddressChanged
+	onApplied(ctx, ann)
+
+	time.Sleep(300 * time.Millisecond)
+	if got := rig.accepts.Load(); got != 0 {
+		t.Errorf("rig accepts = %d, want 0 (non-Joined announcement must not dial)", got)
 	}
 }

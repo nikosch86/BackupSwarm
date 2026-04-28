@@ -1130,6 +1130,91 @@ func TestRun_ReachabilityMarkedOnInboundAccept(t *testing.T) {
 	}
 }
 
+// TestRun_PostStartupPeer_DialedBySweep asserts a storage peer added
+// to peers.db after the daemon's initial scan is dialed and registered
+// by the next scan tick's redial sweep.
+func TestRun_PostStartupPeer_DialedBySweep(t *testing.T) {
+	peer1 := newPeerRig(t)
+	peer2 := newPeerRig(t)
+	dataDir := t.TempDir()
+	backupDir := t.TempDir()
+	writeFile(t, filepath.Join(backupDir, "file.bin"), 1<<20)
+
+	// Open peerStore here and hand off via Options.PeerStore so the
+	// test keeps the handle for the post-startup Add.
+	peerStore, err := peers.Open(filepath.Join(dataDir, "peers.db"))
+	if err != nil {
+		t.Fatalf("peers.Open: %v", err)
+	}
+	if err := peerStore.Add(peers.Peer{Addr: peer1.addr, PubKey: peer1.pub, Role: peers.RoleIntroducer}); err != nil {
+		t.Fatalf("seed peer1: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.Run(ctx, daemon.Options{
+			DataDir:      dataDir,
+			BackupDir:    backupDir,
+			ListenAddr:   "127.0.0.1:0",
+			ChunkSize:    1 << 20,
+			ScanInterval: 50 * time.Millisecond,
+			Progress:     io.Discard,
+			PeerStore:    peerStore,
+		})
+	}()
+
+	// Wait for the initial scan to ship to peer1.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if hasShardDir(mustReadDir(t, peer1.storeRoot)) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !hasShardDir(mustReadDir(t, peer1.storeRoot)) {
+		cancel()
+		<-done
+		t.Fatal("peer1 never received initial chunks; daemon never reached the scan loop")
+	}
+	if peer2.accepts.Load() != 0 {
+		cancel()
+		<-done
+		t.Fatalf("peer2 already accepted %d conns before peers.db update", peer2.accepts.Load())
+	}
+
+	// Adding peer2 to peers.db while the daemon is running models an
+	// applied PeerJoined announcement; the next scan sweep dials it.
+	if err := peerStore.Add(peers.Peer{Addr: peer2.addr, PubKey: peer2.pub, Role: peers.RoleStorage}); err != nil {
+		cancel()
+		<-done
+		t.Fatalf("post-startup Add peer2: %v", err)
+	}
+
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if peer2.accepts.Load() >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if peer2.accepts.Load() < 1 {
+		cancel()
+		<-done
+		t.Fatalf("peer2 accepts = %d, want >= 1 (redial sweep should have dialed peer2 after peers.db Add)", peer2.accepts.Load())
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not exit within 5s of cancel")
+	}
+}
+
 // TestRun_StorageOnly_BadListenAddr asserts an invalid ListenAddr surfaces as a "listen" error on the BackupDir == "" path.
 func TestRun_StorageOnly_BadListenAddr(t *testing.T) {
 	dataDir := t.TempDir()

@@ -7,6 +7,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
@@ -27,6 +28,7 @@ import (
 	"backupswarm/internal/index"
 	"backupswarm/internal/node"
 	"backupswarm/internal/peers"
+	"backupswarm/internal/protocol"
 	bsquic "backupswarm/internal/quic"
 	"backupswarm/internal/restore"
 	"backupswarm/internal/store"
@@ -359,6 +361,19 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	joinHandler := makeJoinHandler(opts.DataDir, peerStore, swarmCA, connSet)
 
+	dialer := &outboundDialer{
+		ctx:         ctx,
+		priv:        id.PrivateKey,
+		timeout:     opts.DialTimeout,
+		st:          st,
+		annHandler:  router.HandleStream,
+		joinHandler: joinHandler,
+		connSet:     connSet,
+		reach:       reach,
+	}
+	defer dialer.CloseAll()
+	router.OnApplied = makeImmediateDialOnApplied(peerStore, connSet, dialer)
+
 	serveErrCh := make(chan error, 1)
 	go func() { serveErrCh <- backup.Serve(ctx, listener, st, router.HandleStream, joinHandler, obs) }()
 
@@ -422,30 +437,14 @@ func Run(ctx context.Context, opts Options) error {
 		return waitForServe(ctx, serveErrCh)
 	}
 
-	dialed, err := dialAllPeers(ctx, dialablePeers, id.PrivateKey, opts.DialTimeout, reach)
-	if err != nil {
+	if err := dialAllPeers(ctx, dialer, dialablePeers); err != nil {
 		return err
 	}
-	for _, dp := range dialed {
-		connSet.Add(dp.conn)
-		reach.MarkConn(dp.conn, swarm.StateReachable)
-		// Accepts streams the peer opens on this outbound conn (e.g.
-		// forwarded PeerAnnouncements). Exits when the conn closes.
-		go backup.AcceptStreams(ctx, dp.conn, st, router.HandleStream, joinHandler)
-		defer func(c *bsquic.Conn) {
-			connSet.Remove(c)
-			reach.MarkConn(c, swarm.StateUnreachable)
-			_ = c.Close()
-		}(dp.conn)
-		slog.InfoContext(ctx, "dialed peer",
-			"peer_addr", dp.peer.Addr,
-			"peer_pub", hex.EncodeToString(dp.peer.PubKey),
-			"role", dp.peer.Role,
-		)
-	}
 
-	storageConns := pickStorageConns(dialed)
-	if len(storageConns) == 0 {
+	connsFn := func() []*bsquic.Conn {
+		return liveStorageConns(connSet, peerStore)
+	}
+	if len(connsFn()) == 0 {
 		// No storage candidate dialable; fall through to storage-only.
 		return waitForServe(ctx, serveErrCh)
 	}
@@ -455,7 +454,7 @@ func Run(ctx context.Context, opts Options) error {
 		// Purge: iterate the index and send DeleteChunk per entry.
 		// (Prune scopes by Root and the empty backup dir has nothing
 		// under Root to iterate.)
-		if err := purgeAll(ctx, idx, storageConns, opts.Progress); err != nil {
+		if err := purgeAll(ctx, idx, connsFn(), opts.Progress); err != nil {
 			return fmt.Errorf("purge: %w", err)
 		}
 		fmt.Fprintln(opts.Progress, "purge complete; daemon continuing in idle mode")
@@ -467,7 +466,7 @@ func Run(ctx context.Context, opts Options) error {
 		// did not opt to back up.
 		if err := restore.Run(ctx, restore.Options{
 			Dest:          opts.BackupDir,
-			Conns:         storageConns,
+			Conns:         connsFn(),
 			Index:         idx,
 			RecipientPub:  rk.PublicKey,
 			RecipientPriv: rk.PrivateKey,
@@ -480,14 +479,16 @@ func Run(ctx context.Context, opts Options) error {
 
 	scanOpts := ScanOnceOptions{
 		BackupDir:    opts.BackupDir,
-		Conns:        storageConns,
 		Redundancy:   opts.Redundancy,
 		Index:        idx,
 		RecipientPub: rk.PublicKey,
 		ChunkSize:    opts.ChunkSize,
 		Progress:     opts.Progress,
 	}
-	return runScanLoop(ctx, scanOpts, opts.ScanInterval, serveErrCh, func() {
+	sweep := func() {
+		redialMissingPeers(ctx, peerStore, dialer, connSet)
+	}
+	return runScanLoop(ctx, scanOpts, opts.ScanInterval, serveErrCh, connsFn, sweep, func() {
 		lastScanAtNanos.Store(time.Now().UnixNano())
 	})
 }
@@ -504,11 +505,77 @@ func waitForServe(ctx context.Context, serveErrCh <-chan error) error {
 	}
 }
 
-// dialedPeer pairs an open outbound conn with the peer record that
-// produced it.
-type dialedPeer struct {
-	conn *bsquic.Conn
-	peer peers.Peer
+// outboundDialer owns the lifecycle of outbound conns: each
+// registered conn is added to connSet + reach, has an AcceptStreams
+// loop spawned, and is closed on CloseAll.
+type outboundDialer struct {
+	ctx         context.Context
+	priv        ed25519.PrivateKey
+	timeout     time.Duration
+	st          *store.Store
+	annHandler  backup.AnnouncementHandler
+	joinHandler backup.JoinHandler
+	connSet     *swarm.ConnSet
+	reach       *swarm.ReachabilityMap
+
+	mu    sync.Mutex
+	conns []*bsquic.Conn
+}
+
+// register wires conn into connSet + reach, spawns the AcceptStreams
+// loop, and records conn for shutdown close.
+func (d *outboundDialer) register(conn *bsquic.Conn, p peers.Peer) {
+	d.connSet.Add(conn)
+	d.reach.MarkConn(conn, swarm.StateReachable)
+	go backup.AcceptStreams(d.ctx, conn, d.st, d.annHandler, d.joinHandler)
+	d.mu.Lock()
+	d.conns = append(d.conns, conn)
+	d.mu.Unlock()
+	slog.InfoContext(d.ctx, "dialed peer",
+		"peer_addr", p.Addr,
+		"peer_pub", hex.EncodeToString(p.PubKey),
+		"role", p.Role,
+	)
+}
+
+// dial bsquic-dials p with the dialer's bounded timeout, marks
+// reachability on outcome, and registers a successful conn.
+func (d *outboundDialer) dial(ctx context.Context, p peers.Peer) (*bsquic.Conn, error) {
+	dctx, cancel := context.WithTimeout(ctx, d.timeout)
+	defer cancel()
+	conn, err := bsquic.Dial(dctx, p.Addr, d.priv, p.PubKey, nil)
+	if err != nil {
+		d.reach.Mark(p.PubKey, swarm.StateUnreachable)
+		return nil, err
+	}
+	d.register(conn, p)
+	return conn, nil
+}
+
+// CloseAll closes every registered conn and clears the daemon-side
+// connSet/reach entries. Idempotent.
+func (d *outboundDialer) CloseAll() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, c := range d.conns {
+		d.connSet.Remove(c)
+		d.reach.MarkConn(c, swarm.StateUnreachable)
+		_ = c.Close()
+	}
+	d.conns = nil
+}
+
+// hasConn reports whether the dialer is already tracking a conn for
+// the given remote pubkey.
+func (d *outboundDialer) hasConn(pub []byte) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, c := range d.conns {
+		if bytes.Equal(c.RemotePub(), pub) {
+			return true
+		}
+	}
+	return false
 }
 
 // listDialablePeers returns every peer record with a non-empty Addr.
@@ -527,18 +594,14 @@ func listDialablePeers(ps *peers.Store) ([]peers.Peer, error) {
 	return dialable, nil
 }
 
-// dialAllPeers dials each known peer best-effort. Failed dials are
-// logged, marked Unreachable in reach, and skipped. Returns the first
-// dial error only when every dial failed; otherwise returns the successful subset.
-func dialAllPeers(ctx context.Context, known []peers.Peer, priv ed25519.PrivateKey, timeout time.Duration, reach *swarm.ReachabilityMap) ([]dialedPeer, error) {
-	out := make([]dialedPeer, 0, len(known))
+// dialAllPeers dials each known peer best-effort via the dialer.
+// Failed dials are logged and skipped. Returns the first dial error
+// only when every dial failed.
+func dialAllPeers(ctx context.Context, dialer *outboundDialer, known []peers.Peer) error {
 	var firstErr error
+	successes := 0
 	for _, p := range known {
-		dctx, cancel := context.WithTimeout(ctx, timeout)
-		conn, err := bsquic.Dial(dctx, p.Addr, priv, p.PubKey, nil)
-		cancel()
-		if err != nil {
-			reach.Mark(p.PubKey, swarm.StateUnreachable)
+		if _, err := dialer.dial(ctx, p); err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("dial peer %q: %w", p.Addr, err)
 			}
@@ -548,37 +611,125 @@ func dialAllPeers(ctx context.Context, known []peers.Peer, priv ed25519.PrivateK
 				"err", err)
 			continue
 		}
-		out = append(out, dialedPeer{conn: conn, peer: p})
+		successes++
 	}
-	if len(out) == 0 && firstErr != nil {
-		return nil, firstErr
+	if successes == 0 && firstErr != nil {
+		return firstErr
 	}
-	return out, nil
+	return nil
 }
 
-// pickStorageConns returns the conns for dialed peers whose role admits
-// chunk storage. Order follows the dialed slice (deterministic by
-// peers.db iteration order).
-func pickStorageConns(dialed []dialedPeer) []*bsquic.Conn {
-	out := make([]*bsquic.Conn, 0, len(dialed))
-	for i := range dialed {
-		if dialed[i].peer.Role.IsStorageCandidate() {
-			out = append(out, dialed[i].conn)
+// makeImmediateDialOnApplied returns a Router.OnApplied closure that
+// spawns an async dial when shouldImmediateDial selects the announced
+// peer.
+func makeImmediateDialOnApplied(peerStore *peers.Store, connSet *swarm.ConnSet, dialer *outboundDialer) func(context.Context, protocol.PeerAnnouncement) {
+	return func(ctx context.Context, ann protocol.PeerAnnouncement) {
+		p, ok := shouldImmediateDial(ann, connSet, peerStore, dialer)
+		if !ok {
+			return
+		}
+		go func() {
+			if _, err := dialer.dial(ctx, p); err != nil {
+				slog.DebugContext(ctx, "immediate dial on announcement failed",
+					"peer_addr", p.Addr,
+					"peer_pub", hex.EncodeToString(p.PubKey),
+					"err", err)
+			}
+		}()
+	}
+}
+
+// shouldImmediateDial returns the peer record to dial, ok=true, when
+// ann is a PeerJoined with non-empty Addr whose pubkey is in peerStore
+// and not already in connSet or dialer.
+func shouldImmediateDial(ann protocol.PeerAnnouncement, connSet *swarm.ConnSet, peerStore *peers.Store, dialer *outboundDialer) (peers.Peer, bool) {
+	if ann.Kind != protocol.AnnouncePeerJoined {
+		return peers.Peer{}, false
+	}
+	if ann.Addr == "" {
+		return peers.Peer{}, false
+	}
+	pub := ed25519.PublicKey(ann.PubKey[:])
+	for _, c := range connSet.Snapshot() {
+		if bytes.Equal(c.RemotePub(), pub) {
+			return peers.Peer{}, false
+		}
+	}
+	if dialer.hasConn(pub) {
+		return peers.Peer{}, false
+	}
+	p, err := peerStore.Get(pub)
+	if err != nil {
+		return peers.Peer{}, false
+	}
+	return p, true
+}
+
+// redialMissingPeers dials any peer in peerStore with a non-empty
+// Addr not yet in connSet or dialer. Best-effort.
+func redialMissingPeers(ctx context.Context, peerStore *peers.Store, dialer *outboundDialer, connSet *swarm.ConnSet) {
+	known, err := peerStore.List()
+	if err != nil {
+		slog.WarnContext(ctx, "redial sweep: list peers", "err", err)
+		return
+	}
+	live := make(map[string]struct{}, len(connSet.Snapshot()))
+	for _, c := range connSet.Snapshot() {
+		live[hex.EncodeToString(c.RemotePub())] = struct{}{}
+	}
+	for _, p := range known {
+		if p.Addr == "" {
+			continue
+		}
+		if _, ok := live[hex.EncodeToString(p.PubKey)]; ok {
+			continue
+		}
+		if dialer.hasConn(p.PubKey) {
+			continue
+		}
+		if _, err := dialer.dial(ctx, p); err != nil {
+			slog.DebugContext(ctx, "redial sweep: dial peer failed",
+				"peer_addr", p.Addr,
+				"peer_pub", hex.EncodeToString(p.PubKey),
+				"err", err)
+		}
+	}
+}
+
+// liveStorageConns returns the subset of connSet whose remote pubkey
+// resolves to an IsStorageCandidate role in peerStore. Conns with an
+// unknown pubkey or non-storage role are dropped.
+func liveStorageConns(connSet *swarm.ConnSet, peerStore *peers.Store) []*bsquic.Conn {
+	snapshot := connSet.Snapshot()
+	out := make([]*bsquic.Conn, 0, len(snapshot))
+	for _, c := range snapshot {
+		pub := c.RemotePub()
+		if len(pub) == 0 {
+			continue
+		}
+		peer, err := peerStore.Get(ed25519.PublicKey(pub))
+		if err != nil {
+			continue
+		}
+		if peer.Role.IsStorageCandidate() {
+			out = append(out, c)
 		}
 	}
 	return out
 }
 
-// runScanLoop blocks until ctx is cancelled or the Serve goroutine
-// surfaces an error, running ScanOnce every interval. The first scan
-// runs immediately so the daemon doesn't sit idle for a full interval
-// on startup. onScanSuccess fires after every successful scan and is
-// the daemon's hook to update lastScanAt for the runtime snapshot.
-func runScanLoop(ctx context.Context, opts ScanOnceOptions, interval time.Duration, serveErrCh <-chan error, onScanSuccess func()) error {
+// runScanLoop runs ScanOnce every interval until ctx is cancelled or
+// serveErrCh fires. Each tick calls sweep, then connsFn for ScanOnce's
+// Conns, then onScanSuccess on success.
+func runScanLoop(ctx context.Context, opts ScanOnceOptions, interval time.Duration, serveErrCh <-chan error, connsFn func() []*bsquic.Conn, sweep func(), onScanSuccess func()) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	doScan := func() {
+		if sweep != nil {
+			sweep()
+		}
+		opts.Conns = connsFn()
 		if err := ScanOnce(ctx, opts); err != nil {
 			slog.WarnContext(ctx, "scan failed", "err", err)
 			fmt.Fprintf(opts.Progress, "scan failed: %v\n", err)

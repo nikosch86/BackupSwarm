@@ -18,6 +18,9 @@ type Router struct {
 	Store *peers.Store
 	Dedup *DedupCache
 	Conns *ConnSet
+	// OnApplied, when non-nil, fires after Apply succeeds and before
+	// forwarding. Runs synchronously on the dispatcher goroutine.
+	OnApplied func(context.Context, protocol.PeerAnnouncement)
 }
 
 // HandleStream reads one announcement frame from r, dedup-checks it,
@@ -48,6 +51,9 @@ func (r *Router) HandleStream(ctx context.Context, rd io.Reader, senderPub []byt
 		"addr", ann.Addr,
 		"id", hex.EncodeToString(ann.ID[:]),
 	)
+	if r.OnApplied != nil {
+		r.OnApplied(ctx, ann)
+	}
 	if r.Conns == nil {
 		return nil
 	}

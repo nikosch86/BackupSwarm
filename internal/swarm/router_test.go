@@ -281,6 +281,113 @@ func TestRouter_HandleStream_ApplyErrorPropagates(t *testing.T) {
 	}
 }
 
+func TestRouter_HandleStream_OnAppliedFiresAfterApply(t *testing.T) {
+	store := mustRouterStore(t)
+	var (
+		mu     sync.Mutex
+		called []protocol.PeerAnnouncement
+	)
+	r := &swarm.Router{
+		Store: store,
+		Dedup: swarm.NewDedupCache(8),
+		Conns: swarm.NewConnSet(),
+		OnApplied: func(_ context.Context, ann protocol.PeerAnnouncement) {
+			mu.Lock()
+			defer mu.Unlock()
+			called = append(called, ann)
+		},
+	}
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+	ann := protocol.PeerAnnouncement{
+		Kind:   protocol.AnnouncePeerJoined,
+		ID:     id(0xb1),
+		PubKey: pubArray(pub),
+		Role:   byte(peers.RolePeer),
+		Addr:   "10.0.0.7:9999",
+	}
+	if err := r.HandleStream(context.Background(), encodedAnnouncement(t, ann), nil); err != nil {
+		t.Fatalf("HandleStream: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(called) != 1 {
+		t.Fatalf("OnApplied called %d times, want 1", len(called))
+	}
+	if called[0].ID != ann.ID || called[0].Addr != ann.Addr {
+		t.Errorf("OnApplied got ann %+v, want %+v", called[0], ann)
+	}
+}
+
+func TestRouter_HandleStream_OnAppliedSkippedOnDedup(t *testing.T) {
+	store := mustRouterStore(t)
+	var calls int32
+	cache := swarm.NewDedupCache(8)
+	r := &swarm.Router{
+		Store: store,
+		Dedup: cache,
+		Conns: swarm.NewConnSet(),
+		OnApplied: func(_ context.Context, _ protocol.PeerAnnouncement) {
+			calls++
+		},
+	}
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+	ann := protocol.PeerAnnouncement{
+		Kind:   protocol.AnnouncePeerJoined,
+		ID:     id(0xb2),
+		PubKey: pubArray(pub),
+		Role:   byte(peers.RolePeer),
+		Addr:   "10.0.0.7:9999",
+	}
+	if err := r.HandleStream(context.Background(), encodedAnnouncement(t, ann), nil); err != nil {
+		t.Fatalf("HandleStream first: %v", err)
+	}
+	if err := r.HandleStream(context.Background(), encodedAnnouncement(t, ann), nil); err != nil {
+		t.Fatalf("HandleStream second: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("OnApplied called %d times, want 1 (dedup must skip second)", calls)
+	}
+}
+
+func TestRouter_HandleStream_OnAppliedSkippedOnApplyError(t *testing.T) {
+	store := closedStore(t)
+	var calls int32
+	r := &swarm.Router{
+		Store: store,
+		Dedup: swarm.NewDedupCache(8),
+		Conns: swarm.NewConnSet(),
+		OnApplied: func(_ context.Context, _ protocol.PeerAnnouncement) {
+			calls++
+		},
+	}
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+	ann := protocol.PeerAnnouncement{
+		Kind:   protocol.AnnouncePeerJoined,
+		ID:     id(0xb3),
+		PubKey: pubArray(pub),
+		Role:   byte(peers.RolePeer),
+		Addr:   "10.0.0.7:9999",
+	}
+	if err := r.HandleStream(context.Background(), encodedAnnouncement(t, ann), nil); err == nil {
+		t.Fatal("HandleStream succeeded against closed store")
+	}
+	if calls != 0 {
+		t.Errorf("OnApplied called %d times, want 0 on Apply error", calls)
+	}
+}
+
 func TestRouter_HandleStream_NilConnsSkipsForward(t *testing.T) {
 	store := mustRouterStore(t)
 	r := &swarm.Router{Store: store, Dedup: swarm.NewDedupCache(8)}
