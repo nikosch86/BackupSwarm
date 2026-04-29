@@ -45,6 +45,9 @@ const (
 	// request body is empty (the type byte IS the request); the response
 	// returns the encrypted snapshot for the conn's authenticated owner.
 	MsgGetIndexSnapshot MessageType = 0x09
+	// MsgRenewTTL prefixes a RenewTTL request body (32-byte hash).
+	// Owner-authenticated by the conn's TLS pubkey.
+	MsgRenewTTL MessageType = 0x0a
 )
 
 // WriteMessageType writes t as a single byte.

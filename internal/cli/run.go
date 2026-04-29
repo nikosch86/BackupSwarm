@@ -19,6 +19,9 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		heartbeatMisses     int
 		indexBackupInterval time.Duration
 		scrubInterval       time.Duration
+		chunkTTL            time.Duration
+		chunkRenewInterval  time.Duration
+		chunkExpireInterval time.Duration
 		gracePeriod         time.Duration
 		dialTimeout         time.Duration
 		restore             bool
@@ -58,6 +61,15 @@ func newRunCmd(dataDir *string) *cobra.Command {
 			if gracePeriod < 0 {
 				return fmt.Errorf("--grace-period must be >= 0, got %v", gracePeriod)
 			}
+			if chunkTTL < 0 {
+				return fmt.Errorf("--chunk-ttl must be >= 0, got %v", chunkTTL)
+			}
+			if chunkRenewInterval < 0 {
+				return fmt.Errorf("--chunk-renew-interval must be >= 0, got %v", chunkRenewInterval)
+			}
+			if chunkExpireInterval < 0 {
+				return fmt.Errorf("--chunk-expire-interval must be >= 0, got %v", chunkExpireInterval)
+			}
 			maxBytes, err := parseSize(maxStorage)
 			if err != nil {
 				return fmt.Errorf("--max-storage: %w", err)
@@ -76,6 +88,9 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				HeartbeatInterval:   heartbeatInterval,
 				IndexBackupInterval: indexBackupInterval,
 				ScrubInterval:       scrubInterval,
+				ChunkTTL:            chunkTTL,
+				RenewInterval:       chunkRenewInterval,
+				ExpireInterval:      chunkExpireInterval,
 				MissThreshold:       heartbeatMisses,
 				GracePeriod:         gracePeriod,
 				DialTimeout:         dialTimeout,
@@ -97,6 +112,9 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().DurationVar(&heartbeatInterval, "heartbeat-interval", 30*time.Second, "Period between liveness probes against every live conn")
 	cmd.Flags().DurationVar(&indexBackupInterval, "index-backup-interval", 5*time.Minute, "Period between encrypted index-snapshot uploads to live storage peers (storage-only daemons skip)")
 	cmd.Flags().DurationVar(&scrubInterval, "scrub-interval", 6*time.Hour, "Period between local chunk-store integrity scrubs (re-hash every blob, remove any whose content no longer matches its name)")
+	cmd.Flags().DurationVar(&chunkTTL, "chunk-ttl", 30*24*time.Hour, "Storage-side lifetime for each PutOwned blob; owner Renew refreshes the deadline. 0 disables TTL safety net.")
+	cmd.Flags().DurationVar(&chunkRenewInterval, "chunk-renew-interval", 6*24*time.Hour, "Cadence at which the owner re-sends RenewTTL for every chunk in the local index")
+	cmd.Flags().DurationVar(&chunkExpireInterval, "chunk-expire-interval", 1*time.Hour, "Cadence at which the local store sweeps expired blobs out (storage-peer GC)")
 	cmd.Flags().IntVar(&heartbeatMisses, "heartbeat-misses", 3, "Consecutive missed heartbeats required to mark a peer unreachable (must be >= 1)")
 	cmd.Flags().DurationVar(&gracePeriod, "grace-period", 24*time.Hour, "Duration a peer must stay unreachable before being treated as lost (eligible for re-replication). 0 = lost immediately.")
 	cmd.Flags().DurationVar(&dialTimeout, "dial-timeout", 30*time.Second, "Timeout for the initial dial to the storage peer")

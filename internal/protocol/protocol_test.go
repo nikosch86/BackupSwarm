@@ -189,9 +189,14 @@ func TestMessageType_DistinctValues(t *testing.T) {
 		protocol.MsgGetChunk:         "MsgGetChunk",
 		protocol.MsgPeerAnnouncement: "MsgPeerAnnouncement",
 		protocol.MsgJoinRequest:      "MsgJoinRequest",
+		protocol.MsgGetCapacity:      "MsgGetCapacity",
+		protocol.MsgPing:             "MsgPing",
+		protocol.MsgPutIndexSnapshot: "MsgPutIndexSnapshot",
+		protocol.MsgGetIndexSnapshot: "MsgGetIndexSnapshot",
+		protocol.MsgRenewTTL:         "MsgRenewTTL",
 	}
-	if got := len(want); got != 5 {
-		t.Errorf("expected 5 distinct message types, got %d", got)
+	if got := len(want); got != 10 {
+		t.Errorf("expected 10 distinct message types, got %d", got)
 	}
 }
 

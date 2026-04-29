@@ -178,6 +178,16 @@ type Options struct {
 	// scrubs (re-hash every blob, remove any whose content no longer
 	// matches its name). Zero uses a sensible default (6h).
 	ScrubInterval time.Duration
+	// ChunkTTL is the storage-side lifetime applied to each PutOwned blob;
+	// a Renew refreshes the deadline. Zero uses a sensible default (30d).
+	ChunkTTL time.Duration
+	// RenewInterval is the owner-side cadence for sending RenewTTL to
+	// every storage peer holding a chunk in the local index. Zero uses
+	// ChunkTTL/5.
+	RenewInterval time.Duration
+	// ExpireInterval is the cadence for sweeping expired blobs out of the
+	// local store. Zero uses a sensible default (1h).
+	ExpireInterval time.Duration
 	// Restore selects ModeRestore when the backup dir is empty but the
 	// index is populated.
 	Restore bool
@@ -226,6 +236,8 @@ const (
 	defaultScrubInterval       = 6 * time.Hour
 	defaultDialTimeout         = 30 * time.Second
 	defaultGracePeriod         = 24 * time.Hour
+	defaultChunkTTL            = 30 * 24 * time.Hour
+	defaultExpireInterval      = 1 * time.Hour
 
 	indexFileName = "index.db"
 	storeDirName  = "chunks"
@@ -257,6 +269,27 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.GracePeriod < 0 {
 		return fmt.Errorf("grace period must be non-negative, got %v", opts.GracePeriod)
 	}
+	if opts.ChunkTTL == 0 {
+		opts.ChunkTTL = defaultChunkTTL
+	}
+	if opts.ChunkTTL < 0 {
+		return fmt.Errorf("chunk TTL must be non-negative, got %v", opts.ChunkTTL)
+	}
+	if opts.RenewInterval == 0 {
+		opts.RenewInterval = opts.ChunkTTL / 5
+		if opts.RenewInterval == 0 {
+			opts.RenewInterval = time.Minute
+		}
+	}
+	if opts.RenewInterval < 0 {
+		return fmt.Errorf("renew interval must be non-negative, got %v", opts.RenewInterval)
+	}
+	if opts.ExpireInterval == 0 {
+		opts.ExpireInterval = defaultExpireInterval
+	}
+	if opts.ExpireInterval < 0 {
+		return fmt.Errorf("expire interval must be non-negative, got %v", opts.ExpireInterval)
+	}
 	if opts.DialTimeout == 0 {
 		opts.DialTimeout = defaultDialTimeout
 	}
@@ -276,7 +309,10 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer func() { _ = idx.Close() }()
 
-	st, err := store.NewWithMax(filepath.Join(opts.DataDir, storeDirName), opts.MaxStorageBytes)
+	st, err := store.NewWithOptions(filepath.Join(opts.DataDir, storeDirName), store.Options{
+		MaxBytes: opts.MaxStorageBytes,
+		ChunkTTL: opts.ChunkTTL,
+	})
 	if err != nil {
 		return fmt.Errorf("open chunk store: %w", err)
 	}
@@ -492,6 +528,21 @@ func Run(ctx context.Context, opts Options) error {
 	defer scrubWG.Wait()
 	defer scrubCancel()
 
+	// expireCtx bounds the TTL expiry sweep to daemon.Run's lifetime.
+	// Defer order: expireCancel → expireWG.Wait.
+	expireCtx, expireCancel := context.WithCancel(ctx)
+	var expireWG sync.WaitGroup
+	expireWG.Add(1)
+	go func() {
+		defer expireWG.Done()
+		runExpireLoop(expireCtx, expireLoopOptions{
+			interval: opts.ExpireInterval,
+			expireFn: st.ExpireSweep,
+		})
+	}()
+	defer expireWG.Wait()
+	defer expireCancel()
+
 	// ibCtx bounds the index-backup loop to daemon.Run's lifetime.
 	// Storage-only daemons have no index of their own to back up; the
 	// loop short-circuits internally when BackupDir is empty.
@@ -511,6 +562,23 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer ibWG.Wait()
 	defer ibCancel()
+
+	// renewCtx bounds the owner-side TTL renewal loop to daemon.Run's
+	// lifetime. Storage-only daemons skip the loop.
+	renewCtx, renewCancel := context.WithCancel(ctx)
+	var renewWG sync.WaitGroup
+	if opts.BackupDir != "" {
+		renewWG.Add(1)
+		go func() {
+			defer renewWG.Done()
+			runRenewLoop(renewCtx, renewLoopOptions{
+				interval: opts.RenewInterval,
+				renewFn:  renewClosure(idx, func() []*bsquic.Conn { return liveStorageConns(connSet, peerStore) }),
+			})
+		}()
+	}
+	defer renewWG.Wait()
+	defer renewCancel()
 
 	// Pure storage-peer role: serve inbound chunks only, no scan loop.
 	if opts.BackupDir == "" {

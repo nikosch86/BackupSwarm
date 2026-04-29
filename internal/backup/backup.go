@@ -552,6 +552,39 @@ func sendGetChunk(ctx context.Context, conn streamOpener, hash [32]byte) ([]byte
 	return blob, nil
 }
 
+// SendRenewTTL bumps the TTL for hash on conn. Wraps any peer-reported
+// application error (owner mismatch, chunk-not-found).
+func SendRenewTTL(ctx context.Context, conn *bsquic.Conn, hash [32]byte) error {
+	return sendRenewTTL(ctx, bsquicConnAdapter{c: conn}, hash)
+}
+
+// sendRenewTTL writes a RenewTTL request and reads the OK/Err response.
+func sendRenewTTL(ctx context.Context, conn streamOpener, hash [32]byte) error {
+	s, err := conn.OpenStream(ctx)
+	if err != nil {
+		return fmt.Errorf("open stream: %w", err)
+	}
+	if err := protocol.WriteMessageType(s, protocol.MsgRenewTTL); err != nil {
+		_ = s.Close()
+		return err
+	}
+	if err := protocol.WriteRenewTTLRequest(s, hash); err != nil {
+		_ = s.Close()
+		return err
+	}
+	if err := s.Close(); err != nil {
+		return fmt.Errorf("close send side: %w", err)
+	}
+	appErr, err := protocol.ReadRenewTTLResponse(s)
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+	if appErr != "" {
+		return fmt.Errorf("peer rejected renew: %s", appErr)
+	}
+	return nil
+}
+
 // sendDeleteChunk writes a DeleteChunk request and returns nil, or a
 // wrapped peer application error (owner mismatch / chunk-not-found).
 func sendDeleteChunk(ctx context.Context, conn streamOpener, hash [32]byte) error {
@@ -700,6 +733,8 @@ func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owne
 		return handlePutIndexSnapshotStream(ctx, rw, st, ownerKey)
 	case protocol.MsgGetIndexSnapshot:
 		return handleGetIndexSnapshotStream(ctx, rw, st, ownerKey)
+	case protocol.MsgRenewTTL:
+		return handleRenewTTLStream(ctx, rw, st, ownerKey)
 	default:
 		return fmt.Errorf("unknown message type %d", msgType)
 	}
@@ -763,6 +798,22 @@ func handleGetCapacityStream(_ context.Context, rw io.ReadWriter, st *store.Stor
 // handlePingStream writes a single OK status byte onto rw.
 func handlePingStream(_ context.Context, rw io.ReadWriter) error {
 	return protocol.WritePingResponse(rw, "")
+}
+
+// handleRenewTTLStream authorizes the renew against owner (the TLS-
+// authenticated pubkey) and writes the response. Store errors map to a
+// short code on the wire; the rich error is logged via slog.WarnContext.
+func handleRenewTTLStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owner []byte) error {
+	hash, err := protocol.ReadRenewTTLRequest(rw)
+	if err != nil {
+		return fmt.Errorf("read request: %w", err)
+	}
+	if renewErr := st.RenewForOwner(hash, owner); renewErr != nil {
+		code := errCode(renewErr)
+		slog.WarnContext(ctx, "renew ttl failed", "code", code, "err", renewErr)
+		return protocol.WriteRenewTTLResponse(rw, code)
+	}
+	return protocol.WriteRenewTTLResponse(rw, "")
 }
 
 // handleGetChunkStream authorizes the get against owner (the TLS-

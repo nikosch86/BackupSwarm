@@ -136,15 +136,18 @@ func (s *Store) scrubOne(ctx context.Context, hash [sha256.Size]byte) (bool, err
 	return false, nil
 }
 
-// dropOwnerRow removes the owner record for hash, if any. A missing row
-// is not an error.
+// dropOwnerRow removes the owner and expiry records for hash, if any.
+// A missing row is not an error.
 func (s *Store) dropOwnerRow(hash [sha256.Size]byte) error {
 	db, err := s.ensureOwnersDB()
 	if err != nil {
 		return err
 	}
 	return db.Update(func(tx *bbolt.Tx) error {
-		return tx.Bucket([]byte(ownersBucket)).Delete(hash[:])
+		if err := tx.Bucket([]byte(ownersBucket)).Delete(hash[:]); err != nil {
+			return err
+		}
+		return tx.Bucket([]byte(expiriesBucket)).Delete(hash[:])
 	})
 }
 

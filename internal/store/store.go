@@ -7,7 +7,9 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -27,6 +29,7 @@ const (
 
 	ownersFile       = "owners.db"
 	ownersBucket     = "owners"
+	expiriesBucket   = "expiries"
 	ownersLockTimout = 2 * time.Second
 )
 
@@ -66,12 +69,18 @@ var ErrOwnerMismatch = errors.New("owner mismatch")
 // push the store past its configured MaxBytes capacity.
 var ErrVolumeFull = errors.New("storage volume full")
 
+// ErrNoExpiryRecorded is returned by ExpiresAt when no expiry row exists
+// for the hash (e.g. the blob was stored with TTL disabled).
+var ErrNoExpiryRecorded = errors.New("no expiry recorded for blob")
+
 // Store is a content-addressed chunk store rooted at a local directory.
 // Safe for concurrent use: Put is atomic via temp-file + rename and
 // idempotent for repeated writes of identical content.
 type Store struct {
 	root     string
 	maxBytes int64
+	chunkTTL time.Duration
+	now      func() time.Time
 
 	// owners is lazily opened on first owner-tracking call; plain Put
 	// never touches it. ownersMu makes lazy-open race-safe.
@@ -89,18 +98,39 @@ type Store struct {
 	hashLocks sync.Map
 }
 
-// New opens (or initializes) a store rooted at dir with no capacity
-// limit. See NewWithMax to enforce a per-store byte cap.
-func New(dir string) (*Store, error) {
-	return NewWithMax(dir, 0)
+// Options configures NewWithOptions. Zero values use sensible defaults.
+type Options struct {
+	// MaxBytes caps the total bytes stored; 0 means unlimited.
+	MaxBytes int64
+	// ChunkTTL is the lifetime applied to each PutOwned blob; the expiry
+	// row records (now + ChunkTTL) and ExpireSweep removes blobs past
+	// that deadline. 0 disables TTL: no expiry rows are written and
+	// ExpireSweep is a no-op.
+	ChunkTTL time.Duration
+	// Now is the clock used for expiry stamping. nil defaults to time.Now.
+	Now func() time.Time
 }
 
-// NewWithMax opens (or initializes) a store rooted at dir. maxBytes
-// caps total bytes stored; 0 means unlimited, negatives are rejected.
-// Existing on-disk chunks are summed once to seed the used tally.
+// New opens (or initializes) a store rooted at dir with no capacity
+// limit and no chunk TTL.
+func New(dir string) (*Store, error) {
+	return NewWithOptions(dir, Options{})
+}
+
+// NewWithMax opens a store rooted at dir with the given capacity cap
+// and no chunk TTL.
 func NewWithMax(dir string, maxBytes int64) (*Store, error) {
-	if maxBytes < 0 {
-		return nil, fmt.Errorf("max bytes must be non-negative, got %d", maxBytes)
+	return NewWithOptions(dir, Options{MaxBytes: maxBytes})
+}
+
+// NewWithOptions opens (or initializes) a store rooted at dir using opts.
+// Existing on-disk chunks are summed once to seed the used tally.
+func NewWithOptions(dir string, opts Options) (*Store, error) {
+	if opts.MaxBytes < 0 {
+		return nil, fmt.Errorf("max bytes must be non-negative, got %d", opts.MaxBytes)
+	}
+	if opts.ChunkTTL < 0 {
+		return nil, fmt.Errorf("chunk TTL must be non-negative, got %v", opts.ChunkTTL)
 	}
 	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return nil, fmt.Errorf("create store dir %q: %w", dir, err)
@@ -113,7 +143,17 @@ func NewWithMax(dir string, maxBytes int64) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("scan used bytes: %w", err)
 	}
-	return &Store{root: dir, maxBytes: maxBytes, used: used}, nil
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
+	return &Store{
+		root:     dir,
+		maxBytes: opts.MaxBytes,
+		chunkTTL: opts.ChunkTTL,
+		now:      now,
+		used:     used,
+	}, nil
 }
 
 // Close releases the lazily-opened owners bbolt handle. Idempotent.
@@ -381,13 +421,189 @@ func (s *Store) DeleteForOwner(hash [sha256.Size]byte, owner []byte) error {
 		return err
 	}
 	return db.Update(func(tx *bbolt.Tx) error {
-		return tx.Bucket([]byte(ownersBucket)).Delete(hash[:])
+		if err := tx.Bucket([]byte(ownersBucket)).Delete(hash[:]); err != nil {
+			return err
+		}
+		return tx.Bucket([]byte(expiriesBucket)).Delete(hash[:])
 	})
 }
 
-// claimOwner asserts owner for hash. Matches an existing record, rejects a
-// differing one, and refuses to claim an unowned blob already on disk.
-// Writes the owner row only when no prior record exists and no orphan blob.
+// RenewForOwner refreshes the expiry deadline to (now + ChunkTTL) when
+// the recorded owner matches. Returns ErrChunkNotFound or ErrOwnerMismatch
+// on failure. With ChunkTTL == 0 it succeeds after the authorization check.
+func (s *Store) RenewForOwner(hash [sha256.Size]byte, owner []byte) error {
+	mu := s.lockForHash(hash)
+	mu.Lock()
+	defer mu.Unlock()
+	ok, err := s.blobOnDisk(hash)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: %x", ErrChunkNotFound, hash)
+	}
+	db, err := s.ensureOwnersDB()
+	if err != nil {
+		return err
+	}
+	return db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(ownersBucket))
+		v := b.Get(hash[:])
+		if v == nil || !bytes.Equal(v, owner) {
+			return fmt.Errorf("%w: %x", ErrOwnerMismatch, hash)
+		}
+		return s.writeExpiryTx(tx, hash)
+	})
+}
+
+// ExpiresAt returns the recorded expiry deadline for hash. Returns
+// ErrNoExpiryRecorded when no expiry row exists (TTL disabled or never
+// stamped).
+func (s *Store) ExpiresAt(hash [sha256.Size]byte) (time.Time, error) {
+	db, err := s.ensureOwnersDB()
+	if err != nil {
+		return time.Time{}, err
+	}
+	var nanos int64
+	err = db.View(func(tx *bbolt.Tx) error {
+		v := tx.Bucket([]byte(expiriesBucket)).Get(hash[:])
+		if v == nil {
+			return fmt.Errorf("%w: %x", ErrNoExpiryRecorded, hash)
+		}
+		if len(v) != 8 {
+			return fmt.Errorf("expiry row %x has %d bytes, want 8", hash, len(v))
+		}
+		nanos = int64(binary.BigEndian.Uint64(v))
+		return nil
+	})
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Unix(0, nanos), nil
+}
+
+// ExpireResult is the per-pass count of expiry rows scanned and blobs
+// removed.
+type ExpireResult struct {
+	Scanned int
+	Expired int
+}
+
+// ExpireSweep walks the expiries bucket and removes blobs whose recorded
+// deadline has passed. Removal runs under the per-hash mutex. With
+// ChunkTTL == 0 the sweep returns immediately.
+func (s *Store) ExpireSweep(ctx context.Context) (ExpireResult, error) {
+	var res ExpireResult
+	if err := ctx.Err(); err != nil {
+		return res, err
+	}
+	if s.chunkTTL == 0 {
+		return res, nil
+	}
+	db, err := s.ensureOwnersDB()
+	if err != nil {
+		return res, err
+	}
+	now := s.now().UnixNano()
+	type expiredEntry struct {
+		hash     [sha256.Size]byte
+		deadline int64
+	}
+	var due []expiredEntry
+	err = db.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte(expiriesBucket)).ForEach(func(k, v []byte) error {
+			if len(k) != sha256.Size || len(v) != 8 {
+				return nil
+			}
+			res.Scanned++
+			deadline := int64(binary.BigEndian.Uint64(v))
+			if deadline > now {
+				return nil
+			}
+			var h [sha256.Size]byte
+			copy(h[:], k)
+			due = append(due, expiredEntry{hash: h, deadline: deadline})
+			return nil
+		})
+	})
+	if err != nil {
+		return res, fmt.Errorf("scan expiries: %w", err)
+	}
+	for _, e := range due {
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
+		removed, err := s.expireOne(e.hash, e.deadline)
+		if err != nil {
+			return res, err
+		}
+		if removed {
+			res.Expired++
+		}
+	}
+	return res, nil
+}
+
+// expireOne removes the blob and its owner+expiry rows under the per-hash
+// mutex when the recorded deadline still matches observedDeadline.
+// Returns true when a removal happened.
+func (s *Store) expireOne(hash [sha256.Size]byte, observedDeadline int64) (bool, error) {
+	mu := s.lockForHash(hash)
+	mu.Lock()
+	defer mu.Unlock()
+	db, err := s.ensureOwnersDB()
+	if err != nil {
+		return false, err
+	}
+	current := observedDeadline
+	err = db.View(func(tx *bbolt.Tx) error {
+		v := tx.Bucket([]byte(expiriesBucket)).Get(hash[:])
+		if v == nil {
+			current = 0
+			return nil
+		}
+		if len(v) != 8 {
+			return nil
+		}
+		current = int64(binary.BigEndian.Uint64(v))
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if current == 0 {
+		return false, nil
+	}
+	if current != observedDeadline {
+		return false, nil
+	}
+	path := s.pathFor(hash)
+	info, err := os.Stat(path)
+	switch {
+	case err == nil:
+		if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			return false, fmt.Errorf("remove expired %q: %w", path, rmErr)
+		}
+		s.release(info.Size())
+	case errors.Is(err, os.ErrNotExist):
+		// Blob already gone (manual delete, scrub); proceed with row cleanup.
+	default:
+		return false, fmt.Errorf("stat expired %q: %w", path, err)
+	}
+	if err := db.Update(func(tx *bbolt.Tx) error {
+		if err := tx.Bucket([]byte(ownersBucket)).Delete(hash[:]); err != nil {
+			return err
+		}
+		return tx.Bucket([]byte(expiriesBucket)).Delete(hash[:])
+	}); err != nil {
+		return false, fmt.Errorf("clear rows for %x: %w", hash, err)
+	}
+	return true, nil
+}
+
+// claimOwner asserts owner for hash, rejects a differing record, and refuses
+// to claim an unowned blob already on disk. With ChunkTTL > 0 the expiry
+// row is (re)written in the same tx as the owner row.
 func (s *Store) claimOwner(hash [sha256.Size]byte, owner []byte) error {
 	db, err := s.ensureOwnersDB()
 	if err != nil {
@@ -396,10 +612,10 @@ func (s *Store) claimOwner(hash [sha256.Size]byte, owner []byte) error {
 	return db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(ownersBucket))
 		if existing := b.Get(hash[:]); existing != nil {
-			if bytes.Equal(existing, owner) {
-				return nil
+			if !bytes.Equal(existing, owner) {
+				return fmt.Errorf("%w: %x", ErrOwnerMismatch, hash)
 			}
-			return fmt.Errorf("%w: %x", ErrOwnerMismatch, hash)
+			return s.writeExpiryTx(tx, hash)
 		}
 		blobPresent, err := s.blobOnDisk(hash)
 		if err != nil {
@@ -408,8 +624,23 @@ func (s *Store) claimOwner(hash [sha256.Size]byte, owner []byte) error {
 		if blobPresent {
 			return fmt.Errorf("%w: %x", ErrOwnerMismatch, hash)
 		}
-		return b.Put(hash[:], append([]byte(nil), owner...))
+		if err := b.Put(hash[:], append([]byte(nil), owner...)); err != nil {
+			return err
+		}
+		return s.writeExpiryTx(tx, hash)
 	})
+}
+
+// writeExpiryTx writes (now + ChunkTTL) into the expiries bucket; no-op
+// when ChunkTTL == 0.
+func (s *Store) writeExpiryTx(tx *bbolt.Tx, hash [sha256.Size]byte) error {
+	if s.chunkTTL == 0 {
+		return nil
+	}
+	deadline := s.now().Add(s.chunkTTL).UnixNano()
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], uint64(deadline))
+	return tx.Bucket([]byte(expiriesBucket)).Put(hash[:], buf[:])
 }
 
 // blobOnDisk reports whether a blob file for hash is currently stored.
@@ -442,7 +673,10 @@ func (s *Store) ensureOwnersDB() (*bbolt.DB, error) {
 		return nil, fmt.Errorf("chmod owners db: %w", err)
 	}
 	if err := dbUpdateFunc(db, func(tx *bbolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists([]byte(ownersBucket))
+		if _, err := tx.CreateBucketIfNotExists([]byte(ownersBucket)); err != nil {
+			return err
+		}
+		_, err := tx.CreateBucketIfNotExists([]byte(expiriesBucket))
 		return err
 	}); err != nil {
 		_ = db.Close()
