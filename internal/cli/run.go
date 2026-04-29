@@ -18,6 +18,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		heartbeatInterval   time.Duration
 		heartbeatMisses     int
 		indexBackupInterval time.Duration
+		scrubInterval       time.Duration
 		gracePeriod         time.Duration
 		dialTimeout         time.Duration
 		restore             bool
@@ -74,6 +75,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				ScanInterval:        scanInterval,
 				HeartbeatInterval:   heartbeatInterval,
 				IndexBackupInterval: indexBackupInterval,
+				ScrubInterval:       scrubInterval,
 				MissThreshold:       heartbeatMisses,
 				GracePeriod:         gracePeriod,
 				DialTimeout:         dialTimeout,
@@ -94,6 +96,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().DurationVar(&scanInterval, "scan-interval", 60*time.Second, "Period between incremental scan passes")
 	cmd.Flags().DurationVar(&heartbeatInterval, "heartbeat-interval", 30*time.Second, "Period between liveness probes against every live conn")
 	cmd.Flags().DurationVar(&indexBackupInterval, "index-backup-interval", 5*time.Minute, "Period between encrypted index-snapshot uploads to live storage peers (storage-only daemons skip)")
+	cmd.Flags().DurationVar(&scrubInterval, "scrub-interval", 6*time.Hour, "Period between local chunk-store integrity scrubs (re-hash every blob, remove any whose content no longer matches its name)")
 	cmd.Flags().IntVar(&heartbeatMisses, "heartbeat-misses", 3, "Consecutive missed heartbeats required to mark a peer unreachable (must be >= 1)")
 	cmd.Flags().DurationVar(&gracePeriod, "grace-period", 24*time.Hour, "Duration a peer must stay unreachable before being treated as lost (eligible for re-replication). 0 = lost immediately.")
 	cmd.Flags().DurationVar(&dialTimeout, "dial-timeout", 30*time.Second, "Timeout for the initial dial to the storage peer")

@@ -366,6 +366,57 @@ func TestRunCmd_AcceptsZeroGracePeriod(t *testing.T) {
 	}
 }
 
+// TestRunCmd_RegistersScrubIntervalFlag asserts --scrub-interval is
+// exposed on the run subcommand with a 6h default.
+func TestRunCmd_RegistersScrubIntervalFlag(t *testing.T) {
+	root := NewRootCmd()
+	var run *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Name() == "run" {
+			run = c
+			break
+		}
+	}
+	if run == nil {
+		t.Fatal("run subcommand missing")
+	}
+	f := run.Flags().Lookup("scrub-interval")
+	if f == nil {
+		t.Fatal("run is missing --scrub-interval flag")
+	}
+	if f.DefValue != "6h0m0s" {
+		t.Errorf("--scrub-interval default = %q, want 6h0m0s", f.DefValue)
+	}
+}
+
+// TestRunCmd_AcceptsScrubInterval asserts a custom --scrub-interval value
+// parses and the daemon starts cleanly.
+func TestRunCmd_AcceptsScrubInterval(t *testing.T) {
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--scrub-interval", "2h",
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("run with --scrub-interval 2h returned err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit within 5s of cancel")
+	}
+}
+
 // TestRunCmd_RefusesWhenLocalEmptyIndexPopulated asserts run wraps daemon.ErrRefuseStart for an empty local with a populated index.
 func TestRunCmd_RefusesWhenLocalEmptyIndexPopulated(t *testing.T) {
 	dataDir := t.TempDir()

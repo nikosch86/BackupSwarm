@@ -174,6 +174,10 @@ type Options struct {
 	// uploads to every live storage conn. Zero uses a sensible default
 	// (5 minutes). Storage-only daemons skip the loop entirely.
 	IndexBackupInterval time.Duration
+	// ScrubInterval is the period between local chunk-store integrity
+	// scrubs (re-hash every blob, remove any whose content no longer
+	// matches its name). Zero uses a sensible default (6h).
+	ScrubInterval time.Duration
 	// Restore selects ModeRestore when the backup dir is empty but the
 	// index is populated.
 	Restore bool
@@ -219,6 +223,7 @@ const (
 	defaultScanInterval        = 60 * time.Second
 	defaultHeartbeatInterval   = 30 * time.Second
 	defaultIndexBackupInterval = 5 * time.Minute
+	defaultScrubInterval       = 6 * time.Hour
 	defaultDialTimeout         = 30 * time.Second
 	defaultGracePeriod         = 24 * time.Hour
 
@@ -242,6 +247,9 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	if opts.IndexBackupInterval == 0 {
 		opts.IndexBackupInterval = defaultIndexBackupInterval
+	}
+	if opts.ScrubInterval == 0 {
+		opts.ScrubInterval = defaultScrubInterval
 	}
 	if opts.GracePeriod == 0 {
 		opts.GracePeriod = defaultGracePeriod
@@ -468,6 +476,21 @@ func Run(ctx context.Context, opts Options) error {
 	}()
 	defer hbWG.Wait()
 	defer hbCancel()
+
+	// scrubCtx bounds the chunk-store scrub loop to daemon.Run's lifetime.
+	// Defer order: scrubCancel → scrubWG.Wait.
+	scrubCtx, scrubCancel := context.WithCancel(ctx)
+	var scrubWG sync.WaitGroup
+	scrubWG.Add(1)
+	go func() {
+		defer scrubWG.Done()
+		runScrubLoop(scrubCtx, scrubLoopOptions{
+			interval: opts.ScrubInterval,
+			scrubFn:  st.Scrub,
+		})
+	}()
+	defer scrubWG.Wait()
+	defer scrubCancel()
 
 	// ibCtx bounds the index-backup loop to daemon.Run's lifetime.
 	// Storage-only daemons have no index of their own to back up; the
