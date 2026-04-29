@@ -14,9 +14,7 @@ type scrubLoopOptions struct {
 	scrubFn  func(ctx context.Context) (store.ScrubResult, error)
 }
 
-// runScrubLoop runs scrubFn synchronously on entry, then once every
-// opts.interval until ctx is cancelled. Errors log and continue;
-// corrupt-blob results emit a warning, clean results emit debug.
+// runScrubLoop runs scrubFn on entry and once per opts.interval.
 func runScrubLoop(ctx context.Context, opts scrubLoopOptions) {
 	tick := func() {
 		res, err := opts.scrubFn(ctx)

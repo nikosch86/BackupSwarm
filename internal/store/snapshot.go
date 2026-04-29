@@ -10,22 +10,17 @@ import (
 	"sync"
 )
 
-// snapshotsDir is the per-owner index-snapshot subdirectory under the
-// store root. Files are named by 64-char lowercase hex of the owner's
-// Ed25519 public key.
+// snapshotsDir is the per-owner index-snapshot subdirectory under root.
 const snapshotsDir = "snapshots"
 
-// ErrSnapshotNotFound is returned by GetIndexSnapshot when no snapshot
-// is recorded for the requested owner.
+// ErrSnapshotNotFound is returned when no snapshot is recorded for owner.
 var ErrSnapshotNotFound = errors.New("index snapshot not found")
 
-// snapshotLocks serializes concurrent puts for the same owner so the
-// temp+rename sequence cannot interleave.
+// snapshotLocks serializes concurrent puts for the same owner.
 var snapshotLocks sync.Map
 
 // PutIndexSnapshot atomically writes blob as the latest index snapshot
-// for the given owner pubkey, replacing any prior snapshot. The blob
-// is opaque (typically encrypted) and is not tracked in Used().
+// for owner, replacing any prior snapshot.
 func (s *Store) PutIndexSnapshot(owner, blob []byte) error {
 	if err := validateOwner(owner); err != nil {
 		return err
@@ -71,8 +66,7 @@ func (s *Store) PutIndexSnapshot(owner, blob []byte) error {
 	return nil
 }
 
-// GetIndexSnapshot returns the latest snapshot stored for owner, or
-// ErrSnapshotNotFound if none has been recorded.
+// GetIndexSnapshot returns the latest snapshot for owner, or ErrSnapshotNotFound.
 func (s *Store) GetIndexSnapshot(owner []byte) ([]byte, error) {
 	if err := validateOwner(owner); err != nil {
 		return nil, err
@@ -93,7 +87,7 @@ func (s *Store) GetIndexSnapshot(owner []byte) ([]byte, error) {
 	return data, nil
 }
 
-// validateOwner enforces the Ed25519 pubkey length on owner bytes.
+// validateOwner enforces the Ed25519 pubkey length.
 func validateOwner(owner []byte) error {
 	if len(owner) != ed25519.PublicKeySize {
 		return fmt.Errorf("owner must be %d bytes, got %d", ed25519.PublicKeySize, len(owner))
@@ -106,7 +100,7 @@ func snapshotPath(root string, owner []byte) string {
 	return filepath.Join(root, snapshotsDir, hex.EncodeToString(owner))
 }
 
-// lockForOwner returns a per-owner mutex, lazily creating one on first use.
+// lockForOwner returns a per-owner mutex.
 func lockForOwner(owner []byte) *sync.Mutex {
 	key := string(owner)
 	if v, ok := snapshotLocks.Load(key); ok {

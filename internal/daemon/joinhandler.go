@@ -17,8 +17,7 @@ import (
 	"backupswarm/internal/swarm"
 )
 
-// loadSwarmCAIfPresent returns the per-swarm CA when one exists at
-// dir, or (nil, nil) when the swarm is in pubkey-pin mode.
+// loadSwarmCAIfPresent returns the swarm CA at dir, or (nil, nil) for pin mode.
 func loadSwarmCAIfPresent(dir string) (*ca.CA, error) {
 	has, err := ca.Has(dir)
 	if err != nil {
@@ -34,9 +33,7 @@ func loadSwarmCAIfPresent(dir string) (*ca.CA, error) {
 	return swarmCA, nil
 }
 
-// makeJoinHandler returns the dispatcher's MsgJoinRequest handler.
-// It opens invites.db, runs HandleJoinStream, then broadcasts
-// PeerJoined to every conn in conns except the joiner.
+// makeJoinHandler returns the MsgJoinRequest handler.
 func makeJoinHandler(dataDir string, peerStore *peers.Store, swarmCA *ca.CA, conns *swarm.ConnSet) backup.JoinHandler {
 	return func(ctx context.Context, rw io.ReadWriter, joinerPub []byte) error {
 		invStore, err := invites.Open(filepath.Join(dataDir, invites.DefaultFilename))

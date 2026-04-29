@@ -15,7 +15,6 @@ import (
 )
 
 // capacityResult is one MsgGetCapacity probe outcome.
-// OK=false leaves Used/Max unset.
 type capacityResult struct {
 	Used int64
 	Max  int64
@@ -26,7 +25,7 @@ type capacityResult struct {
 // maxPerProbeTimeout is the upper bound on a single probe's deadline.
 const maxPerProbeTimeout = 5 * time.Second
 
-// capacityProbeFunc is the package-level seam for capacity probes.
+// capacityProbeFunc is the test seam for capacity probes.
 var capacityProbeFunc = backup.SendGetCapacity
 
 // perProbeTimeout returns min(interval/4, maxPerProbeTimeout).
@@ -38,8 +37,7 @@ func perProbeTimeout(interval time.Duration) time.Duration {
 	return t
 }
 
-// probeAllCapacities probes every conn concurrently, each bounded by
-// perProbe. A failed or timed-out probe is recorded as OK=false.
+// probeAllCapacities probes every conn concurrently with a perProbe deadline.
 func probeAllCapacities(ctx context.Context, conns []*bsquic.Conn, perProbe time.Duration, now func() time.Time) map[string]capacityResult {
 	out := make(map[string]capacityResult, len(conns))
 	var (
@@ -71,9 +69,8 @@ func probeAllCapacities(ctx context.Context, conns []*bsquic.Conn, perProbe time
 	return out
 }
 
-// buildSnapshot composes a RuntimeSnapshot from gathered inputs.
-// base carries the non-peer fields; Peers is filled from knownPeers,
-// reach, and probedCaps, then sorted by hex(pubkey).
+// buildSnapshot composes a RuntimeSnapshot from gathered inputs and
+// sorts Peers by hex(pubkey).
 func buildSnapshot(base RuntimeSnapshot, knownPeers []peers.Peer, reach *swarm.ReachabilityMap, probedCaps map[string]capacityResult) RuntimeSnapshot {
 	snap := base
 	snap.Peers = nil
@@ -133,7 +130,7 @@ func buildSnapshot(base RuntimeSnapshot, knownPeers []peers.Peer, reach *swarm.R
 	return snap
 }
 
-// snapshotLoopOptions are the closures runSnapshotLoop reads each tick.
+// snapshotLoopOptions configures runSnapshotLoop.
 type snapshotLoopOptions struct {
 	dataDir      string
 	interval     time.Duration
@@ -148,8 +145,7 @@ type snapshotLoopOptions struct {
 	nowFn        func() time.Time
 }
 
-// runSnapshotLoop publishes runtime.json on every tick until ctx is
-// cancelled. The first publish runs synchronously before the ticker.
+// runSnapshotLoop publishes runtime.json on entry and once per opts.interval.
 func runSnapshotLoop(ctx context.Context, opts snapshotLoopOptions) {
 	if opts.nowFn == nil {
 		opts.nowFn = time.Now

@@ -1,7 +1,4 @@
-// Package node manages the per-node identity (Ed25519 key pair).
-//
-// The public key is the node ID used throughout the swarm; the private key
-// is persisted locally at 0600 and never leaves the node.
+// Package node manages the per-node Ed25519 identity key pair.
 package node
 
 import (
@@ -24,12 +21,10 @@ const (
 	publicKeyPerm  os.FileMode = 0o644
 )
 
-// ErrIdentityNotFound is returned by Load when no identity exists in the
-// given directory. Callers use errors.Is to distinguish "not yet created"
-// from corruption or permission errors.
+// ErrIdentityNotFound is returned when no identity exists in dir.
 var ErrIdentityNotFound = errors.New("node identity not found")
 
-// Identity is an Ed25519 key pair. The public key is the node's swarm-wide ID.
+// Identity is an Ed25519 key pair; the public key is the swarm-wide node ID.
 type Identity struct {
 	PrivateKey ed25519.PrivateKey
 	PublicKey  ed25519.PublicKey
@@ -44,13 +39,11 @@ func Generate() (*Identity, error) {
 	return &Identity{PrivateKey: priv, PublicKey: pub}, nil
 }
 
-// Save writes the identity to dir, creating the directory at 0700 if needed.
-// The private key is written at 0600, the public key at 0644.
+// Save writes the identity to dir at dirPerm/privPerm/pubPerm.
 func Save(dir string, id *Identity) error {
 	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return fmt.Errorf("create data dir %q: %w", dir, err)
 	}
-	// MkdirAll is a no-op on an existing dir with looser perms; force-tighten.
 	if err := os.Chmod(dir, dirPerm); err != nil {
 		return fmt.Errorf("chmod data dir %q: %w", dir, err)
 	}
@@ -58,8 +51,6 @@ func Save(dir string, id *Identity) error {
 	if err := os.WriteFile(privPath, id.PrivateKey, privateKeyPerm); err != nil {
 		return fmt.Errorf("write private key: %w", err)
 	}
-	// WriteFile respects the process umask; force the required mode explicitly
-	// so a lax umask can't leave key material world-readable.
 	if err := os.Chmod(privPath, privateKeyPerm); err != nil {
 		return fmt.Errorf("chmod private key: %w", err)
 	}
@@ -70,9 +61,7 @@ func Save(dir string, id *Identity) error {
 	return nil
 }
 
-// Load reads the identity from dir. Returns ErrIdentityNotFound if either
-// file is missing; returns an error if the private key has insecure
-// permissions (more permissive than 0600 on POSIX systems).
+// Load reads the identity from dir or returns ErrIdentityNotFound.
 func Load(dir string) (*Identity, error) {
 	privPath := filepath.Join(dir, privateKeyFile)
 	pubPath := filepath.Join(dir, publicKeyFile)
@@ -114,9 +103,7 @@ func Load(dir string) (*Identity, error) {
 	return &Identity{PrivateKey: ed25519.PrivateKey(priv), PublicKey: ed25519.PublicKey(pub)}, nil
 }
 
-// Ensure loads the identity from dir if present, otherwise generates and
-// saves a new one. The created return value reports whether a new identity
-// was generated during this call.
+// Ensure loads the identity from dir or generates and saves a fresh one.
 func Ensure(dir string) (id *Identity, created bool, err error) {
 	id, err = Load(dir)
 	if err == nil {
@@ -140,8 +127,7 @@ func (i *Identity) IDHex() string {
 	return hex.EncodeToString(i.PublicKey)
 }
 
-// ShortID returns the first 8 bytes of the node ID in hex — suitable for
-// human-facing log lines where the full 64-char ID is noisy.
+// ShortID returns the first 8 bytes of the node ID in hex.
 func (i *Identity) ShortID() string {
 	const shortBytes = 8
 	return hex.EncodeToString(i.PublicKey[:shortBytes])

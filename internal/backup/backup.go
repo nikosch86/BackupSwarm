@@ -1,8 +1,6 @@
-// Package backup implements the end-to-end backup pipeline: owner walks a
-// path, splits files into fixed-size chunks, encrypts for a recipient
-// X25519 key, ships each chunk on one or more QUIC streams to the
-// weighted-random selection of storage peers, and records placements in
-// the local index; each peer stores received ciphertext by content hash.
+// Package backup implements the owner-side backup pipeline: walk, chunk,
+// encrypt for a recipient X25519 key, ship to weighted-random peers, and
+// record placements in the local index.
 package backup
 
 import (
@@ -28,8 +26,7 @@ import (
 	"backupswarm/internal/store"
 )
 
-// maxBlobLen caps one PutChunkRequest body: MaxChunkSize + headroom for
-// the crypto.MarshalBinary overhead.
+// maxBlobLen caps one PutChunkRequest body (MaxChunkSize + crypto overhead).
 const maxBlobLen = chunk.MaxChunkSize + 1024
 
 // Test-only seams; production never reassigns these.
@@ -46,39 +43,27 @@ var (
 
 // RunOptions is the owner-side configuration for a backup invocation.
 type RunOptions struct {
-	// Path is the directory to back up. Must exist and be a directory.
-	// Each indexed file's entry.Path is recorded relative to Path so a
-	// subsequent restore stays bounded to the same configured root.
+	// Path is the directory to back up; entry paths are recorded relative.
 	Path string
 	// Conns are the live QUIC connections to candidate storage peers.
-	// Each invocation probes capacity per conn and picks Redundancy
-	// peers per chunk weighted by available bytes.
 	Conns []*bsquic.Conn
-	// Redundancy is the number of unique peers each chunk is placed on.
-	// Zero or negative is treated as 1.
+	// Redundancy is the per-chunk peer count; <=0 is treated as 1.
 	Redundancy int
-	// RecipientPub is the X25519 public key for which every chunk key is
-	// wrapped. Typically the owner's own recipient public key, so that
-	// restore decrypts on the same node that backed up.
+	// RecipientPub is the X25519 pubkey every chunk key is wrapped for.
 	RecipientPub *[crypto.RecipientKeySize]byte
-	// Index is the local bbolt index, updated per file with the per-chunk
-	// peer placement recorded in ChunkRef.Peers.
+	// Index is the local bbolt index updated per file.
 	Index *index.Index
-	// ChunkSize is the target chunk size in bytes; must fall within the
-	// [chunk.MinChunkSize, chunk.MaxChunkSize] bounds.
+	// ChunkSize is the target chunk size; must fall within
+	// [chunk.MinChunkSize, chunk.MaxChunkSize].
 	ChunkSize int
-	// Progress receives human-readable per-file progress lines. Pass
-	// io.Discard in non-interactive contexts.
+	// Progress receives per-file progress lines; nil = io.Discard.
 	Progress io.Writer
-	// Rng is the random source for weighted-random placement; nil seeds
-	// a fresh PCG from the wall clock.
+	// Rng is the random source for placement; nil seeds a PCG from the clock.
 	Rng placement.Rng
 }
 
 // Run backs up every regular file under opts.Path across opts.Conns.
-// opts.Path must be an existing directory; each file's entry.Path is
-// recorded relative to it. Symlinks and special files are skipped (with
-// a progress note).
+// Symlinks and special files are skipped with a progress note.
 func Run(ctx context.Context, opts RunOptions) error {
 	if opts.Progress == nil {
 		opts.Progress = io.Discard
@@ -150,7 +135,6 @@ func backupFile(ctx context.Context, opts RunOptions, path, rel string, candidat
 		return fmt.Errorf("stat %q: %w", path, err)
 	}
 
-	// Incremental skip: stat-matching index entry means unchanged file.
 	if existing, err := opts.Index.Get(rel); err == nil {
 		if existing.Size == info.Size() && existing.ModTime.Equal(info.ModTime()) {
 			fmt.Fprintf(opts.Progress, "unchanged %s\n", rel)
@@ -207,14 +191,11 @@ type candidate struct {
 	available int64
 }
 
-// unlimitedPlacementWeight is the per-peer weight applied when a peer
-// reports max==0 on the wire. Bounded so the sum across many peers
-// fits in int64.
+// unlimitedPlacementWeight is the weight applied for a peer reporting max==0.
 const unlimitedPlacementWeight = int64(1) << 50
 
-// probeCandidates queries each conn for its capacity and returns peers
-// with positive available capacity. A failed probe drops the peer from
-// the pool for this scan.
+// probeCandidates queries each conn for capacity and returns peers with
+// positive available capacity.
 func probeCandidates(ctx context.Context, conns []*bsquic.Conn) []candidate {
 	out := make([]candidate, 0, len(conns))
 	for _, c := range conns {
@@ -246,9 +227,7 @@ func probeCandidates(ctx context.Context, conns []*bsquic.Conn) []candidate {
 }
 
 // placeChunk picks r peers via weighted-random and ships blob to each.
-// Returns the pubkeys of peers that accepted the put plus the canonical
-// content hash. Per-peer failures are logged and skipped; an empty
-// success set fails the call.
+// Returns accepting peer pubkeys and the canonical content hash.
 func placeChunk(ctx context.Context, pool []candidate, r int, blob []byte, rng placement.Rng) ([][]byte, [32]byte, error) {
 	selected, err := placement.WeightedRandom(pool, func(c candidate) int64 { return c.available }, r, rng)
 	if err != nil {
@@ -285,26 +264,19 @@ func placeChunk(ctx context.Context, pool []candidate, r int, blob []byte, rng p
 
 // PruneOptions is the owner-side configuration for a Prune sweep.
 type PruneOptions struct {
-	// Root scopes the sweep; entries whose Path lies outside Root are
-	// left alone (guards against a misconfigured daemon wiping unrelated
-	// backups).
+	// Root scopes the sweep to entries under it.
 	Root string
-	// Conns are the live QUIC connections to known peers. Per chunk,
-	// Prune sends DeleteChunk to every peer in ChunkRef.Peers that
-	// matches a conn here.
+	// Conns are the live QUIC connections to known peers.
 	Conns []*bsquic.Conn
 	// Index is the local bbolt index.
 	Index *index.Index
-	// Progress receives a per-entry line when a delete is performed.
-	// nil is treated as io.Discard.
+	// Progress receives per-entry lines; nil = io.Discard.
 	Progress io.Writer
 }
 
 // Prune sends DeleteChunk for every index entry under Root whose file is
-// gone from disk, then removes the entry. For each chunk, it tries every
-// peer in ChunkRef.Peers that has a matching conn. A "not_found" peer
-// reply counts as success (idempotent delete). Entries are kept on the
-// owner's side if no peer accepted the delete so the next sweep retries.
+// gone from disk, then removes the entry. A "not_found" peer reply counts
+// as success. Entries are kept when no peer accepted the delete.
 func Prune(ctx context.Context, opts PruneOptions) error {
 	if opts.Progress == nil {
 		opts.Progress = io.Discard
@@ -327,9 +299,6 @@ func Prune(ctx context.Context, opts PruneOptions) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		// Index entries are rel-to-Root by construction (backup.Run); a
-		// tampered entry that escapes is skipped rather than deleted so
-		// the operator can investigate.
 		if filepath.IsAbs(entry.Path) || entry.Path == ".." || strings.HasPrefix(entry.Path, ".."+string(filepath.Separator)) {
 			continue
 		}
@@ -355,10 +324,8 @@ func Prune(ctx context.Context, opts PruneOptions) error {
 	return nil
 }
 
-// deleteChunkOnPeers sends DeleteChunk to each peer in ref.Peers that has
-// a matching conn. A peer reporting "not_found" counts as success: the
-// chunk is in the desired (absent) state on that peer. Returns nil when
-// at least one peer accepted; otherwise the last failure error.
+// deleteChunkOnPeers sends DeleteChunk to each peer in ref.Peers with a
+// matching conn. "not_found" counts as success.
 func deleteChunkOnPeers(ctx context.Context, ref index.ChunkRef, connByPub map[string]*bsquic.Conn) error {
 	var lastErr error
 	any := false
@@ -390,8 +357,7 @@ func deleteChunkOnPeers(ctx context.Context, ref index.ChunkRef, connByPub map[s
 	return nil
 }
 
-// isPeerNotFound matches the wire vocabulary returned by the GetChunk /
-// DeleteChunk handlers when the chunk is not in the peer's store.
+// isPeerNotFound matches the "not_found" wire code from GetChunk/DeleteChunk.
 func isPeerNotFound(err error) bool {
 	if err == nil {
 		return false
@@ -406,8 +372,7 @@ func isPeerNotFound(err error) bool {
 	return false
 }
 
-// streamOpener is the subset of *bsquic.Conn that sendChunk needs; lets
-// tests inject a failing stream opener to exercise post-OpenStream wraps.
+// streamOpener is the subset of *bsquic.Conn that sendChunk needs.
 type streamOpener interface {
 	OpenStream(ctx context.Context) (io.ReadWriteCloser, error)
 }
@@ -418,8 +383,7 @@ func (a bsquicConnAdapter) OpenStream(ctx context.Context) (io.ReadWriteCloser, 
 	return a.c.OpenStream(ctx)
 }
 
-// sendChunk writes a PutChunk request and reads the response, returning
-// the peer-reported content hash.
+// sendChunk writes a PutChunk request and reads the response hash.
 func sendChunk(ctx context.Context, conn streamOpener, blob []byte) ([32]byte, error) {
 	s, err := conn.OpenStream(ctx)
 	if err != nil {
@@ -434,7 +398,6 @@ func sendChunk(ctx context.Context, conn streamOpener, blob []byte) ([32]byte, e
 		_ = s.Close()
 		return [32]byte{}, err
 	}
-	// Half-close the send side so the peer sees EOF on its request read.
 	if err := s.Close(); err != nil {
 		return [32]byte{}, fmt.Errorf("close send side: %w", err)
 	}
@@ -449,33 +412,27 @@ func sendChunk(ctx context.Context, conn streamOpener, blob []byte) ([32]byte, e
 	return hash, nil
 }
 
-// SendGetChunk fetches the blob stored under hash from conn. Wraps any
-// peer-reported application error (e.g. chunk-not-found).
+// SendGetChunk fetches the blob stored under hash from conn.
 func SendGetChunk(ctx context.Context, conn *bsquic.Conn, hash [32]byte) ([]byte, error) {
 	return sendGetChunk(ctx, bsquicConnAdapter{c: conn}, hash)
 }
 
-// SendChunk uploads blob via PutChunk and returns the peer-reported
-// content hash. Wraps any peer-reported application error.
+// SendChunk uploads blob via PutChunk and returns the peer-reported hash.
 func SendChunk(ctx context.Context, conn *bsquic.Conn, blob []byte) ([32]byte, error) {
 	return sendChunk(ctx, bsquicConnAdapter{c: conn}, blob)
 }
 
-// SendGetCapacity probes conn for the peer's used/max byte counts;
-// max=0 reports the peer as unlimited. Wraps any peer-reported
-// application error.
+// SendGetCapacity probes conn for used/max byte counts; max=0 means unlimited.
 func SendGetCapacity(ctx context.Context, conn *bsquic.Conn) (used, max int64, err error) {
 	return sendGetCapacity(ctx, bsquicConnAdapter{c: conn})
 }
 
-// SendPing probes conn for liveness. Returns nil on success or a wrapped
-// transport / peer error.
+// SendPing probes conn for liveness.
 func SendPing(ctx context.Context, conn *bsquic.Conn) error {
 	return sendPing(ctx, bsquicConnAdapter{c: conn})
 }
 
-// sendPing opens a MsgPing stream (empty body — the type byte IS the
-// request) and reads the OK/Err response.
+// sendPing opens a MsgPing stream and reads the OK/Err response.
 func sendPing(ctx context.Context, conn streamOpener) error {
 	s, err := conn.OpenStream(ctx)
 	if err != nil {
@@ -498,8 +455,7 @@ func sendPing(ctx context.Context, conn streamOpener) error {
 	return nil
 }
 
-// sendGetCapacity opens a MsgGetCapacity stream (empty body — the type
-// byte is the entire request) and reads the response.
+// sendGetCapacity opens a MsgGetCapacity stream and reads the response.
 func sendGetCapacity(ctx context.Context, conn streamOpener) (used, max int64, err error) {
 	s, err := conn.OpenStream(ctx)
 	if err != nil {
@@ -522,8 +478,7 @@ func sendGetCapacity(ctx context.Context, conn streamOpener) (used, max int64, e
 	return used, max, nil
 }
 
-// sendGetChunk writes a GetChunk request and returns the blob or a
-// wrapped peer application error.
+// sendGetChunk writes a GetChunk request and returns the blob.
 func sendGetChunk(ctx context.Context, conn streamOpener, hash [32]byte) ([]byte, error) {
 	s, err := conn.OpenStream(ctx)
 	if err != nil {
@@ -552,13 +507,12 @@ func sendGetChunk(ctx context.Context, conn streamOpener, hash [32]byte) ([]byte
 	return blob, nil
 }
 
-// SendRenewTTL bumps the TTL for hash on conn. Wraps any peer-reported
-// application error (owner mismatch, chunk-not-found).
+// SendRenewTTL bumps the TTL for hash on conn.
 func SendRenewTTL(ctx context.Context, conn *bsquic.Conn, hash [32]byte) error {
 	return sendRenewTTL(ctx, bsquicConnAdapter{c: conn}, hash)
 }
 
-// sendRenewTTL writes a RenewTTL request and reads the OK/Err response.
+// sendRenewTTL writes a RenewTTL request and reads the response.
 func sendRenewTTL(ctx context.Context, conn streamOpener, hash [32]byte) error {
 	s, err := conn.OpenStream(ctx)
 	if err != nil {
@@ -585,8 +539,7 @@ func sendRenewTTL(ctx context.Context, conn streamOpener, hash [32]byte) error {
 	return nil
 }
 
-// sendDeleteChunk writes a DeleteChunk request and returns nil, or a
-// wrapped peer application error (owner mismatch / chunk-not-found).
+// sendDeleteChunk writes a DeleteChunk request and reads the response.
 func sendDeleteChunk(ctx context.Context, conn streamOpener, hash [32]byte) error {
 	s, err := conn.OpenStream(ctx)
 	if err != nil {
@@ -615,27 +568,21 @@ func sendDeleteChunk(ctx context.Context, conn streamOpener, hash [32]byte) erro
 	return nil
 }
 
-// AnnouncementHandler reads one peer-announcement frame off r (the type
-// byte already consumed by the dispatcher). senderPub is the conn's
-// TLS-authenticated pubkey; a nil handler rejects MsgPeerAnnouncement.
+// AnnouncementHandler reads one peer-announcement frame off r.
+// senderPub is the conn's TLS-authenticated pubkey.
 type AnnouncementHandler func(ctx context.Context, r io.Reader, senderPub []byte) error
 
-// JoinHandler reads one JoinRequest body off rw (type byte already
-// consumed) and writes the response. joinerPub is the conn's
-// TLS-authenticated pubkey; a nil handler rejects MsgJoinRequest.
+// JoinHandler reads one JoinRequest off rw and writes the response.
+// joinerPub is the conn's TLS-authenticated pubkey.
 type JoinHandler func(ctx context.Context, rw io.ReadWriter, joinerPub []byte) error
 
-// ConnObserver receives a per-connection accept/close pair while Serve
-// runs. Either field may be nil.
+// ConnObserver receives per-connection accept/close callbacks.
 type ConnObserver struct {
 	OnAccept func(*bsquic.Conn)
 	OnClose  func(*bsquic.Conn)
 }
 
-// Serve accepts inbound QUIC connections on l and dispatches streams
-// against st. ann handles MsgPeerAnnouncement, join handles
-// MsgJoinRequest; obs is notified at conn accept/close. Exits on ctx
-// cancellation.
+// Serve accepts inbound QUIC connections on l and dispatches streams against st.
 func Serve(ctx context.Context, l *bsquic.Listener, st *store.Store, ann AnnouncementHandler, join JoinHandler, obs *ConnObserver) error {
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -668,8 +615,7 @@ func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann Anno
 	AcceptStreams(ctx, conn, st, ann, join)
 }
 
-// AcceptStreams runs the dispatch loop on conn until conn closes or
-// ctx cancels. Caller owns the conn lifecycle.
+// AcceptStreams runs the dispatch loop on conn until conn closes or ctx cancels.
 func AcceptStreams(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann AnnouncementHandler, join JoinHandler) {
 	ownerKey := append([]byte(nil), conn.RemotePub()...)
 	sem := make(chan struct{}, serveConnStreamCap)
@@ -701,8 +647,6 @@ func AcceptStreams(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann 
 }
 
 // dispatchStream routes each inbound stream on its leading MessageType byte.
-// ownerKey is the TLS-authenticated Ed25519 pubkey of the remote peer.
-// A nil ann rejects MsgPeerAnnouncement; a nil join rejects MsgJoinRequest.
 func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, ownerKey []byte, ann AnnouncementHandler, join JoinHandler) error {
 	msgType, err := protocol.ReadMessageType(rw)
 	if err != nil {
@@ -740,8 +684,7 @@ func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owne
 	}
 }
 
-// errCode maps a store error to a stable on-wire short code. Sentinels
-// surface as their named code; everything else falls through to "internal".
+// errCode maps a store error to a stable on-wire short code.
 func errCode(err error) string {
 	switch {
 	case errors.Is(err, store.ErrChunkNotFound):
@@ -755,9 +698,7 @@ func errCode(err error) string {
 	}
 }
 
-// handlePutChunkStream stores the request blob under owner and writes the
-// response. Store errors map to a short code on the wire; the rich error
-// is logged via slog.WarnContext.
+// handlePutChunkStream stores the request blob under owner and writes the response.
 func handlePutChunkStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owner []byte) error {
 	blob, err := protocol.ReadPutChunkRequest(rw, maxBlobLen)
 	if err != nil {
@@ -772,9 +713,7 @@ func handlePutChunkStream(ctx context.Context, rw io.ReadWriter, st *store.Store
 	return protocol.WritePutChunkResponse(rw, hash, "")
 }
 
-// handleDeleteChunkStream authorizes the delete against owner (the TLS-
-// authenticated pubkey) and writes the response. Store errors map to a
-// short code on the wire; the rich error is logged via slog.WarnContext.
+// handleDeleteChunkStream authorizes the delete against owner and writes the response.
 func handleDeleteChunkStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owner []byte) error {
 	hash, err := protocol.ReadDeleteChunkRequest(rw)
 	if err != nil {
@@ -788,9 +727,7 @@ func handleDeleteChunkStream(ctx context.Context, rw io.ReadWriter, st *store.St
 	return protocol.WriteDeleteChunkResponse(rw, "")
 }
 
-// handleGetCapacityStream writes the store's used/max byte totals
-// onto rw. Always reports success; the OK/Err frame shape leaves room
-// for future error states.
+// handleGetCapacityStream writes the store's used/max byte totals onto rw.
 func handleGetCapacityStream(_ context.Context, rw io.ReadWriter, st *store.Store) error {
 	return protocol.WriteGetCapacityResponse(rw, st.Used(), st.Capacity(), "")
 }
@@ -800,9 +737,7 @@ func handlePingStream(_ context.Context, rw io.ReadWriter) error {
 	return protocol.WritePingResponse(rw, "")
 }
 
-// handleRenewTTLStream authorizes the renew against owner (the TLS-
-// authenticated pubkey) and writes the response. Store errors map to a
-// short code on the wire; the rich error is logged via slog.WarnContext.
+// handleRenewTTLStream authorizes the renew against owner and writes the response.
 func handleRenewTTLStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owner []byte) error {
 	hash, err := protocol.ReadRenewTTLRequest(rw)
 	if err != nil {
@@ -816,9 +751,7 @@ func handleRenewTTLStream(ctx context.Context, rw io.ReadWriter, st *store.Store
 	return protocol.WriteRenewTTLResponse(rw, "")
 }
 
-// handleGetChunkStream authorizes the get against owner (the TLS-
-// authenticated pubkey) and writes the response. Store errors map to a
-// short code on the wire; the rich error is logged via slog.WarnContext.
+// handleGetChunkStream authorizes the get against owner and writes the response.
 func handleGetChunkStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owner []byte) error {
 	hash, err := protocol.ReadGetChunkRequest(rw)
 	if err != nil {

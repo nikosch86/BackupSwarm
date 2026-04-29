@@ -10,20 +10,12 @@ import (
 // leading version byte does not match a known wire format.
 var ErrUnknownWireVersion = errors.New("unknown encrypted-chunk wire version")
 
-// wireVersion is the leading byte of MarshalBinary output. Bumped when the
-// on-wire layout changes so older receivers fail closed instead of
-// mis-parsing unfamiliar bytes.
+// wireVersion is the leading byte of MarshalBinary output.
 const wireVersion byte = 1
 
-// MarshalBinary produces the canonical wire representation of the
-// encrypted chunk:
+// MarshalBinary produces the canonical wire representation:
 //
-//	[1 byte version][24 bytes nonce][4 bytes BE wrapped_key_len][wrapped_key][4 bytes BE ciphertext_len][ciphertext]
-//
-// The format is deterministic — two calls on the same struct value produce
-// identical bytes. That is load-bearing: storage peers address blobs by
-// sha256(marshaled bytes), so any non-determinism would break content
-// addressing across the two ends of a backup stream.
+//	[1B version][24B nonce][4B BE wrapped_key_len][wrapped_key][4B BE ct_len][ciphertext]
 func (ec *EncryptedChunk) MarshalBinary() ([]byte, error) {
 	if len(ec.Nonce) != NonceSize {
 		return nil, fmt.Errorf("nonce must be %d bytes, got %d", NonceSize, len(ec.Nonce))

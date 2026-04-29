@@ -19,14 +19,10 @@ const (
 	RecipientKeySize = 32
 )
 
-// ErrRecipientNotFound is returned by LoadRecipient when no X25519 key pair
-// exists in the given directory.
+// ErrRecipientNotFound is returned when no X25519 key pair exists in dir.
 var ErrRecipientNotFound = errors.New("recipient keys not found")
 
-// RecipientKeys is the per-node X25519 key pair used to wrap symmetric chunk
-// keys (internal/crypto.Encrypt). It is generated and persisted separately
-// from the Ed25519 Identity: identity is for signing, recipient keys are for
-// encryption, and the two have distinct lifecycles and threat models.
+// RecipientKeys is the per-node X25519 key pair for wrapping chunk keys.
 type RecipientKeys struct {
 	PublicKey  *[RecipientKeySize]byte
 	PrivateKey *[RecipientKeySize]byte
@@ -41,8 +37,7 @@ func GenerateRecipient() (*RecipientKeys, error) {
 	return &RecipientKeys{PublicKey: pub, PrivateKey: priv}, nil
 }
 
-// SaveRecipient writes the X25519 key pair to dir, creating the directory at
-// 0700 if needed. Private key at 0600, public at 0644.
+// SaveRecipient writes the X25519 key pair to dir.
 func SaveRecipient(dir string, keys *RecipientKeys) error {
 	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return fmt.Errorf("create data dir %q: %w", dir, err)
@@ -64,9 +59,7 @@ func SaveRecipient(dir string, keys *RecipientKeys) error {
 	return nil
 }
 
-// LoadRecipient reads the X25519 key pair from dir. Returns
-// ErrRecipientNotFound if either file is missing; returns an error if the
-// private key has insecure permissions (more permissive than 0600 on POSIX).
+// LoadRecipient reads the X25519 key pair from dir or returns ErrRecipientNotFound.
 func LoadRecipient(dir string) (*RecipientKeys, error) {
 	privPath := filepath.Join(dir, recipientPrivateKeyFile)
 	pubPath := filepath.Join(dir, recipientPublicKeyFile)
@@ -113,9 +106,7 @@ func LoadRecipient(dir string) (*RecipientKeys, error) {
 	return &out, nil
 }
 
-// EnsureRecipient loads the X25519 key pair from dir if present, otherwise
-// generates and saves a new one. The created return value reports whether a
-// new pair was written during this call.
+// EnsureRecipient loads the X25519 key pair from dir or generates and saves one.
 func EnsureRecipient(dir string) (keys *RecipientKeys, created bool, err error) {
 	keys, err = LoadRecipient(dir)
 	if err == nil {

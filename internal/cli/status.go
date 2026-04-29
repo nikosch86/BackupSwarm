@@ -74,8 +74,7 @@ func runStatusCmd(dataDir string, out io.Writer) error {
 	})
 }
 
-// ownBackupFromIndex opens the index read-only and aggregates entries
-// into the snapshot totals. A missing index.db reports zero totals.
+// ownBackupFromIndex aggregates the read-only index into snapshot totals.
 func ownBackupFromIndex(dataDir string) (daemon.RuntimeOwnBackupSnapshot, error) {
 	idx, err := index.OpenReadOnly(filepath.Join(dataDir, "index.db"))
 	if err != nil {

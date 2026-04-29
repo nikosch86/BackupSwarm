@@ -263,10 +263,8 @@ func TestListen_NilVerifyPeerAdmitsAny(t *testing.T) {
 	_ = conn.Close()
 }
 
-// TestListen_VerifyPeerRejectsUnknown covers membership enforcement — a
-// client whose pubkey is rejected by the predicate cannot use the
-// connection. This is the F-01 fix: unknown peers' streams never reach
-// the server's dispatcher.
+// TestListen_VerifyPeerRejectsUnknown covers membership enforcement: a
+// client whose pubkey is rejected by the predicate cannot use the connection.
 //
 // In TLS 1.3 mTLS the client considers its own handshake complete after
 // sending its Finished message, so quic-go's Dial may return successfully

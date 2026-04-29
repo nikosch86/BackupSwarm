@@ -14,9 +14,8 @@ type expireLoopOptions struct {
 	expireFn func(ctx context.Context) (store.ExpireResult, error)
 }
 
-// runExpireLoop runs expireFn synchronously on entry, then once every
-// opts.interval until ctx is cancelled. Errors log and continue;
-// expired-blob results emit a warning, clean results emit debug.
+// runExpireLoop runs expireFn on entry, then once per opts.interval until
+// ctx is cancelled.
 func runExpireLoop(ctx context.Context, opts expireLoopOptions) {
 	tick := func() {
 		res, err := opts.expireFn(ctx)

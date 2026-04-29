@@ -7,8 +7,7 @@ import (
 	bsquic "backupswarm/internal/quic"
 )
 
-// ConnSet is a mutex-wrapped registry of live QUIC connections keyed by
-// hex-encoded remote pubkey. Safe for concurrent use.
+// ConnSet is a registry of live QUIC connections keyed by hex(remote pubkey).
 type ConnSet struct {
 	mu    sync.Mutex
 	conns map[string]*bsquic.Conn
@@ -19,8 +18,7 @@ func NewConnSet() *ConnSet {
 	return &ConnSet{conns: make(map[string]*bsquic.Conn)}
 }
 
-// Add registers conn under its RemotePub. A nil conn or zero-length
-// pubkey is silently ignored — the registry only stores callable conns.
+// Add registers conn under its RemotePub.
 func (s *ConnSet) Add(conn *bsquic.Conn) {
 	if conn == nil {
 		return
@@ -35,8 +33,7 @@ func (s *ConnSet) Add(conn *bsquic.Conn) {
 	s.conns[key] = conn
 }
 
-// Remove unregisters conn when its RemotePub matches a known entry and
-// the stored pointer equals conn.
+// Remove unregisters conn when the stored pointer matches.
 func (s *ConnSet) Remove(conn *bsquic.Conn) {
 	if conn == nil {
 		return
@@ -64,8 +61,7 @@ func (s *ConnSet) Snapshot() []*bsquic.Conn {
 	return out
 }
 
-// SnapshotExcept returns the snapshot minus the conn whose RemotePub
-// equals exclude. An empty exclude returns the full snapshot.
+// SnapshotExcept returns the snapshot minus the conn whose RemotePub equals exclude.
 func (s *ConnSet) SnapshotExcept(exclude []byte) []*bsquic.Conn {
 	if len(exclude) == 0 {
 		return s.Snapshot()

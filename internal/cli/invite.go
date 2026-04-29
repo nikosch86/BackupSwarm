@@ -72,8 +72,7 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 	return cmd
 }
 
-// readListenAddrWithWait calls daemon.ReadListenAddr, polling for up
-// to wait when the file is absent. wait <= 0 fails fast.
+// readListenAddrWithWait reads listen.addr, polling up to wait when absent.
 func readListenAddrWithWait(ctx context.Context, dir string, wait time.Duration) (string, error) {
 	if wait <= 0 {
 		return daemon.ReadListenAddr(dir)
@@ -99,8 +98,7 @@ func readListenAddrWithWait(ctx context.Context, dir string, wait time.Duration)
 	}
 }
 
-// readSwarmCACertIfPresent loads ca.crt from dir, or returns
-// (nil, nil) when no CA is on disk.
+// readSwarmCACertIfPresent loads ca.crt from dir, or returns (nil, nil).
 func readSwarmCACertIfPresent(dir string) ([]byte, error) {
 	has, err := ca.Has(dir)
 	if err != nil {
@@ -116,25 +114,19 @@ func readSwarmCACertIfPresent(dir string) ([]byte, error) {
 	return swarmCA.CertDER, nil
 }
 
-// tokenTempFile narrows the surface writeTokenFile needs from a
-// temp-file handle so the white-box test can swap in a fake whose
-// Write/Close legs fail — same seam pattern internal/store uses for
-// its atomic Put.
+// tokenTempFile is the surface writeTokenFile uses.
 type tokenTempFile interface {
 	WriteString(string) (int, error)
 	Close() error
 	Name() string
 }
 
-// createTokenTempFunc is the seam that lets tests inject a tokenTempFile
-// whose methods fail. Production never reassigns it.
+// createTokenTempFunc is the test seam for atomic temp-file creation.
 var createTokenTempFunc = func(dir, pattern string) (tokenTempFile, error) {
 	return os.CreateTemp(dir, pattern)
 }
 
-// writeTokenFile writes tok+newline to path via a same-directory temp
-// file + rename, so concurrent readers never observe a partially-written
-// token. Used by --token-out.
+// writeTokenFile writes tok+newline to path via temp+rename in the same dir.
 func writeTokenFile(path, tok string) error {
 	dir := filepath.Dir(path)
 	tmp, err := createTokenTempFunc(dir, ".token-")

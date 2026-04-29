@@ -20,16 +20,14 @@ const chunkHexLen = 2 * sha256.Size
 // shardHexLen is the shard directory name length.
 const shardHexLen = 2
 
-// ScrubResult is the per-pass count of blobs re-hashed and corrupt
-// blobs removed.
+// ScrubResult is the per-pass count of blobs re-hashed and corrupt blobs removed.
 type ScrubResult struct {
 	Scanned int
 	Corrupt int
 }
 
-// Scrub re-hashes every content-addressed blob in the shard tree and
-// removes any whose content no longer matches its name. Skips non-shard
-// entries; per-blob failures log and continue.
+// Scrub re-hashes every blob in the shard tree and removes any whose
+// content no longer matches its name. Per-blob failures log and continue.
 func (s *Store) Scrub(ctx context.Context) (ScrubResult, error) {
 	var res ScrubResult
 	entries, err := os.ReadDir(s.root)
@@ -57,8 +55,7 @@ func (s *Store) Scrub(ctx context.Context) (ScrubResult, error) {
 	return res, nil
 }
 
-// scrubShard walks one shard directory, re-hashing each blob whose
-// filename is a 64-char hex string. Per-blob errors log and continue.
+// scrubShard walks one shard directory and re-hashes each blob.
 func (s *Store) scrubShard(ctx context.Context, shardDir string, res *ScrubResult) error {
 	blobs, err := os.ReadDir(shardDir)
 	if err != nil {
@@ -95,9 +92,8 @@ func (s *Store) scrubShard(ctx context.Context, shardDir string, res *ScrubResul
 	return nil
 }
 
-// scrubOne re-hashes the blob for hash and removes it if the content
-// no longer matches. Returns ok=true when the blob is intact (or absent
-// after a concurrent delete), ok=false when a corrupt blob was removed.
+// scrubOne re-hashes the blob for hash and removes it if corrupt.
+// Returns ok=true when intact or absent, ok=false when removed.
 func (s *Store) scrubOne(ctx context.Context, hash [sha256.Size]byte) (bool, error) {
 	mu := s.lockForHash(hash)
 	mu.Lock()
@@ -136,8 +132,7 @@ func (s *Store) scrubOne(ctx context.Context, hash [sha256.Size]byte) (bool, err
 	return false, nil
 }
 
-// dropOwnerRow removes the owner and expiry records for hash, if any.
-// A missing row is not an error.
+// dropOwnerRow removes the owner and expiry records for hash.
 func (s *Store) dropOwnerRow(hash [sha256.Size]byte) error {
 	db, err := s.ensureOwnersDB()
 	if err != nil {
@@ -151,8 +146,7 @@ func (s *Store) dropOwnerRow(hash [sha256.Size]byte) error {
 	})
 }
 
-// hashStream reads r in full, returning its sha256 sum and total bytes
-// read.
+// hashStream reads r in full, returning its sha256 sum and byte count.
 func hashStream(r io.Reader) ([sha256.Size]byte, int64, error) {
 	h := sha256.New()
 	n, err := io.Copy(h, r)
@@ -170,7 +164,7 @@ func isShardName(name string) bool {
 	return len(name) == shardHexLen && isHex(name)
 }
 
-// isHex reports whether s is composed entirely of 0-9 / a-f.
+// isHex reports whether s consists entirely of 0-9 / a-f.
 func isHex(s string) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]

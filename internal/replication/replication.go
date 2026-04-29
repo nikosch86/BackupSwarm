@@ -1,7 +1,5 @@
 // Package replication detects under-replicated chunks in the local index
-// and copies them onto new peers. A chunk is under-replicated when the
-// count of its existing peers that are not flagged lost (per the grace
-// machinery in internal/swarm) drops below the configured redundancy.
+// and copies them onto new peers.
 package replication
 
 import (
@@ -27,18 +25,14 @@ type Task struct {
 	ChunkIndex     int
 	CiphertextHash [32]byte
 	Size           int64
-	// AliveSources are existing peers that are not-lost and currently
-	// dialable; the executor fetches the encrypted blob from one of them.
+	// AliveSources are existing peers that are not-lost and dialable.
 	AliveSources [][]byte
-	// ExistingPeers is the full ChunkRef.Peers list, used to exclude
-	// already-known peers when picking new targets.
+	// ExistingPeers is the full ChunkRef.Peers list.
 	ExistingPeers [][]byte
 	NeedCount     int
 }
 
-// Plan walks entries and returns one Task per under-replicated chunk.
-// livePubs is peers with a current QUIC conn; lostFn reports peers
-// past their grace period (nil treats every peer as never-lost).
+// Plan returns one Task per under-replicated chunk.
 func Plan(entries []index.FileEntry, livePubs [][]byte, lostFn func(pub []byte) bool, redundancy int) []Task {
 	if redundancy <= 0 {
 		return nil
@@ -81,36 +75,28 @@ func Plan(entries []index.FileEntry, livePubs [][]byte, lostFn func(pub []byte) 
 	return tasks
 }
 
-// Conn is the subset of *bsquic.Conn used to identify a peer; the
-// production wiring also requires that the underlying type be
-// *bsquic.Conn so the package-level seams can call backup.Send*.
+// Conn is the subset of *bsquic.Conn used to identify a peer.
 type Conn interface {
 	RemotePub() ed25519.PublicKey
 }
 
 // RunOptions configures one re-replication sweep.
 type RunOptions struct {
-	// Index is the local owner index. Required.
+	// Index is the local owner index.
 	Index *index.Index
-	// Conns are the live QUIC conns to all known peers (including
-	// non-storage peers). The executor filters by ChunkRef.Peers and
-	// excludes existing holders when picking new targets.
+	// Conns are the live QUIC conns to all known peers.
 	Conns []Conn
-	// LostFn reports peers past their grace period; nil treats every
-	// peer as never-lost (no-op sweep).
+	// LostFn reports peers past their grace period; nil = no-op sweep.
 	LostFn func(pub []byte) bool
-	// Redundancy is the target replica count per chunk. Zero or negative
-	// makes Run a no-op.
+	// Redundancy is the target replica count per chunk.
 	Redundancy int
-	// Rng is the random source for new-target selection; nil seeds a
-	// fresh PCG from the wall clock.
+	// Rng is the random source for new-target selection.
 	Rng placement.Rng
-	// Progress receives a per-task line on successful repair. nil is
-	// treated as io.Discard.
+	// Progress receives a per-task line on successful repair.
 	Progress io.Writer
 }
 
-// Test-only seams; production never reassigns.
+// Test seams.
 var (
 	sendGetChunkFunc = func(ctx context.Context, c Conn, hash [32]byte) ([]byte, error) {
 		return backup.SendGetChunk(ctx, c.(*bsquic.Conn), hash)
@@ -126,9 +112,7 @@ var (
 	indexPutFunc  = func(idx *index.Index, entry index.FileEntry) error { return idx.Put(entry) }
 )
 
-// unlimitedReplicationWeight bounds the placement weight for peers
-// reporting max=0 (unlimited) so a swarm of many such peers still sums
-// within int64.
+// unlimitedReplicationWeight is the placement weight for peers reporting max=0.
 const unlimitedReplicationWeight = int64(1) << 50
 
 // repCandidate is a target peer paired with its probed available bytes.
@@ -137,8 +121,7 @@ type repCandidate struct {
 	available int64
 }
 
-// Run executes one re-replication sweep. Per-task failures log and
-// continue; only an index-list failure surfaces upward.
+// Run executes one re-replication sweep.
 func Run(ctx context.Context, opts RunOptions) error {
 	if opts.Progress == nil {
 		opts.Progress = io.Discard
@@ -172,9 +155,8 @@ func Run(ctx context.Context, opts RunOptions) error {
 	return nil
 }
 
-// executeTask repairs one chunk: fetches it from a live source, places
-// it on NeedCount new targets, and merges accepted target pubkeys into
-// the index entry. Per-task failures log and return; the sweep continues.
+// executeTask repairs one chunk: fetch from a live source, place on
+// NeedCount new targets, and merge accepted pubkeys into the entry.
 func executeTask(ctx context.Context, task Task, opts RunOptions, connByPub map[string]Conn, rng placement.Rng) {
 	srcConn := pickSource(task.AliveSources, connByPub)
 	if srcConn == nil {
@@ -223,8 +205,7 @@ func executeTask(ctx context.Context, task Task, opts RunOptions, connByPub map[
 	fmt.Fprintf(opts.Progress, "replicated %s chunk %d to %d new peer(s)\n", task.EntryPath, task.ChunkIndex, len(newPeers))
 }
 
-// pickSource returns the first conn matching one of sources, or nil if
-// none of the source pubkeys has a current connection.
+// pickSource returns the first conn matching one of sources, or nil.
 func pickSource(sources [][]byte, connByPub map[string]Conn) Conn {
 	for _, p := range sources {
 		if c, ok := connByPub[hex.EncodeToString(p)]; ok {
@@ -234,9 +215,7 @@ func pickSource(sources [][]byte, connByPub map[string]Conn) Conn {
 	return nil
 }
 
-// probedTargetPool builds the candidate slice for new-target selection:
-// every conn whose pubkey is not in exclude, with positive probed
-// available capacity. A failed probe drops the peer from the pool.
+// probedTargetPool returns conns not in exclude with positive available capacity.
 func probedTargetPool(ctx context.Context, conns []Conn, exclude [][]byte) []repCandidate {
 	excludeSet := make(map[string]struct{}, len(exclude))
 	for _, p := range exclude {
@@ -263,9 +242,8 @@ func probedTargetPool(ctx context.Context, conns []Conn, exclude [][]byte) []rep
 	return pool
 }
 
-// availableFromProbe collapses (used, max) into the placement weight.
-// max=0 is the wire convention for "unlimited"; negative results clamp
-// to zero to keep weights non-negative.
+// availableFromProbe collapses (used, max) into the placement weight;
+// max=0 means unlimited.
 func availableFromProbe(used, max int64) int64 {
 	if max == 0 {
 		return unlimitedReplicationWeight
@@ -279,9 +257,7 @@ func availableFromProbe(used, max int64) int64 {
 
 func repCandidateWeight(c repCandidate) int64 { return c.available }
 
-// putToTargets ships blob to each candidate and returns the pubkeys of
-// peers that accepted with the matching content hash. Peer-side errors
-// and hash mismatches are logged and skipped.
+// putToTargets ships blob to each candidate and returns accepting pubkeys.
 func putToTargets(ctx context.Context, targets []repCandidate, blob []byte, want [32]byte) [][]byte {
 	out := make([][]byte, 0, len(targets))
 	for _, c := range targets {
@@ -304,9 +280,8 @@ func putToTargets(ctx context.Context, targets []repCandidate, blob []byte, want
 	return out
 }
 
-// mergePeersIntoIndex re-reads the entry, verifies the chunk's hash
-// and index are unchanged, and appends newPeers to its Peers list. A
-// concurrent rewrite drops the merge silently.
+// mergePeersIntoIndex appends newPeers to the chunk's Peers list when
+// the entry's hash and chunk index are still consistent.
 func mergePeersIntoIndex(idx *index.Index, task Task, newPeers [][]byte) error {
 	entry, err := indexGetFunc(idx, task.EntryPath)
 	if err != nil {

@@ -15,18 +15,16 @@ import (
 	bsquic "backupswarm/internal/quic"
 )
 
-// defaultInviteWatchInterval is the daemon's pending-invite cache
-// refresh interval.
+// defaultInviteWatchInterval is the pending-invite cache refresh interval.
 const defaultInviteWatchInterval = 1 * time.Second
 
-// pendingCache holds the most recent count of pending invite secrets,
-// readable lock-free by the listener's predicate.
+// pendingCache holds the lock-free count of pending invite secrets.
 type pendingCache struct {
 	n atomic.Int32
 }
 
-// makeVerifyPeer returns a VerifyPeerFunc that admits pub when it is
-// in peerStore or when pc reports a pending invite.
+// makeVerifyPeer returns a VerifyPeerFunc admitting known peers and
+// peers presenting a pending invite.
 func makeVerifyPeer(peerStore *peers.Store, pc *pendingCache) bsquic.VerifyPeerFunc {
 	return func(pub ed25519.PublicKey) error {
 		if _, err := peerStore.Get(pub); err == nil {
@@ -41,8 +39,7 @@ func makeVerifyPeer(peerStore *peers.Store, pc *pendingCache) bsquic.VerifyPeerF
 	}
 }
 
-// refreshPendingInvites opens invites.db, counts pending records, and
-// updates pc. Errors log and leave the previous value untouched.
+// refreshPendingInvites updates pc with the current pending count.
 func refreshPendingInvites(ctx context.Context, dataDir string, pc *pendingCache) {
 	path := filepath.Join(dataDir, invites.DefaultFilename)
 	s, err := invites.Open(path)
@@ -59,8 +56,7 @@ func refreshPendingInvites(ctx context.Context, dataDir string, pc *pendingCache
 	pc.n.Store(int32(n))
 }
 
-// pollPendingInvites runs an initial refresh then refreshes pc every
-// interval until ctx is cancelled.
+// pollPendingInvites refreshes pc on entry and once per interval.
 func pollPendingInvites(ctx context.Context, dataDir string, pc *pendingCache, interval time.Duration) {
 	refreshPendingInvites(ctx, dataDir, pc)
 	ticker := time.NewTicker(interval)

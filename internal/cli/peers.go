@@ -125,7 +125,6 @@ const (
 )
 
 // formatBytes renders n with a binary-prefix suffix (B/KiB/MiB/GiB/TiB).
-// One decimal place for non-byte values.
 func formatBytes(n int64) string {
 	switch {
 	case n < kib:
@@ -141,7 +140,7 @@ func formatBytes(n int64) string {
 	}
 }
 
-// formatBytesOrUnlimited treats max==0 as the wire unlimited sentinel.
+// formatBytesOrUnlimited treats n==0 as the unlimited sentinel.
 func formatBytesOrUnlimited(n int64) string {
 	if n == 0 {
 		return "unlimited"

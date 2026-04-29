@@ -29,11 +29,9 @@ const (
 // ErrFileNotFound is returned by Get and Delete when no entry exists.
 var ErrFileNotFound = errors.New("file not found in index")
 
-// ChunkRef locates one chunk of a backed-up file. PlaintextHash is the
-// sha256 of the plaintext bytes (used for post-decrypt integrity).
-// CiphertextHash is the sha256 of the encrypted blob (the wire/store
-// address on peers). Size is the ciphertext blob length. Peers lists
-// Ed25519 pubkeys of storage peers known to hold the blob.
+// ChunkRef locates one chunk of a backed-up file. PlaintextHash is sha256
+// of plaintext; CiphertextHash is sha256 of the encrypted blob (storage
+// address). Peers lists Ed25519 pubkeys of peers holding the blob.
 type ChunkRef struct {
 	PlaintextHash  [32]byte
 	CiphertextHash [32]byte

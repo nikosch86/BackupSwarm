@@ -10,18 +10,18 @@ import (
 	"backupswarm/internal/swarm"
 )
 
-// pingProbeFunc is the package-level seam for liveness probes.
+// pingProbeFunc is the test seam for liveness probes.
 var pingProbeFunc = backup.SendPing
 
-// heartbeatLoopOptions are the closures runHeartbeatLoop reads each tick.
+// heartbeatLoopOptions configures runHeartbeatLoop.
 type heartbeatLoopOptions struct {
 	interval time.Duration
 	connsFn  func() []*bsquic.Conn
 	reach    *swarm.ReachabilityMap
 }
 
-// probeAllPings sends Ping to every conn concurrently, each bounded by
-// perProbe. Each result routes through reach.RecordHeartbeat.
+// probeAllPings sends Ping to every conn concurrently and records the
+// outcome via reach.RecordHeartbeat.
 func probeAllPings(ctx context.Context, conns []*bsquic.Conn, reach *swarm.ReachabilityMap, perProbe time.Duration) {
 	var wg sync.WaitGroup
 	for _, c := range conns {
@@ -46,8 +46,7 @@ func probeAllPings(ctx context.Context, conns []*bsquic.Conn, reach *swarm.Reach
 }
 
 // runHeartbeatLoop ticks every opts.interval, fanning out probeAllPings
-// across opts.connsFn(). The first probe runs synchronously before the
-// ticker starts; the loop exits when ctx is cancelled.
+// across opts.connsFn().
 func runHeartbeatLoop(ctx context.Context, opts heartbeatLoopOptions) {
 	perProbe := perProbeTimeout(opts.interval)
 	tick := func() {

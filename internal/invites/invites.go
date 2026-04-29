@@ -1,6 +1,4 @@
-// Package invites is the introducer-side persistent log of issued
-// single-use join tokens, bbolt-backed with same-tx read-and-mark-
-// consumed semantics so replays surface ErrAlreadyUsed.
+// Package invites is the bbolt-backed log of issued single-use join secrets.
 package invites
 
 import (
@@ -22,8 +20,7 @@ const (
 
 	openLockTimeout = 2 * time.Second
 
-	// DefaultFilename is the conventional basename for the invites bbolt
-	// file inside a node's data directory.
+	// DefaultFilename is the conventional basename for the invites bbolt file.
 	DefaultFilename = "invites.db"
 
 	valueFormatVersion byte = 1
@@ -32,22 +29,19 @@ const (
 	statusConsumed byte = 1
 )
 
-// ErrUnknown is returned by Consume when no record exists for the secret.
+// ErrUnknown is returned when no record exists for the secret.
 var ErrUnknown = errors.New("invites: unknown secret")
 
-// ErrAlreadyUsed is returned by Consume when the record exists but was
-// already consumed by an earlier Consume call.
+// ErrAlreadyUsed is returned when the secret was already consumed.
 var ErrAlreadyUsed = errors.New("invites: secret already consumed")
 
-// ErrSecretExists is returned by Issue when a record already exists for
-// the given secret.
+// ErrSecretExists is returned when a record already exists for the secret.
 var ErrSecretExists = errors.New("invites: secret already issued")
 
-// ErrUnknownVersion is returned when a record's leading version byte is
-// not recognized.
+// ErrUnknownVersion is returned when the leading version byte is unknown.
 var ErrUnknownVersion = errors.New("invites: unknown record version")
 
-// Test-only seams; production never reassigns these.
+// Test seams.
 var (
 	chmodFunc = os.Chmod
 )
@@ -57,9 +51,7 @@ type Store struct {
 	db *bbolt.DB
 }
 
-// Open opens (or initializes) the invites store at path. The parent
-// directory is created at 0700 if missing; the bbolt file is chmod'd to
-// 0600 after Open.
+// Open opens (or initializes) the invites store at path.
 func Open(path string) (*Store, error) {
 	parent := filepath.Dir(path)
 	if err := os.MkdirAll(parent, dirPerm); err != nil {
@@ -86,8 +78,7 @@ func Open(path string) (*Store, error) {
 // Close closes the underlying bbolt database.
 func (s *Store) Close() error { return s.db.Close() }
 
-// Issue records secret as pending with the given swarmID. Returns
-// ErrSecretExists if the secret was previously issued.
+// Issue records secret as pending with swarmID, or returns ErrSecretExists.
 func (s *Store) Issue(secret [32]byte, swarmID [32]byte) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucketName))
@@ -98,9 +89,8 @@ func (s *Store) Issue(secret [32]byte, swarmID [32]byte) error {
 	})
 }
 
-// Consume atomically flips the record from pending to consumed and
-// returns the issued swarmID. Errors: ErrUnknown if no record exists,
-// ErrAlreadyUsed if the record was previously consumed.
+// Consume atomically flips pending to consumed and returns the swarmID.
+// Returns ErrUnknown or ErrAlreadyUsed on failure.
 func (s *Store) Consume(secret [32]byte) ([32]byte, error) {
 	var swarmID [32]byte
 	err := s.db.Update(func(tx *bbolt.Tx) error {
@@ -125,9 +115,7 @@ func (s *Store) Consume(secret [32]byte) ([32]byte, error) {
 	return swarmID, nil
 }
 
-// PendingCount scans the bucket and returns the number of records still
-// in the pending state (i.e. issued but not yet consumed). Used by the
-// daemon's poll loop to admit unknown peers during a join window.
+// PendingCount returns the number of records still in the pending state.
 func (s *Store) PendingCount() (int, error) {
 	count := 0
 	err := s.db.View(func(tx *bbolt.Tx) error {
@@ -166,8 +154,7 @@ func encodeValue(status byte, swarmID [32]byte) []byte {
 	return out
 }
 
-// decodeValue parses an encoded record, returning ErrUnknownVersion when
-// the leading byte is not valueFormatVersion.
+// decodeValue parses an encoded record.
 func decodeValue(raw []byte) (byte, [32]byte, error) {
 	var swarmID [32]byte
 	if len(raw) < 2 {

@@ -1,7 +1,5 @@
-// Package chunk splits byte streams into fixed-size, content-addressed
-// chunks (index, SHA-256, bytes) and reassembles them. Split returns
-// chunks in order; Join tolerates any input order but requires a dense
-// index sequence starting at 0.
+// Package chunk splits byte streams into fixed-size content-addressed
+// chunks and reassembles them.
 package chunk
 
 import (
@@ -12,32 +10,26 @@ import (
 	"sort"
 )
 
-// Chunk size is bounded at 1–4 MiB. Values outside this range are
-// rejected by Split.
+// Chunk size bounds.
 const (
 	MinChunkSize = 1 << 20 // 1 MiB
 	MaxChunkSize = 4 << 20 // 4 MiB
 )
 
-// ErrInvalidChunkSize is returned by Split when the requested chunk size is
-// outside [MinChunkSize, MaxChunkSize].
+// ErrInvalidChunkSize is returned when chunk size is outside [Min, Max].
 var ErrInvalidChunkSize = errors.New("chunk size out of range")
 
-// ErrIncompleteChunks is returned by Join when the input slice has missing
-// or duplicate indices, so a contiguous 0..n-1 sequence cannot be formed.
+// ErrIncompleteChunks is returned when chunk indices don't form 0..n-1.
 var ErrIncompleteChunks = errors.New("chunk set is incomplete")
 
-// Chunk is a single fixed-size segment of a file's plaintext bytes.
-// Hash is sha256(Data) and is stable across encoding / transport.
+// Chunk is a fixed-size segment of plaintext bytes; Hash is sha256(Data).
 type Chunk struct {
 	Index int
 	Data  []byte
 	Hash  [sha256.Size]byte
 }
 
-// Split reads r and emits fixed-size chunks of the requested size. The
-// final chunk may be shorter than size if the input length is not an exact
-// multiple. Returns an empty slice (not nil error) on empty input.
+// Split reads r and emits fixed-size chunks; the final chunk may be shorter.
 func Split(r io.Reader, size int) ([]Chunk, error) {
 	if size < MinChunkSize || size > MaxChunkSize {
 		return nil, fmt.Errorf("%w: got %d (want %d..%d)", ErrInvalidChunkSize, size, MinChunkSize, MaxChunkSize)
@@ -47,7 +39,6 @@ func Split(r io.Reader, size int) ([]Chunk, error) {
 	for idx := 0; ; idx++ {
 		n, err := io.ReadFull(r, buf)
 		if n > 0 {
-			// Copy so each chunk owns its bytes; buf is reused across iterations.
 			data := make([]byte, n)
 			copy(data, buf[:n])
 			chunks = append(chunks, Chunk{
@@ -67,10 +58,8 @@ func Split(r io.Reader, size int) ([]Chunk, error) {
 	}
 }
 
-// Join writes the chunks' data to w in ascending Index order. Input need
-// not be sorted; Join sorts a local copy so the caller's slice is not
-// mutated. Returns ErrIncompleteChunks if the indices don't form a dense
-// 0..len(chunks)-1 sequence.
+// Join writes chunks to w in ascending Index order.
+// Returns ErrIncompleteChunks when indices don't form 0..n-1.
 func Join(chunks []Chunk, w io.Writer) error {
 	sorted := make([]Chunk, len(chunks))
 	copy(sorted, chunks)

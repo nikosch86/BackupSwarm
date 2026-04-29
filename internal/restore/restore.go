@@ -1,11 +1,6 @@
-// Package restore fetches each indexed chunk from a storage peer, decrypts
-// it, verifies its plaintext hash against the index, and reassembles the
-// file at filepath.Join(Dest, entry.Path). Dirs are 0700, files 0600; a
-// hash mismatch aborts before any further writes for that file. Index
-// entries carry paths relative to the configured backup root (set by
-// backup.Run); restore rejects absolute or `..`-bearing entries up front
-// and routes every filesystem operation through an *os.Root rooted at
-// Dest, so no tampered entry can escape the destination tree.
+// Package restore fetches indexed chunks from peers, decrypts them, verifies
+// each plaintext hash against the index, and writes files under Dest (dirs
+// 0700, files 0600) via an *os.Root rooted at Dest.
 package restore
 
 import (
@@ -32,9 +27,8 @@ const (
 	filePerm os.FileMode = 0o600
 )
 
-// ErrPlaintextHashMismatch is returned when a decrypted chunk's sha256
-// does not match the PlaintextHash recorded at backup time. The restore
-// aborts rather than write garbage to Dest.
+// ErrPlaintextHashMismatch is returned when a decrypted chunk's sha256 does
+// not match the PlaintextHash recorded at backup time.
 var ErrPlaintextHashMismatch = errors.New("plaintext hash mismatch")
 
 // writableFile lets tests substitute a fake that fails Write or Close.

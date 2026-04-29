@@ -12,20 +12,15 @@ import (
 	"backupswarm/internal/store"
 )
 
-// MaxIndexSnapshotSize caps a single PutIndexSnapshot / GetIndexSnapshot
-// blob at 64 MiB. Larger snapshots must be chunked via the chunk pipeline.
+// MaxIndexSnapshotSize caps a single index-snapshot blob at 64 MiB.
 const MaxIndexSnapshotSize = 64 << 20
 
-// SendPutIndexSnapshot uploads blob as the latest encrypted index
-// snapshot for the conn's TLS-authenticated owner pubkey. Wraps any
-// peer-reported application error.
+// SendPutIndexSnapshot uploads blob as the latest encrypted index snapshot.
 func SendPutIndexSnapshot(ctx context.Context, conn *bsquic.Conn, blob []byte) error {
 	return sendPutIndexSnapshot(ctx, bsquicConnAdapter{c: conn}, blob)
 }
 
-// SendGetIndexSnapshot fetches the latest snapshot for the conn's
-// TLS-authenticated owner pubkey. Wraps any peer-reported application
-// error (e.g. not_found).
+// SendGetIndexSnapshot fetches the latest snapshot for the conn's owner.
 func SendGetIndexSnapshot(ctx context.Context, conn *bsquic.Conn) ([]byte, error) {
 	return sendGetIndexSnapshot(ctx, bsquicConnAdapter{c: conn})
 }
@@ -81,9 +76,7 @@ func sendGetIndexSnapshot(ctx context.Context, conn streamOpener) ([]byte, error
 	return blob, nil
 }
 
-// handlePutIndexSnapshotStream stores the request blob under the conn's
-// owner pubkey. Store errors map to the same wire vocabulary as chunk
-// errors; the rich error stays in slog.WarnContext.
+// handlePutIndexSnapshotStream stores the request blob under owner.
 func handlePutIndexSnapshotStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owner []byte) error {
 	blob, err := protocol.ReadPutIndexSnapshotRequest(rw, MaxIndexSnapshotSize)
 	if err != nil {
@@ -97,8 +90,7 @@ func handlePutIndexSnapshotStream(ctx context.Context, rw io.ReadWriter, st *sto
 	return protocol.WritePutIndexSnapshotResponse(rw, "")
 }
 
-// handleGetIndexSnapshotStream serves the snapshot stored under the
-// conn's owner pubkey. ErrSnapshotNotFound maps to "not_found".
+// handleGetIndexSnapshotStream serves the snapshot for owner.
 func handleGetIndexSnapshotStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owner []byte) error {
 	blob, getErr := st.GetIndexSnapshot(owner)
 	if getErr != nil {
@@ -109,9 +101,7 @@ func handleGetIndexSnapshotStream(ctx context.Context, rw io.ReadWriter, st *sto
 	return protocol.WriteGetIndexSnapshotResponse(rw, blob, "")
 }
 
-// snapshotErrCode maps a snapshot-side store error to a stable wire
-// short code. ErrSnapshotNotFound surfaces as "not_found"; all other
-// errors fall through to "internal".
+// snapshotErrCode maps a snapshot-side store error to a wire short code.
 func snapshotErrCode(err error) string {
 	if errors.Is(err, store.ErrSnapshotNotFound) {
 		return "not_found"

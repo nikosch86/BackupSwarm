@@ -13,7 +13,6 @@ const (
 )
 
 // resolveDataDir applies the precedence flag > env > XDG_DATA_HOME > $HOME.
-// Returns an error only if the fallback chain needs $HOME but it's unset.
 func resolveDataDir(explicit string) (string, error) {
 	if explicit != "" {
 		return explicit, nil

@@ -17,11 +17,10 @@ import (
 	bsquic "backupswarm/internal/quic"
 )
 
-// errNoSnapshotAvailable is returned when no storage peer holds an
-// encrypted index snapshot for the local node.
+// errNoSnapshotAvailable is returned when no storage peer holds an index snapshot.
 var errNoSnapshotAvailable = errors.New("no storage peer holds an index snapshot for this node; run a daemon long enough to publish at least one snapshot first")
 
-// Test-only seam; production never reassigns.
+// fetchSnapshotFunc is the test seam for snapshot fetches.
 var fetchSnapshotFunc = backup.SendGetIndexSnapshot
 
 func newRestoreIndexCmd(dataDir *string) *cobra.Command {
@@ -93,9 +92,7 @@ func newRestoreIndexCmd(dataDir *string) *cobra.Command {
 	return cmd
 }
 
-// fetchAnyIndexSnapshot tries each conn in turn, returning the first
-// successfully fetched snapshot blob. Per-peer failures are recorded
-// in last and surfaced only when no peer yielded a snapshot.
+// fetchAnyIndexSnapshot returns the first successfully fetched snapshot blob.
 func fetchAnyIndexSnapshot(ctx context.Context, conns []*bsquic.Conn) ([]byte, error) {
 	if len(conns) == 0 {
 		return nil, errNoSnapshotAvailable
@@ -118,9 +115,7 @@ func fetchAnyIndexSnapshot(ctx context.Context, conns []*bsquic.Conn) ([]byte, e
 	return nil, fmt.Errorf("%w: %v", errNoSnapshotAvailable, last)
 }
 
-// decodeSnapshotBlob unmarshals the encrypted-chunk wire form, decrypts
-// it with the recipient keypair, and unmarshals the inner snapshot
-// payload back into entries.
+// decodeSnapshotBlob decrypts blob and unmarshals the inner snapshot payload.
 func decodeSnapshotBlob(blob []byte, pub, priv *[crypto.RecipientKeySize]byte) ([]index.FileEntry, error) {
 	ec, err := crypto.UnmarshalEncryptedChunk(blob)
 	if err != nil {

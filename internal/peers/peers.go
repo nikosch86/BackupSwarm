@@ -172,12 +172,8 @@ func OpenReadOnly(path string) (*Store, error) {
 // Store return errors.
 func (s *Store) Close() error { return s.db.Close() }
 
-// Add upserts a peer. If a peer with the same pubkey already exists, the
-// record is overwritten (addresses change over time). An empty Addr is
-// permitted — it records "we know this pubkey but have no dialable
-// address yet" (e.g., a joiner that persists its introducer before the
-// joiner's own daemon has bound a port). Such records become dialable
-// once an address announcement updates them in place.
+// Add upserts a peer keyed by pubkey. Empty Addr is permitted (peer known
+// but not yet dialable); an address announcement updates it in place.
 func (s *Store) Add(p Peer) error {
 	if err := validatePubKey(p.PubKey); err != nil {
 		return err

@@ -15,26 +15,22 @@ import (
 	"backupswarm/pkg/token"
 )
 
-// randReadFunc is the seam that lets tests pin the swarmID/secret bytes
-// generated inside IssueInvite. Production never reassigns it.
+// randReadFunc is the test seam for swarmID/secret randomness.
 var randReadFunc = func(p []byte) (int, error) { return io.ReadFull(rand.Reader, p) }
 
-// atomicTempFile narrows the temp-file surface writeAtomicFile needs
-// so tests can inject Write/Close failures.
+// atomicTempFile is the surface writeAtomicFile uses.
 type atomicTempFile interface {
 	WriteString(string) (int, error)
 	Close() error
 	Name() string
 }
 
-// createAtomicTempFunc is the seam tests swap to inject an
-// atomicTempFile whose methods fail. Production never reassigns it.
+// createAtomicTempFunc is the test seam for atomic temp-file creation.
 var createAtomicTempFunc = func(dir, pattern string) (atomicTempFile, error) {
 	return os.CreateTemp(dir, pattern)
 }
 
-// writeAtomicFile writes data to path via a same-directory temp file
-// + rename so concurrent readers never see a partial write.
+// writeAtomicFile writes data to path via temp+rename in the same directory.
 func writeAtomicFile(path, data string) error {
 	dir := filepath.Dir(path)
 	tmp, err := createAtomicTempFunc(dir, ".token-")
@@ -62,9 +58,8 @@ func writeAtomicFile(path, data string) error {
 	return nil
 }
 
-// IssueInvite opens <dataDir>/invites.db, persists a fresh
-// (swarmID, secret) pair as pending, and returns the encoded token.
-// An empty caCertDER produces a pin-mode token.
+// IssueInvite persists a fresh (swarmID, secret) pair as pending and
+// returns the encoded token. An empty caCertDER produces a pin-mode token.
 func IssueInvite(dataDir, listenAddr string, introPub ed25519.PublicKey, caCertDER []byte) (string, error) {
 	store, err := invites.Open(filepath.Join(dataDir, invites.DefaultFilename))
 	if err != nil {
@@ -95,9 +90,8 @@ func IssueInvite(dataDir, listenAddr string, introPub ed25519.PublicKey, caCertD
 	return tokStr, nil
 }
 
-// ResolveSwarmCA returns the per-swarm CA, generating one on the
-// first call (or writing a pin-mode marker when noCA is true).
-// noCA on a CA-mode swarm errors.
+// ResolveSwarmCA returns the per-swarm CA, generating one on first call
+// or writing a pin-mode marker when noCA is true.
 func ResolveSwarmCA(ctx context.Context, dir string, noCA bool) (*ca.CA, error) {
 	hasCA, err := ca.Has(dir)
 	if err != nil {

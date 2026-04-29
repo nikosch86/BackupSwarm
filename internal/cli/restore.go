@@ -16,8 +16,7 @@ import (
 	"backupswarm/internal/restore"
 )
 
-// errNoStoragePeer is returned when peers.db has no storage candidate
-// with a non-empty address — restore cannot fetch blobs from nowhere.
+// errNoStoragePeer is returned when peers.db has no dialable storage peer.
 var errNoStoragePeer = fmt.Errorf("no storage peer with a dialable address in peers.db; run `join <token>` first")
 
 func newRestoreCmd(dataDir *string) *cobra.Command {
@@ -85,8 +84,7 @@ func newRestoreCmd(dataDir *string) *cobra.Command {
 	return cmd
 }
 
-// listDialableStoragePeers returns every peer in ps with a non-empty
-// Addr and a Role that admits storage. errNoStoragePeer fires on empty.
+// listDialableStoragePeers returns dialable storage peers from ps.
 func listDialableStoragePeers(ps *peers.Store) ([]peers.Peer, error) {
 	all, err := ps.List()
 	if err != nil {
@@ -104,8 +102,8 @@ func listDialableStoragePeers(ps *peers.Store) ([]peers.Peer, error) {
 	return dialable, nil
 }
 
-// dialAll dials every peer best-effort. Returns the successful conns and
-// a closer that closes them all. Errors only when zero dials succeeded.
+// dialAll dials every peer best-effort and returns the successful conns
+// plus a closer.
 func dialAll(ctx context.Context, peerList []peers.Peer, priv ed25519.PrivateKey, timeout time.Duration) ([]*bsquic.Conn, func(), error) {
 	conns := make([]*bsquic.Conn, 0, len(peerList))
 	var firstErr error

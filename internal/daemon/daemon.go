@@ -1,9 +1,6 @@
-// Package daemon is the sync-daemon runner: a single long-running
-// process that is both a backup source (keeping its own backup dir
-// synced to a storage peer) and a storage peer (serving PutChunk and
-// DeleteChunk streams for others). Classify selects the startup Mode
-// from (local-populated?, index-populated?); Run wires the selected
-// Mode to a QUIC listener and a backup.Serve loop.
+// Package daemon is the sync-daemon runner: a long-running process that is
+// both a backup source and a storage peer. Classify picks a startup Mode;
+// Run wires it to a QUIC listener and the backup.Serve loop.
 package daemon
 
 import (
@@ -55,9 +52,8 @@ const (
 	ModePurge
 )
 
-// ErrRefuseStart is returned by Classify when the backup dir is empty
-// but the index is populated without --restore or --purge. Starting
-// blindly would orphan every swarm-stored blob.
+// ErrRefuseStart is returned by Classify when the backup dir is empty but
+// the index is populated without --restore or --purge.
 var ErrRefuseStart = errors.New("local backup dir is empty but index is populated; pass --restore or --purge")
 
 // ErrConflictingFlags is returned by Classify when both --restore and --purge are set.
@@ -85,21 +81,14 @@ func Classify(localPopulated, indexPopulated, restore, purge bool) (Mode, error)
 	}
 }
 
-// ScanOnceOptions is the owner-side configuration for a single scan
-// pass: back up changed files across all storage peers and prune deleted
-// ones, using the same conn slice for both directions.
+// ScanOnceOptions configures a single owner-side scan: back up changed
+// files across opts.Conns and prune deleted ones.
 type ScanOnceOptions struct {
-	// BackupDir is the directory being kept in sync. Incremental
-	// backup-Run is invoked with Path == BackupDir and Prune with
-	// Root == BackupDir.
+	// BackupDir is the directory being kept in sync.
 	BackupDir string
 	// Conns are the live QUIC connections to candidate storage peers.
-	// backup.Run picks Redundancy peers per chunk weighted by capacity;
-	// backup.Prune sends deletes to every conn that matches a peer in
-	// each ChunkRef.Peers.
 	Conns []*bsquic.Conn
-	// Redundancy is the per-chunk peer count; zero or negative defaults
-	// to 1 inside backup.Run.
+	// Redundancy is the per-chunk peer count; <=0 defaults to 1.
 	Redundancy int
 	// Index is the local bbolt index.
 	Index *index.Index
@@ -142,90 +131,55 @@ func ScanOnce(ctx context.Context, opts ScanOnceOptions) error {
 
 // Options is the configuration for Run.
 type Options struct {
-	// DataDir holds identity, recipient keys, index, store, owners db,
-	// and peers.db; the dial target is read from peers.db.
+	// DataDir holds identity, recipient keys, index, store, owners db, peers.db.
 	DataDir string
-	// BackupDir is the user's source-of-truth directory kept in sync
-	// with the swarm.
+	// BackupDir is the user's source-of-truth directory kept in sync.
 	BackupDir string
-	// ListenAddr is the UDP address for the inbound QUIC listener
-	// (storage-peer role). Ignored when Listener is non-nil.
+	// ListenAddr is the UDP address for the inbound QUIC listener.
 	ListenAddr string
-	// Listener, when non-nil, is used as the inbound QUIC listener
-	// instead of binding ListenAddr. Ownership is handed off — Run
-	// closes it on exit. Callers pass a pre-bound listener to avoid
-	// the close/rebind race that breaks ":0" ports (e.g. after an
-	// `invite` handshake transitioning into the daemon).
+	// Listener, when non-nil, replaces binding ListenAddr; Run closes it.
 	Listener *bsquic.Listener
-	// PeerStore, when non-nil, is used instead of opening one at
-	// <DataDir>/peers.db. Ownership is handed off — Run closes it on
-	// exit. Lets `invite`/`join` hand their already-open peer store
-	// into the daemon without a bbolt flock hiccup.
+	// PeerStore, when non-nil, replaces opening <DataDir>/peers.db; Run closes it.
 	PeerStore *peers.Store
-	// ChunkSize is the target chunk size for backups (bytes).
+	// ChunkSize is the target chunk size in bytes.
 	ChunkSize int
-	// ScanInterval is the period between scan passes. Zero uses a
-	// sensible default (60s).
+	// ScanInterval is the period between scan passes. Zero defaults to 60s.
 	ScanInterval time.Duration
-	// HeartbeatInterval is the period between liveness probes against
-	// every live conn. Zero uses a sensible default (30s).
+	// HeartbeatInterval is the period between liveness probes. Zero defaults to 30s.
 	HeartbeatInterval time.Duration
-	// IndexBackupInterval is the period between encrypted index-snapshot
-	// uploads to every live storage conn. Zero uses a sensible default
-	// (5 minutes). Storage-only daemons skip the loop entirely.
+	// IndexBackupInterval is the period between index-snapshot uploads. Zero defaults to 5m.
 	IndexBackupInterval time.Duration
-	// ScrubInterval is the period between local chunk-store integrity
-	// scrubs (re-hash every blob, remove any whose content no longer
-	// matches its name). Zero uses a sensible default (6h).
+	// ScrubInterval is the period between chunk-store scrubs. Zero defaults to 6h.
 	ScrubInterval time.Duration
-	// ChunkTTL is the storage-side lifetime applied to each PutOwned blob;
-	// a Renew refreshes the deadline. Zero uses a sensible default (30d).
+	// ChunkTTL is the storage-side lifetime per blob. Zero defaults to 30d.
 	ChunkTTL time.Duration
-	// RenewInterval is the owner-side cadence for sending RenewTTL to
-	// every storage peer holding a chunk in the local index. Zero uses
-	// ChunkTTL/5.
+	// RenewInterval is the owner-side cadence for sending RenewTTL. Zero uses ChunkTTL/5.
 	RenewInterval time.Duration
-	// ExpireInterval is the cadence for sweeping expired blobs out of the
-	// local store. Zero uses a sensible default (1h).
+	// ExpireInterval is the cadence for sweeping expired blobs. Zero defaults to 1h.
 	ExpireInterval time.Duration
-	// Restore selects ModeRestore when the backup dir is empty but the
-	// index is populated.
+	// Restore selects ModeRestore.
 	Restore bool
-	// Purge selects ModePurge: delete every indexed blob from the
-	// storage peer and clear the index, then continue in Idle mode.
+	// Purge selects ModePurge.
 	Purge bool
-	// DialTimeout bounds the initial dial to the storage peer. Zero
-	// uses 30s.
+	// DialTimeout bounds the initial dial to the storage peer. Zero defaults to 30s.
 	DialTimeout time.Duration
-	// IssueInitialInvite issues a token at startup, prints it to
-	// Progress, and optionally writes it to InitialInviteOut.
+	// IssueInitialInvite issues a token at startup.
 	IssueInitialInvite bool
-	// InitialInviteOut is the file path the initial invite token is
-	// atomically written to. Only consulted when IssueInitialInvite.
+	// InitialInviteOut is the file path the initial invite token is written to.
 	InitialInviteOut string
-	// NoCA opts the founder into pin-mode trust. Only consulted when
-	// IssueInitialInvite; rejected on a CA-mode swarm.
+	// NoCA opts the founder into pin-mode trust.
 	NoCA bool
-	// Progress receives daemon-level progress lines (scan starts,
-	// mode transitions). nil is treated as io.Discard.
+	// Progress receives daemon-level progress lines.
 	Progress io.Writer
-	// Reachability is the peer reachability map the daemon updates
-	// from connection lifecycle events. nil makes Run allocate one
-	// using MissThreshold.
+	// Reachability is the peer reachability map; nil allocates one.
 	Reachability *swarm.ReachabilityMap
-	// MissThreshold is the consecutive miss count required to flip a
-	// peer from StateSuspect to StateUnreachable. Only consulted when
-	// Reachability is nil. Zero or negative uses swarm.DefaultMissThreshold.
+	// MissThreshold is the miss count flipping Suspect to Unreachable.
 	MissThreshold int
-	// GracePeriod is the duration a peer must stay StateUnreachable
-	// before being flagged as lost. Only consulted when Reachability
-	// is nil. Zero uses 24h; negative is rejected.
+	// GracePeriod is the time Unreachable before flagged lost.
 	GracePeriod time.Duration
 	// MaxStorageBytes caps the local chunk store; 0 means unlimited.
-	// PutChunk over the cap returns the "no_space" wire code.
 	MaxStorageBytes int64
-	// Redundancy is the per-chunk peer count used by ScanOnce. Zero or
-	// negative defaults to 1 inside backup.Run.
+	// Redundancy is the per-chunk peer count used by ScanOnce.
 	Redundancy int
 }
 
@@ -244,9 +198,8 @@ const (
 )
 
 // Run is the sync-daemon entrypoint. It opens local state, applies the
-// Classify decision, and then either runs a scan loop, performs a one-shot
-// purge, or sits idle serving inbound requests. Blocks until ctx is
-// cancelled; returns the first unrecoverable error.
+// Classify decision, and runs a scan loop, one-shot purge, or idle serve.
+// Blocks until ctx is cancelled.
 func Run(ctx context.Context, opts Options) error {
 	if opts.Progress == nil {
 		opts.Progress = io.Discard
@@ -343,8 +296,6 @@ func Run(ctx context.Context, opts Options) error {
 		reach = swarm.NewReachabilityMapWithGrace(n, opts.GracePeriod, nil)
 	}
 
-	// Classify before binding so flag-validation errors surface cleanly.
-	// Storage-only mode (no BackupDir) has no scan to gate.
 	var mode Mode
 	if opts.BackupDir != "" {
 		localPop, err := BackupDirHasRegularFiles(opts.BackupDir)
@@ -361,8 +312,6 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
-	// Admits a peer if its pubkey is in peers.db OR if at least one
-	// invite is pending in the cache.
 	pendingInvites := &pendingCache{}
 	verifyMember := makeVerifyPeer(peerStore, pendingInvites)
 
@@ -373,21 +322,15 @@ func Run(ctx context.Context, opts Options) error {
 			return fmt.Errorf("listen on %q: %w", opts.ListenAddr, err)
 		}
 	} else {
-		// Handed-off listener flips its predicate to the membership
-		// check before Serve starts.
 		listener.SetVerifyPeer(verifyMember)
 	}
 	defer func() { _ = listener.Close() }()
 
-	// Publishes the bound address for an `invite` CLI in another
-	// process to read.
 	if err := WriteListenAddr(opts.DataDir, listener.Addr().String()); err != nil {
 		return fmt.Errorf("write listen.addr: %w", err)
 	}
 	defer func() { _ = RemoveListenAddr(opts.DataDir) }()
 
-	// Shared *ca.CA (or nil for pin mode) for the initial-invite
-	// issuer and the dispatchStream join handler.
 	var swarmCA *ca.CA
 	if opts.IssueInitialInvite {
 		swarmCA, err = ResolveSwarmCA(ctx, opts.DataDir, opts.NoCA)
@@ -418,8 +361,6 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
-	// Synchronous first refresh warms the cache before Serve accepts;
-	// the goroutine then refreshes on each tick.
 	refreshPendingInvites(ctx, opts.DataDir, pendingInvites)
 	go pollPendingInvites(ctx, opts.DataDir, pendingInvites, defaultInviteWatchInterval)
 
@@ -457,8 +398,6 @@ func Run(ctx context.Context, opts Options) error {
 	serveErrCh := make(chan error, 1)
 	go func() { serveErrCh <- backup.Serve(ctx, listener, st, router.HandleStream, joinHandler, obs) }()
 
-	// modeStr is the snapshot's published Mode, swapped after a
-	// one-shot restore/purge completes.
 	var modeStr atomic.Pointer[string]
 	initialMode := "storage-only"
 	if opts.BackupDir != "" {
@@ -473,8 +412,6 @@ func Run(ctx context.Context, opts Options) error {
 		}
 		return time.Unix(0, v)
 	}
-	// snapCtx bounds the snapshot loop to daemon.Run's lifetime.
-	// Defer order: snapCancel → snapWG.Wait → RemoveRuntimeSnapshot.
 	snapCtx, snapCancel := context.WithCancel(ctx)
 	var snapWG sync.WaitGroup
 	snapWG.Add(1)
@@ -497,8 +434,6 @@ func Run(ctx context.Context, opts Options) error {
 	defer snapWG.Wait()
 	defer snapCancel()
 
-	// hbCtx bounds the heartbeat loop to daemon.Run's lifetime.
-	// Defer order: hbCancel → hbWG.Wait.
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	var hbWG sync.WaitGroup
 	hbWG.Add(1)
@@ -513,8 +448,6 @@ func Run(ctx context.Context, opts Options) error {
 	defer hbWG.Wait()
 	defer hbCancel()
 
-	// scrubCtx bounds the chunk-store scrub loop to daemon.Run's lifetime.
-	// Defer order: scrubCancel → scrubWG.Wait.
 	scrubCtx, scrubCancel := context.WithCancel(ctx)
 	var scrubWG sync.WaitGroup
 	scrubWG.Add(1)
@@ -528,8 +461,6 @@ func Run(ctx context.Context, opts Options) error {
 	defer scrubWG.Wait()
 	defer scrubCancel()
 
-	// expireCtx bounds the TTL expiry sweep to daemon.Run's lifetime.
-	// Defer order: expireCancel → expireWG.Wait.
 	expireCtx, expireCancel := context.WithCancel(ctx)
 	var expireWG sync.WaitGroup
 	expireWG.Add(1)
@@ -543,9 +474,6 @@ func Run(ctx context.Context, opts Options) error {
 	defer expireWG.Wait()
 	defer expireCancel()
 
-	// ibCtx bounds the index-backup loop to daemon.Run's lifetime.
-	// Storage-only daemons have no index of their own to back up; the
-	// loop short-circuits internally when BackupDir is empty.
 	ibCtx, ibCancel := context.WithCancel(ctx)
 	var ibWG sync.WaitGroup
 	if opts.BackupDir != "" {
@@ -563,8 +491,6 @@ func Run(ctx context.Context, opts Options) error {
 	defer ibWG.Wait()
 	defer ibCancel()
 
-	// renewCtx bounds the owner-side TTL renewal loop to daemon.Run's
-	// lifetime. Storage-only daemons skip the loop.
 	renewCtx, renewCancel := context.WithCancel(ctx)
 	var renewWG sync.WaitGroup
 	if opts.BackupDir != "" {
@@ -580,7 +506,6 @@ func Run(ctx context.Context, opts Options) error {
 	defer renewWG.Wait()
 	defer renewCancel()
 
-	// Pure storage-peer role: serve inbound chunks only, no scan loop.
 	if opts.BackupDir == "" {
 		slog.InfoContext(ctx, "daemon starting (storage-only)",
 			"node_id", id.ShortID(),
@@ -598,7 +523,6 @@ func Run(ctx context.Context, opts Options) error {
 	)
 	fmt.Fprintf(opts.Progress, "daemon starting: mode=%s listen=%s known_peers=%d\n", modeName(mode), opts.ListenAddr, len(dialablePeers))
 
-	// Backup dir present but no known peers — behave as storage-peer.
 	if len(dialablePeers) == 0 {
 		return waitForServe(ctx, serveErrCh)
 	}
@@ -611,15 +535,11 @@ func Run(ctx context.Context, opts Options) error {
 		return liveStorageConns(connSet, peerStore)
 	}
 	if len(connsFn()) == 0 {
-		// No storage candidate dialable; fall through to storage-only.
 		return waitForServe(ctx, serveErrCh)
 	}
 
 	switch mode {
 	case ModePurge:
-		// Purge: iterate the index and send DeleteChunk per entry.
-		// (Prune scopes by Root and the empty backup dir has nothing
-		// under Root to iterate.)
 		if err := purgeAll(ctx, idx, connsFn(), opts.Progress); err != nil {
 			return fmt.Errorf("purge: %w", err)
 		}
@@ -627,11 +547,6 @@ func Run(ctx context.Context, opts Options) error {
 		idleMode := "idle"
 		modeStr.Store(&idleMode)
 	case ModeRestore:
-		// Restore writes each file under opts.BackupDir, the same root
-		// the daemon uses for backup. Index entries are stored relative
-		// to that root, so a tampered entry can only redirect writes
-		// inside the configured tree — never to system paths the user
-		// did not opt to back up.
 		if err := restore.Run(ctx, restore.Options{
 			Dest:          opts.BackupDir,
 			Conns:         connsFn(),
@@ -665,8 +580,7 @@ func Run(ctx context.Context, opts Options) error {
 }
 
 // replicateOnce runs one re-replication sweep against the live storage
-// conns. Errors log and return; replication is best-effort and never
-// blocks the scan cadence.
+// conns. Best-effort; errors log and return.
 func replicateOnce(ctx context.Context, idx *index.Index, conns []*bsquic.Conn, reach *swarm.ReachabilityMap, redundancy int, progress io.Writer) {
 	if redundancy <= 0 || idx == nil || reach == nil {
 		return
@@ -692,9 +606,7 @@ func toReplicationConns(conns []*bsquic.Conn) []replication.Conn {
 	return repConns
 }
 
-// waitForServe blocks until ctx is cancelled (clean shutdown) or the
-// Serve goroutine surfaces an error. Used by the two idle paths in Run:
-// pure storage-only mode and backup-dir-with-no-peer mode.
+// waitForServe blocks until ctx is cancelled or Serve surfaces an error.
 func waitForServe(ctx context.Context, serveErrCh <-chan error) error {
 	select {
 	case <-ctx.Done():
@@ -704,9 +616,7 @@ func waitForServe(ctx context.Context, serveErrCh <-chan error) error {
 	}
 }
 
-// outboundDialer owns the lifecycle of outbound conns: each
-// registered conn is added to connSet + reach, has an AcceptStreams
-// loop spawned, and is closed on CloseAll.
+// outboundDialer owns the lifecycle of outbound conns.
 type outboundDialer struct {
 	ctx         context.Context
 	priv        ed25519.PrivateKey
@@ -721,8 +631,7 @@ type outboundDialer struct {
 	conns []*bsquic.Conn
 }
 
-// register wires conn into connSet + reach, spawns the AcceptStreams
-// loop, and records conn for shutdown close.
+// register wires conn into connSet+reach and spawns AcceptStreams.
 func (d *outboundDialer) register(conn *bsquic.Conn, p peers.Peer) {
 	d.connSet.Add(conn)
 	d.reach.MarkConn(conn, swarm.StateReachable)
@@ -737,8 +646,7 @@ func (d *outboundDialer) register(conn *bsquic.Conn, p peers.Peer) {
 	)
 }
 
-// dial bsquic-dials p with the dialer's bounded timeout, marks
-// reachability on outcome, and registers a successful conn.
+// dial dials p with the bounded timeout, marks reachability, and registers on success.
 func (d *outboundDialer) dial(ctx context.Context, p peers.Peer) (*bsquic.Conn, error) {
 	dctx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
@@ -751,8 +659,7 @@ func (d *outboundDialer) dial(ctx context.Context, p peers.Peer) (*bsquic.Conn, 
 	return conn, nil
 }
 
-// CloseAll closes every registered conn and clears the daemon-side
-// connSet/reach entries. Idempotent.
+// CloseAll closes every registered conn and clears connSet/reach entries.
 func (d *outboundDialer) CloseAll() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -764,8 +671,7 @@ func (d *outboundDialer) CloseAll() {
 	d.conns = nil
 }
 
-// hasConn reports whether the dialer is already tracking a conn for
-// the given remote pubkey.
+// hasConn reports whether the dialer tracks a conn for pub.
 func (d *outboundDialer) hasConn(pub []byte) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -778,7 +684,6 @@ func (d *outboundDialer) hasConn(pub []byte) bool {
 }
 
 // listDialablePeers returns every peer record with a non-empty Addr.
-// Role is not filtered; backup-target selection is separate.
 func listDialablePeers(ps *peers.Store) ([]peers.Peer, error) {
 	all, err := ps.List()
 	if err != nil {
@@ -793,9 +698,8 @@ func listDialablePeers(ps *peers.Store) ([]peers.Peer, error) {
 	return dialable, nil
 }
 
-// dialAllPeers dials each known peer best-effort via the dialer.
-// Failed dials are logged and skipped. Returns the first dial error
-// only when every dial failed.
+// dialAllPeers dials each known peer best-effort.
+// Returns the first error only when every dial failed.
 func dialAllPeers(ctx context.Context, dialer *outboundDialer, known []peers.Peer) error {
 	var firstErr error
 	successes := 0
@@ -819,8 +723,7 @@ func dialAllPeers(ctx context.Context, dialer *outboundDialer, known []peers.Pee
 }
 
 // makeImmediateDialOnApplied returns a Router.OnApplied closure that
-// spawns an async dial when shouldImmediateDial selects the announced
-// peer.
+// spawns an async dial for each shouldImmediateDial-selected peer.
 func makeImmediateDialOnApplied(peerStore *peers.Store, connSet *swarm.ConnSet, dialer *outboundDialer) func(context.Context, protocol.PeerAnnouncement) {
 	return func(ctx context.Context, ann protocol.PeerAnnouncement) {
 		p, ok := shouldImmediateDial(ann, connSet, peerStore, dialer)
@@ -838,9 +741,8 @@ func makeImmediateDialOnApplied(peerStore *peers.Store, connSet *swarm.ConnSet, 
 	}
 }
 
-// shouldImmediateDial returns the peer record to dial, ok=true, when
-// ann is a PeerJoined with non-empty Addr whose pubkey is in peerStore
-// and not already in connSet or dialer.
+// shouldImmediateDial returns the peer record to dial when ann is a
+// PeerJoined for a known peer not yet in connSet or dialer.
 func shouldImmediateDial(ann protocol.PeerAnnouncement, connSet *swarm.ConnSet, peerStore *peers.Store, dialer *outboundDialer) (peers.Peer, bool) {
 	if ann.Kind != protocol.AnnouncePeerJoined {
 		return peers.Peer{}, false
@@ -864,8 +766,7 @@ func shouldImmediateDial(ann protocol.PeerAnnouncement, connSet *swarm.ConnSet, 
 	return p, true
 }
 
-// redialMissingPeers dials any peer in peerStore with a non-empty
-// Addr not yet in connSet or dialer. Best-effort.
+// redialMissingPeers dials any peer not yet in connSet or dialer.
 func redialMissingPeers(ctx context.Context, peerStore *peers.Store, dialer *outboundDialer, connSet *swarm.ConnSet) {
 	known, err := peerStore.List()
 	if err != nil {
@@ -895,9 +796,7 @@ func redialMissingPeers(ctx context.Context, peerStore *peers.Store, dialer *out
 	}
 }
 
-// liveStorageConns returns the subset of connSet whose remote pubkey
-// resolves to an IsStorageCandidate role in peerStore. Conns with an
-// unknown pubkey or non-storage role are dropped.
+// liveStorageConns returns the storage-candidate subset of connSet.
 func liveStorageConns(connSet *swarm.ConnSet, peerStore *peers.Store) []*bsquic.Conn {
 	snapshot := connSet.Snapshot()
 	out := make([]*bsquic.Conn, 0, len(snapshot))
@@ -917,9 +816,8 @@ func liveStorageConns(connSet *swarm.ConnSet, peerStore *peers.Store) []*bsquic.
 	return out
 }
 
-// runScanLoop runs ScanOnce every interval until ctx is cancelled or
-// serveErrCh fires. Each tick calls sweep, then connsFn for ScanOnce's
-// Conns, then onScanSuccess on success.
+// runScanLoop runs ScanOnce every interval; each tick runs sweep, refreshes
+// Conns, and runs onScanSuccess on success.
 func runScanLoop(ctx context.Context, opts ScanOnceOptions, interval time.Duration, serveErrCh <-chan error, connsFn func() []*bsquic.Conn, sweep func(), onScanSuccess func()) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -951,8 +849,8 @@ func runScanLoop(ctx context.Context, opts ScanOnceOptions, interval time.Durati
 	}
 }
 
-// purgeAll sends DeleteChunk for every chunk of every index entry,
-// then clears the index. Used by Run when Mode == ModePurge.
+// purgeAll sends DeleteChunk for every chunk of every index entry, then
+// clears the index.
 func purgeAll(ctx context.Context, idx *index.Index, conns []*bsquic.Conn, progress io.Writer) error {
 	entries, err := idx.List()
 	if err != nil {
@@ -962,9 +860,6 @@ func purgeAll(ctx context.Context, idx *index.Index, conns []*bsquic.Conn, progr
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		// Root at the entry's dir so Prune's rooted check accepts it;
-		// Stat fails ErrNotExist (empty dir in Purge mode), so Prune
-		// deletes and removes the entry.
 		if err := backup.Prune(ctx, backup.PruneOptions{
 			Root:     filepath.Dir(e.Path),
 			Conns:    conns,
@@ -994,8 +889,7 @@ func modeName(m Mode) string {
 	}
 }
 
-// warnIfOverCap logs a slog warning and writes a progress line when
-// used exceeds capacity. capacity == 0 (unlimited) is a no-op.
+// warnIfOverCap warns when used exceeds capacity; capacity 0 is a no-op.
 func warnIfOverCap(ctx context.Context, used, capacity int64, progress io.Writer) {
 	if capacity == 0 || used <= capacity {
 		return
@@ -1009,8 +903,7 @@ func warnIfOverCap(ctx context.Context, used, capacity int64, progress io.Writer
 	fmt.Fprintf(progress, "warning: %d bytes on disk exceeds --max-storage %d (over by %d); new chunks will be rejected until usage drops\n", used, capacity, overBy)
 }
 
-// BackupDirHasRegularFiles walks dir and returns true as soon as one
-// regular file is found (symlinks, sockets, and device files don't count).
+// BackupDirHasRegularFiles returns true once a regular file is found in dir.
 func BackupDirHasRegularFiles(dir string) (bool, error) {
 	info, err := os.Stat(dir)
 	if err != nil {

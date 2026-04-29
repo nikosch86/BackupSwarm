@@ -901,10 +901,8 @@ func TestRun_StorageOnly_NoBackupDir(t *testing.T) {
 	listenAddr := listener.LocalAddr().String()
 	_ = listener.Close()
 
-	// The daemon's listener now enforces peers.db membership at the TLS
-	// handshake (F-01 fix). Seed the owner's pubkey before the daemon
-	// opens the bbolt file so the dial is admitted; otherwise the test
-	// owner is rejected at handshake.
+	// Seed the owner's pubkey in peers.db before the daemon opens it; the
+	// listener gates membership at TLS handshake.
 	ownerPub, ownerPriv, _ := ed25519.GenerateKey(rand.Reader)
 	seedPeer(t, dataDir, "", ownerPub)
 

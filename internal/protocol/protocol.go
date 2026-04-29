@@ -1,8 +1,6 @@
-// Package protocol defines the BackupSwarm peer-to-peer wire format:
-// PutChunk, DeleteChunk, and GetChunk request/response pairs, each on a
-// dedicated QUIC stream prefixed by a single MessageType byte. Framing
-// is big-endian length prefixes with caller-supplied size caps to bound
-// allocations from malicious or malformed input.
+// Package protocol defines the BackupSwarm peer-to-peer wire format. Each
+// stream starts with a MessageType byte; bodies use big-endian length
+// prefixes with caller-supplied size caps.
 package protocol
 
 import (
@@ -13,9 +11,8 @@ import (
 	"io"
 )
 
-// MessageType tags the first byte of every peer-bound data-plane stream
-// so the server dispatcher can route PutChunk vs DeleteChunk without
-// speculatively parsing both frame shapes.
+// MessageType tags the first byte of every peer-bound stream so the
+// dispatcher can route to the right handler.
 type MessageType byte
 
 const (
@@ -72,9 +69,7 @@ const (
 	statusOK  byte = 0
 	statusErr byte = 1
 
-	// MaxErrorMessageLen caps the length of a peer-returned error string
-	// so a misbehaving peer cannot force a huge allocation via the error
-	// length prefix.
+	// MaxErrorMessageLen caps the length of a peer-returned error string.
 	MaxErrorMessageLen = 1 << 12 // 4 KiB
 )
 
@@ -94,10 +89,8 @@ var ErrCSRTooLarge = errors.New("join request csr exceeds maximum size")
 // cert length exceeds the caller-supplied cap.
 var ErrCertTooLarge = errors.New("join response cert exceeds maximum size")
 
-// WritePutChunkRequest frames blob onto w. The frame is
-// [4 bytes BE length][blob bytes]. Empty blobs are rejected; the peer
-// stores blob bytes by sha256 and a zero-length blob has no useful
-// content address.
+// WritePutChunkRequest frames blob onto w as [4B BE length][blob bytes].
+// Empty blobs are rejected.
 func WritePutChunkRequest(w io.Writer, blob []byte) error {
 	if len(blob) == 0 {
 		return errors.New("put chunk blob must be non-empty")
@@ -159,11 +152,9 @@ func WritePutChunkResponse(w io.Writer, hash [32]byte, appErr string) error {
 	return nil
 }
 
-// ReadPutChunkResponse reads a single response frame from r. On success it
-// returns the peer-computed hash and an empty appErr. On an application-level
-// failure it returns a zero hash and the error string from the peer.
-// Transport-level failures (truncated frame, unknown status) are returned as
-// the third value.
+// ReadPutChunkResponse reads a response frame. On success returns the
+// peer-computed hash; on application error returns a zero hash and the
+// error string. Transport errors are returned as the final value.
 func ReadPutChunkResponse(r io.Reader) (hash [32]byte, appErr string, err error) {
 	var status [1]byte
 	if _, err := io.ReadFull(r, status[:]); err != nil {
@@ -433,10 +424,8 @@ func ReadPeerListMessage(r io.Reader, maxEntries, maxAddrLen int) ([]PeerEntry, 
 	return out, nil
 }
 
-// WriteDeleteChunkRequest frames the content hash on w. The body is a
-// fixed-length 32-byte sha256 hash; the dispatch byte (MsgDeleteChunk)
-// is written separately by the caller so server-side routing stays
-// symmetric with the PutChunk path.
+// WriteDeleteChunkRequest frames the 32-byte content hash on w.
+// The MsgDeleteChunk dispatch byte is written separately by the caller.
 func WriteDeleteChunkRequest(w io.Writer, hash [sha256.Size]byte) error {
 	if _, err := w.Write(hash[:]); err != nil {
 		return fmt.Errorf("write delete request hash: %w", err)
@@ -453,9 +442,8 @@ func ReadDeleteChunkRequest(r io.Reader) ([sha256.Size]byte, error) {
 	return hash, nil
 }
 
-// WriteDeleteChunkResponse writes a response frame with the same OK/Err
-// shape as WriteJoinAck: [statusOK] on success, [statusErr][4B len][bytes]
-// on application error (owner mismatch, chunk not found, etc.).
+// WriteDeleteChunkResponse writes [statusOK] on success or
+// [statusErr][4B len][bytes] on application error.
 func WriteDeleteChunkResponse(w io.Writer, appErr string) error {
 	if appErr == "" {
 		if _, err := w.Write([]byte{statusOK}); err != nil {
@@ -477,10 +465,8 @@ func WriteDeleteChunkResponse(w io.Writer, appErr string) error {
 	return nil
 }
 
-// WriteGetChunkRequest frames the content hash on w. The body is a
-// fixed-length 32-byte sha256 hash; the dispatch byte (MsgGetChunk) is
-// written separately by the caller so server-side routing stays
-// symmetric with the Put/Delete paths.
+// WriteGetChunkRequest frames the 32-byte content hash on w.
+// The MsgGetChunk dispatch byte is written separately by the caller.
 func WriteGetChunkRequest(w io.Writer, hash [sha256.Size]byte) error {
 	if _, err := w.Write(hash[:]); err != nil {
 		return fmt.Errorf("write get request hash: %w", err)
@@ -529,11 +515,9 @@ func WriteGetChunkResponse(w io.Writer, blob []byte, appErr string) error {
 	return nil
 }
 
-// ReadGetChunkResponse reads a single response frame from r, capping the
-// advertised blob length at maxBlobLen so a malicious peer cannot force
-// a huge allocation via the length prefix. On success it returns the
-// blob and an empty appErr. On application-level failure it returns a
-// nil blob and the error string.
+// ReadGetChunkResponse reads a response frame, rejecting advertised blob
+// lengths above maxBlobLen. On success returns the blob; on application
+// error returns nil and the error string.
 func ReadGetChunkResponse(r io.Reader, maxBlobLen int) (blob []byte, appErr string, err error) {
 	var status [1]byte
 	if _, err := io.ReadFull(r, status[:]); err != nil {

@@ -8,32 +8,25 @@ import (
 	"strings"
 )
 
-// ListenAddrFilename is the basename of the file the daemon writes its
-// bound listener address into at startup. `invite` reads it to embed in
-// the token; an absent file fails fast with ErrNoRunningDaemon.
+// ListenAddrFilename is the basename of the daemon's bound-address file.
 const ListenAddrFilename = "listen.addr"
 
-// ErrNoRunningDaemon is returned by ReadListenAddr when listen.addr is
-// missing from the data dir.
+// ErrNoRunningDaemon is returned when listen.addr is missing.
 var ErrNoRunningDaemon = errors.New("no running daemon (listen.addr missing in data dir)")
 
-// listenAddrTempFile narrows the temp-file surface WriteListenAddr
-// needs so a white-box test can inject Write/Close failures.
+// listenAddrTempFile is the surface WriteListenAddr uses.
 type listenAddrTempFile interface {
 	WriteString(string) (int, error)
 	Close() error
 	Name() string
 }
 
-// createListenAddrTempFunc is the seam tests swap to inject a
-// listenAddrTempFile whose methods fail. Production never reassigns it.
+// createListenAddrTempFunc is the test seam for atomic temp-file creation.
 var createListenAddrTempFunc = func(dir, pattern string) (listenAddrTempFile, error) {
 	return os.CreateTemp(dir, pattern)
 }
 
-// WriteListenAddr atomically writes addr to <dir>/listen.addr via a
-// same-directory temp file + rename, so concurrent readers never observe
-// a partially-written address.
+// WriteListenAddr atomically writes addr to <dir>/listen.addr via temp+rename.
 func WriteListenAddr(dir, addr string) error {
 	path := filepath.Join(dir, ListenAddrFilename)
 	tmp, err := createListenAddrTempFunc(dir, ".listen.addr.")
@@ -61,7 +54,7 @@ func WriteListenAddr(dir, addr string) error {
 	return nil
 }
 
-// RemoveListenAddr removes <dir>/listen.addr. A missing file is not an error.
+// RemoveListenAddr removes <dir>/listen.addr; missing file is not an error.
 func RemoveListenAddr(dir string) error {
 	err := os.Remove(filepath.Join(dir, ListenAddrFilename))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -70,8 +63,7 @@ func RemoveListenAddr(dir string) error {
 	return nil
 }
 
-// ReadListenAddr returns the trimmed contents of <dir>/listen.addr, or
-// ErrNoRunningDaemon when the file is absent.
+// ReadListenAddr returns the trimmed contents of <dir>/listen.addr.
 func ReadListenAddr(dir string) (string, error) {
 	data, err := os.ReadFile(filepath.Join(dir, ListenAddrFilename))
 	if errors.Is(err, os.ErrNotExist) {

@@ -17,7 +17,7 @@ import (
 // Test-only seam; production never reassigns.
 var indexSnapshotUploadFunc = backup.SendPutIndexSnapshot
 
-// indexBackupLoopOptions are the closures runIndexBackupLoop reads each tick.
+// indexBackupLoopOptions configures runIndexBackupLoop.
 type indexBackupLoopOptions struct {
 	interval     time.Duration
 	connsFn      func() []*bsquic.Conn
@@ -25,9 +25,8 @@ type indexBackupLoopOptions struct {
 	recipientPub *[crypto.RecipientKeySize]byte
 }
 
-// runIndexBackupLoop ticks every opts.interval, encrypting the local
-// index and broadcasting it to every live storage conn. Returns
-// immediately when index or recipient is unset.
+// runIndexBackupLoop encrypts the local index and broadcasts it to every
+// live storage conn on entry and once per opts.interval.
 func runIndexBackupLoop(ctx context.Context, opts indexBackupLoopOptions) {
 	if opts.indexFn == nil || opts.indexFn() == nil {
 		return
@@ -51,9 +50,7 @@ func runIndexBackupLoop(ctx context.Context, opts indexBackupLoopOptions) {
 	}
 }
 
-// broadcastIndexSnapshot encodes+encrypts the index and ships the blob
-// to every conn concurrently. Encoding errors abort the tick; per-peer
-// upload failures log and skip.
+// broadcastIndexSnapshot encrypts the index and ships it to every conn.
 func broadcastIndexSnapshot(ctx context.Context, conns []*bsquic.Conn, idx *index.Index, recipientPub *[crypto.RecipientKeySize]byte) {
 	if len(conns) == 0 {
 		return
@@ -81,8 +78,7 @@ func broadcastIndexSnapshot(ctx context.Context, conns []*bsquic.Conn, idx *inde
 	wg.Wait()
 }
 
-// buildIndexSnapshotBlob lists the index, marshals + encrypts it, and
-// returns the canonical wire blob.
+// buildIndexSnapshotBlob lists the index, marshals it, and encrypts the result.
 func buildIndexSnapshotBlob(idx *index.Index, recipientPub *[crypto.RecipientKeySize]byte) ([]byte, error) {
 	entries, err := idx.List()
 	if err != nil {

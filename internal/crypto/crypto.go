@@ -1,8 +1,6 @@
 // Package crypto implements chunk-level hybrid encryption: each chunk is
-// sealed with a fresh XChaCha20-Poly1305 symmetric key, which is then
-// wrapped for a recipient X25519 public key using NaCl anonymous box.
-// Storage peers see only opaque ciphertext and opaque wrapped key.
-// Recipient X25519 keys are distinct from the node's Ed25519 identity.
+// sealed with a fresh XChaCha20-Poly1305 key, which is then wrapped for the
+// recipient X25519 pubkey via NaCl anonymous box.
 package crypto
 
 import (
@@ -15,9 +13,7 @@ import (
 	"golang.org/x/crypto/nacl/box"
 )
 
-// randReader is the source of randomness used by every primitive in this
-// package. It is a package-level seam so tests can substitute a failing
-// reader to exercise rng-error branches; production code never reassigns it.
+// randReader is the package-level random source; tests swap it via white-box.
 var randReader io.Reader = rand.Reader
 
 // Sizes for the primitives this package uses.
@@ -28,28 +24,22 @@ const (
 )
 
 // ErrUnwrapFailed is returned by Decrypt when the wrapped per-chunk key
-// cannot be opened with the provided recipient key pair (wrong key, or the
-// wrapped key has been tampered with).
+// cannot be opened with the provided recipient key pair.
 var ErrUnwrapFailed = errors.New("chunk key unwrap failed")
 
 // ErrDecryptFailed is returned by Decrypt when the AEAD rejects the
-// ciphertext or nonce — i.e. authentication failed because the chunk
-// payload or nonce was tampered with after sealing.
+// ciphertext or nonce.
 var ErrDecryptFailed = errors.New("chunk decryption failed")
 
-// EncryptedChunk is the opaque on-the-wire representation of an encrypted
-// chunk. All three fields are required to decrypt; none of them, on their
-// own or together, leak plaintext to a holder without the recipient's
-// private key.
+// EncryptedChunk is the opaque wire representation. All three fields are
+// required to decrypt.
 type EncryptedChunk struct {
 	Ciphertext []byte // XChaCha20-Poly1305 sealed plaintext (includes 16-byte tag)
 	Nonce      []byte // 24-byte XChaCha20 nonce, unique per encryption
 	WrappedKey []byte // NaCl anonymous-box-sealed symmetric key
 }
 
-// GenerateRecipientKey returns a fresh X25519 key pair suitable for
-// receiving wrapped chunk keys. The public key is shareable; the private
-// key must stay on the owning node.
+// GenerateRecipientKey returns a fresh X25519 key pair for chunk-key wrapping.
 func GenerateRecipientKey() (publicKey, privateKey *[RecipientKeySize]byte, err error) {
 	pub, priv, err := box.GenerateKey(randReader)
 	if err != nil {
@@ -58,10 +48,8 @@ func GenerateRecipientKey() (publicKey, privateKey *[RecipientKeySize]byte, err 
 	return pub, priv, nil
 }
 
-// Encrypt seals plaintext for the given recipient public key. A fresh
-// XChaCha20-Poly1305 key and 24-byte nonce are generated per call, so two
-// encryptions of the same plaintext to the same recipient produce different
-// ciphertexts and wrapped keys.
+// Encrypt seals plaintext for the recipient pubkey with a fresh
+// XChaCha20-Poly1305 key and 24-byte nonce per call.
 func Encrypt(plaintext []byte, recipientPub *[RecipientKeySize]byte) (*EncryptedChunk, error) {
 	if recipientPub == nil {
 		return nil, errors.New("recipient public key is required")
@@ -97,9 +85,7 @@ func Encrypt(plaintext []byte, recipientPub *[RecipientKeySize]byte) (*Encrypted
 }
 
 // Decrypt unwraps the per-chunk symmetric key with the recipient key pair
-// and opens the AEAD ciphertext. Tampering with any of Ciphertext, Nonce,
-// or WrappedKey causes Decrypt to fail with ErrDecryptFailed or
-// ErrUnwrapFailed respectively.
+// and opens the AEAD ciphertext.
 func Decrypt(ec *EncryptedChunk, recipientPub, recipientPriv *[RecipientKeySize]byte) ([]byte, error) {
 	if ec == nil {
 		return nil, errors.New("encrypted chunk is nil")

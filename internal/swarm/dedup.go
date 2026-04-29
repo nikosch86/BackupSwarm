@@ -6,12 +6,10 @@ import (
 	"backupswarm/internal/protocol"
 )
 
-// DefaultDedupCapacity is the cache size used when daemon callers don't
-// override it.
+// DefaultDedupCapacity is the default DedupCache size.
 const DefaultDedupCapacity = 1024
 
-// DedupCache is a fixed-size FIFO of seen announcement IDs. Capacity 0
-// disables caching; every Seen call returns false. Safe for concurrent use.
+// DedupCache is a fixed-size FIFO of seen announcement IDs.
 type DedupCache struct {
 	mu     sync.Mutex
 	cap    int
@@ -21,8 +19,7 @@ type DedupCache struct {
 	set    map[[protocol.AnnouncementIDSize]byte]struct{}
 }
 
-// NewDedupCache returns a cache that holds up to cap entries. cap must be
-// non-negative; cap == 0 produces a no-op cache.
+// NewDedupCache returns a cache holding up to cap entries; cap=0 is a no-op cache.
 func NewDedupCache(cap int) *DedupCache {
 	if cap < 0 {
 		cap = 0
@@ -34,8 +31,7 @@ func NewDedupCache(cap int) *DedupCache {
 	}
 }
 
-// Seen reports whether id was already in the cache, recording it on the
-// first call. Returns false (and records) when capacity is zero.
+// Seen reports whether id was already in the cache, recording it on the first call.
 func (c *DedupCache) Seen(id [protocol.AnnouncementIDSize]byte) bool {
 	if c.cap == 0 {
 		return false

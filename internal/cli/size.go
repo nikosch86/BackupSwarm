@@ -7,9 +7,8 @@ import (
 	"strings"
 )
 
-// parseSize parses an integer with an optional binary suffix
-// (k/m/g/t, case-insensitive, optional "b"/"iB" tail). Empty input
-// returns 0; decimals and negative values are rejected.
+// parseSize parses an integer with an optional binary suffix (k/m/g/t).
+// Empty input returns 0; decimals and negatives are rejected.
 func parseSize(s string) (int64, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -37,8 +36,6 @@ func parseSize(s string) (int64, error) {
 		return 0, fmt.Errorf("size %q: must be non-negative", s)
 	}
 
-	// Strip optional "b"/"ib" tail so "1KB", "1KiB", "1Kib" all reduce
-	// to the unit letter alone.
 	suffix = strings.TrimSuffix(suffix, "b")
 	suffix = strings.TrimSuffix(suffix, "i")
 

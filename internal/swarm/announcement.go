@@ -1,6 +1,4 @@
-// Package swarm carries membership-event logic: applying inbound
-// PeerAnnouncements to the local peer store, broadcasting them to live
-// connections, and reading them off inbound streams.
+// Package swarm applies and broadcasts membership PeerAnnouncements.
 package swarm
 
 import (
@@ -18,11 +16,10 @@ import (
 	bsquic "backupswarm/internal/quic"
 )
 
-// MaxAnnouncementAddrLen caps the advertised address length on inbound
-// announcements (1 KiB — same cap bootstrap uses for join hellos).
+// MaxAnnouncementAddrLen caps the advertised address length at 1 KiB.
 const MaxAnnouncementAddrLen = 1 << 10
 
-// Test-only seams; production never reassigns these.
+// Test seams.
 var (
 	storeAddFunc           = func(s *peers.Store, p peers.Peer) error { return s.Add(p) }
 	writeMsgTypeFunc       = protocol.WriteMessageType
@@ -30,9 +27,8 @@ var (
 	randReadFunc           = rand.Read
 )
 
-// Apply commits ann to store. PeerJoined never overwrites an existing
-// record, PeerLeft is idempotent on unknown peers, and AddressChanged
-// updates only Addr (Role is preserved).
+// Apply commits ann to store. PeerJoined no-ops on existing peers,
+// PeerLeft is idempotent, AddressChanged updates Addr only.
 func Apply(ann protocol.PeerAnnouncement, store *peers.Store) error {
 	pub := ed25519.PublicKey(ann.PubKey[:])
 	switch ann.Kind {
@@ -74,9 +70,7 @@ func Apply(ann protocol.PeerAnnouncement, store *peers.Store) error {
 	}
 }
 
-// ServeAnnouncementStream reads one PeerAnnouncement frame from r and
-// applies it to store. The MsgPeerAnnouncement type byte is expected to
-// already be consumed by the caller's dispatcher.
+// ServeAnnouncementStream reads one PeerAnnouncement frame from r and applies it.
 func ServeAnnouncementStream(ctx context.Context, r io.Reader, store *peers.Store) error {
 	ann, err := protocol.ReadPeerAnnouncement(r, MaxAnnouncementAddrLen)
 	if err != nil {
@@ -97,9 +91,7 @@ func ServeAnnouncementStream(ctx context.Context, r io.Reader, store *peers.Stor
 	return nil
 }
 
-// BroadcastPeerJoined opens one MsgPeerAnnouncement stream per connection
-// and writes a PeerJoined frame for joiner with a fresh random ID.
-// Per-conn failures are logged and skipped.
+// BroadcastPeerJoined opens one stream per conn and writes a PeerJoined frame.
 func BroadcastPeerJoined(ctx context.Context, conns []*bsquic.Conn, joiner peers.Peer) error {
 	if len(joiner.PubKey) != ed25519.PublicKeySize {
 		return fmt.Errorf("broadcast PeerJoined: pubkey size %d, want %d", len(joiner.PubKey), ed25519.PublicKeySize)
@@ -121,8 +113,7 @@ func BroadcastPeerJoined(ctx context.Context, conns []*bsquic.Conn, joiner peers
 	return nil
 }
 
-// sendAnnouncement opens a stream on conn, writes MsgPeerAnnouncement +
-// the frame, and closes the stream. Errors are logged and swallowed.
+// sendAnnouncement opens a stream and writes one announcement frame.
 func sendAnnouncement(ctx context.Context, conn *bsquic.Conn, ann protocol.PeerAnnouncement) {
 	stream, err := conn.OpenStream(ctx)
 	if err != nil {

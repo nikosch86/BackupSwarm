@@ -1,7 +1,5 @@
-// Package placement chooses storage peers for a chunk by weighted-random
-// draw without replacement. Weight is interpreted as available capacity in
-// bytes; a peer with weight 0 is never selected. The pool is whatever the
-// caller deems eligible — reachability and role gating happen upstream.
+// Package placement picks storage peers via weighted-random draw without
+// replacement; weight is available capacity in bytes.
 package placement
 
 import (
@@ -11,13 +9,10 @@ import (
 	"math/rand/v2"
 )
 
-// ErrInsufficientPeers is returned when the caller asks for more unique
-// picks than the pool can supply.
+// ErrInsufficientPeers is returned when r exceeds the pool size.
 var ErrInsufficientPeers = errors.New("placement: redundancy exceeds pool size")
 
-// ErrNoCapacity is returned when no positive-weight candidate remains
-// during the draw — either the pool starts at zero total weight, or the
-// nonzero-weight candidates were all picked before reaching r.
+// ErrNoCapacity is returned when no positive-weight candidate remains.
 var ErrNoCapacity = errors.New("placement: no remaining capacity")
 
 // Rng is the subset of math/rand/v2.Rand the placement draw consumes.
@@ -25,9 +20,7 @@ type Rng interface {
 	Int64N(n int64) int64
 }
 
-// WeightedRandom returns r unique items from pool, drawn without
-// replacement and weighted by weight(item). r == 0 returns an empty
-// slice; r < 0 is rejected. The input pool is not mutated.
+// WeightedRandom returns r unique items drawn without replacement, weighted by weight(item).
 func WeightedRandom[T any](pool []T, weight func(T) int64, r int, rng Rng) ([]T, error) {
 	if r < 0 {
 		return nil, fmt.Errorf("placement: redundancy must be >= 0, got %d", r)
@@ -76,7 +69,6 @@ func WeightedRandom[T any](pool []T, weight func(T) int64, r int, rng Rng) ([]T,
 			}
 		}
 		out = append(out, remaining[idx])
-		// Swap-remove the picked index from both slices.
 		last := len(remaining) - 1
 		remaining[idx] = remaining[last]
 		weights[idx] = weights[last]
@@ -86,5 +78,4 @@ func WeightedRandom[T any](pool []T, weight func(T) int64, r int, rng Rng) ([]T,
 	return out, nil
 }
 
-// Verify rand.Rand satisfies the local Rng interface at compile time.
 var _ Rng = (*rand.Rand)(nil)

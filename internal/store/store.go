@@ -1,8 +1,5 @@
-// Package store is the on-disk chunk store: opaque byte blobs keyed by
-// sha256(content), laid out as <root>/<hh>/<full-hex-hash> for 256-way
-// sharding. An optional <root>/owners.db (bbolt) records the Ed25519
-// pubkey of the uploading peer for each blob written via PutOwned so
-// DeleteForOwner can enforce owner-authorized deletion.
+// Package store is the on-disk chunk store: opaque blobs keyed by
+// sha256(content), laid out as <root>/<hh>/<full-hex-hash>.
 package store
 
 import (
@@ -53,78 +50,62 @@ var (
 	}
 )
 
-// ErrChunkNotFound is returned by Get, Delete, and DeleteForOwner when
-// no blob exists for the given hash.
+// ErrChunkNotFound is returned when no blob exists for the given hash.
 var ErrChunkNotFound = errors.New("chunk not found")
 
-// ErrNoOwnerRecorded is returned by Owner when a blob exists on disk but
-// was stored via Put (not PutOwned) and has no uploader pubkey.
+// ErrNoOwnerRecorded is returned when a blob has no recorded uploader pubkey.
 var ErrNoOwnerRecorded = errors.New("no owner recorded for blob")
 
-// ErrOwnerMismatch is returned when a PutOwned or DeleteForOwner request
-// does not match the stored owner (maps to an authz failure).
+// ErrOwnerMismatch is returned when a request does not match the stored owner.
 var ErrOwnerMismatch = errors.New("owner mismatch")
 
-// ErrVolumeFull is returned by Put and PutOwned when the new blob would
-// push the store past its configured MaxBytes capacity.
+// ErrVolumeFull is returned when a write would exceed MaxBytes capacity.
 var ErrVolumeFull = errors.New("storage volume full")
 
-// ErrNoExpiryRecorded is returned by ExpiresAt when no expiry row exists
-// for the hash (e.g. the blob was stored with TTL disabled).
+// ErrNoExpiryRecorded is returned when no expiry row exists for the hash.
 var ErrNoExpiryRecorded = errors.New("no expiry recorded for blob")
 
-// Store is a content-addressed chunk store rooted at a local directory.
-// Safe for concurrent use: Put is atomic via temp-file + rename and
-// idempotent for repeated writes of identical content.
+// Store is a content-addressed chunk store. Put is atomic via temp+rename
+// and idempotent for repeated writes of identical content.
 type Store struct {
 	root     string
 	maxBytes int64
 	chunkTTL time.Duration
 	now      func() time.Time
 
-	// owners is lazily opened on first owner-tracking call; plain Put
-	// never touches it. ownersMu makes lazy-open race-safe.
+	// owners is lazily opened on first owner-tracking call.
 	ownersMu sync.Mutex
 	owners   *bbolt.DB
 
-	// usedMu guards used; the reserve/release pair is the single point
-	// of truth for the running tally.
+	// usedMu guards the running used-bytes tally.
 	usedMu sync.Mutex
 	used   int64
 
-	// hashLocks serializes the reserve+claim+write+commit window per
-	// content hash so concurrent identical Puts cannot double-reserve.
-	// Entries leak for the process lifetime; rebuilt fresh on startup.
+	// hashLocks serializes the reserve+claim+write+commit window per hash.
 	hashLocks sync.Map
 }
 
 // Options configures NewWithOptions. Zero values use sensible defaults.
 type Options struct {
-	// MaxBytes caps the total bytes stored; 0 means unlimited.
+	// MaxBytes caps total stored bytes; 0 = unlimited.
 	MaxBytes int64
-	// ChunkTTL is the lifetime applied to each PutOwned blob; the expiry
-	// row records (now + ChunkTTL) and ExpireSweep removes blobs past
-	// that deadline. 0 disables TTL: no expiry rows are written and
-	// ExpireSweep is a no-op.
+	// ChunkTTL is the lifetime applied to each PutOwned blob; 0 disables TTL.
 	ChunkTTL time.Duration
-	// Now is the clock used for expiry stamping. nil defaults to time.Now.
+	// Now is the clock used for expiry stamping; nil defaults to time.Now.
 	Now func() time.Time
 }
 
-// New opens (or initializes) a store rooted at dir with no capacity
-// limit and no chunk TTL.
+// New opens (or initializes) a store rooted at dir with default options.
 func New(dir string) (*Store, error) {
 	return NewWithOptions(dir, Options{})
 }
 
-// NewWithMax opens a store rooted at dir with the given capacity cap
-// and no chunk TTL.
+// NewWithMax opens a store rooted at dir with the given capacity cap.
 func NewWithMax(dir string, maxBytes int64) (*Store, error) {
 	return NewWithOptions(dir, Options{MaxBytes: maxBytes})
 }
 
 // NewWithOptions opens (or initializes) a store rooted at dir using opts.
-// Existing on-disk chunks are summed once to seed the used tally.
 func NewWithOptions(dir string, opts Options) (*Store, error) {
 	if opts.MaxBytes < 0 {
 		return nil, fmt.Errorf("max bytes must be non-negative, got %d", opts.MaxBytes)
@@ -135,7 +116,6 @@ func NewWithOptions(dir string, opts Options) (*Store, error) {
 	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return nil, fmt.Errorf("create store dir %q: %w", dir, err)
 	}
-	// Tighten perms in case dir pre-existed with a looser mode.
 	if err := os.Chmod(dir, dirPerm); err != nil {
 		return nil, fmt.Errorf("chmod store dir %q: %w", dir, err)
 	}
@@ -156,7 +136,7 @@ func NewWithOptions(dir string, opts Options) (*Store, error) {
 	}, nil
 }
 
-// Close releases the lazily-opened owners bbolt handle. Idempotent.
+// Close releases the owners bbolt handle. Idempotent.
 func (s *Store) Close() error {
 	s.ownersMu.Lock()
 	defer s.ownersMu.Unlock()
@@ -169,7 +149,6 @@ func (s *Store) Close() error {
 }
 
 // Put writes data and returns its SHA-256. Idempotent; no owner recorded.
-// Callers needing owner-authorized delete must use PutOwned instead.
 func (s *Store) Put(data []byte) ([sha256.Size]byte, error) {
 	hash := sha256.Sum256(data)
 	finish, err := s.reserveForBlob(hash, int64(len(data)))
@@ -185,9 +164,8 @@ func (s *Store) Put(data []byte) ([sha256.Size]byte, error) {
 	return hash, nil
 }
 
-// PutOwned is Put plus an owner record. Same-owner + same-content is a
-// no-op; different owner returns ErrOwnerMismatch. An on-disk blob with
-// no recorded owner is treated as quarantined and also returns ErrOwnerMismatch.
+// PutOwned writes data and records owner. Same-owner repeat is a no-op;
+// different owner or unowned existing blob returns ErrOwnerMismatch.
 func (s *Store) PutOwned(data, owner []byte) ([sha256.Size]byte, error) {
 	hash := sha256.Sum256(data)
 	finish, err := s.reserveForBlob(hash, int64(len(data)))
@@ -206,10 +184,8 @@ func (s *Store) PutOwned(data, owner []byte) ([sha256.Size]byte, error) {
 	return hash, nil
 }
 
-// reserveForBlob takes the per-hash lock, reserves n bytes when the blob
-// is not yet on disk, and returns a finish closure that always unlocks
-// and rolls back the reservation when the caller did not commit.
-// An already-present blob gets the lock + a no-op rollback.
+// reserveForBlob locks the hash, reserves n bytes when the blob is absent,
+// and returns a finish closure that unlocks and rolls back when uncommitted.
 func (s *Store) reserveForBlob(hash [sha256.Size]byte, n int64) (finish func(committed bool), err error) {
 	mu := s.lockForHash(hash)
 	mu.Lock()
@@ -233,7 +209,7 @@ func (s *Store) reserveForBlob(hash [sha256.Size]byte, n int64) (finish func(com
 	}, nil
 }
 
-// lockForHash returns a per-hash mutex, lazily creating one on first use.
+// lockForHash returns a per-hash mutex.
 func (s *Store) lockForHash(hash [sha256.Size]byte) *sync.Mutex {
 	if v, ok := s.hashLocks.Load(hash); ok {
 		return v.(*sync.Mutex)
@@ -242,8 +218,7 @@ func (s *Store) lockForHash(hash [sha256.Size]byte) *sync.Mutex {
 	return actual.(*sync.Mutex)
 }
 
-// writeBlob writes data to its content-addressed path. A populated
-// path is a no-op. Capacity reservation is the caller's responsibility.
+// writeBlob writes data to its content-addressed path; populated path is a no-op.
 func (s *Store) writeBlob(data []byte, hash [sha256.Size]byte) ([sha256.Size]byte, error) {
 	path := s.pathFor(hash)
 
@@ -258,8 +233,6 @@ func (s *Store) writeBlob(data []byte, hash [sha256.Size]byte) ([sha256.Size]byt
 		return hash, fmt.Errorf("create shard dir %q: %w", shardDir, err)
 	}
 
-	// os.CreateTemp opens the file with mode 0600, which matches filePerm —
-	// no explicit Chmod needed.
 	tmp, err := createTempFunc(shardDir, ".put-*")
 	if err != nil {
 		return hash, fmt.Errorf("create temp file: %w", err)
@@ -304,8 +277,7 @@ func (s *Store) Get(hash [sha256.Size]byte) ([]byte, error) {
 	return data, nil
 }
 
-// Has reports whether a blob with the given hash is present. Returns an
-// error only for unexpected IO failures (permission, EIO, etc.).
+// Has reports whether a blob with the given hash is present.
 func (s *Store) Has(hash [sha256.Size]byte) (bool, error) {
 	path := s.pathFor(hash)
 	_, err := os.Stat(path)
@@ -318,8 +290,7 @@ func (s *Store) Has(hash [sha256.Size]byte) (bool, error) {
 	return false, fmt.Errorf("stat %q: %w", path, err)
 }
 
-// Delete removes the blob for hash. Does NOT enforce owner authorization —
-// callers needing that must use DeleteForOwner.
+// Delete removes the blob for hash without owner authorization.
 func (s *Store) Delete(hash [sha256.Size]byte) error {
 	path := s.pathFor(hash)
 	info, err := os.Stat(path)
@@ -339,9 +310,7 @@ func (s *Store) Delete(hash [sha256.Size]byte) error {
 	return nil
 }
 
-// Owner returns the Ed25519 pubkey recorded for hash. Returns
-// ErrNoOwnerRecorded if the blob was stored via Put (not PutOwned) or no
-// such hash is known.
+// Owner returns the Ed25519 pubkey recorded for hash, or ErrNoOwnerRecorded.
 func (s *Store) Owner(hash [sha256.Size]byte) ([]byte, error) {
 	db, err := s.ensureOwnersDB()
 	if err != nil {
@@ -363,9 +332,8 @@ func (s *Store) Owner(hash [sha256.Size]byte) ([]byte, error) {
 	return out, nil
 }
 
-// GetForOwner returns the blob bytes only if the recorded owner matches.
-// Returns ErrChunkNotFound (no blob) or ErrOwnerMismatch (owner check
-// failed, including unowned blobs). On error, no bytes are returned.
+// GetForOwner returns the blob bytes only when the recorded owner matches.
+// Returns ErrChunkNotFound or ErrOwnerMismatch on failure.
 func (s *Store) GetForOwner(hash [sha256.Size]byte, owner []byte) ([]byte, error) {
 	ok, err := s.Has(hash)
 	if err != nil {
@@ -391,9 +359,8 @@ func (s *Store) GetForOwner(hash [sha256.Size]byte, owner []byte) ([]byte, error
 	return s.Get(hash)
 }
 
-// DeleteForOwner removes the blob only if the recorded owner matches.
-// Returns ErrChunkNotFound (no blob) or ErrOwnerMismatch (owner check
-// failed, including unowned blobs). On error, disk state is untouched.
+// DeleteForOwner removes the blob only when the recorded owner matches.
+// Returns ErrChunkNotFound or ErrOwnerMismatch on failure.
 func (s *Store) DeleteForOwner(hash [sha256.Size]byte, owner []byte) error {
 	ok, err := s.Has(hash)
 	if err != nil {
@@ -406,7 +373,6 @@ func (s *Store) DeleteForOwner(hash [sha256.Size]byte, owner []byte) error {
 	if err != nil {
 		return err
 	}
-	// Authorize first (read-only), then commit both removals.
 	if err := db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(ownersBucket))
 		v := b.Get(hash[:])
@@ -428,9 +394,8 @@ func (s *Store) DeleteForOwner(hash [sha256.Size]byte, owner []byte) error {
 	})
 }
 
-// RenewForOwner refreshes the expiry deadline to (now + ChunkTTL) when
-// the recorded owner matches. Returns ErrChunkNotFound or ErrOwnerMismatch
-// on failure. With ChunkTTL == 0 it succeeds after the authorization check.
+// RenewForOwner refreshes the expiry to now+ChunkTTL when owner matches.
+// Returns ErrChunkNotFound or ErrOwnerMismatch on failure.
 func (s *Store) RenewForOwner(hash [sha256.Size]byte, owner []byte) error {
 	mu := s.lockForHash(hash)
 	mu.Lock()
@@ -456,9 +421,7 @@ func (s *Store) RenewForOwner(hash [sha256.Size]byte, owner []byte) error {
 	})
 }
 
-// ExpiresAt returns the recorded expiry deadline for hash. Returns
-// ErrNoExpiryRecorded when no expiry row exists (TTL disabled or never
-// stamped).
+// ExpiresAt returns the recorded expiry deadline for hash, or ErrNoExpiryRecorded.
 func (s *Store) ExpiresAt(hash [sha256.Size]byte) (time.Time, error) {
 	db, err := s.ensureOwnersDB()
 	if err != nil {
@@ -482,16 +445,13 @@ func (s *Store) ExpiresAt(hash [sha256.Size]byte) (time.Time, error) {
 	return time.Unix(0, nanos), nil
 }
 
-// ExpireResult is the per-pass count of expiry rows scanned and blobs
-// removed.
+// ExpireResult is the per-pass count of expiry rows scanned and blobs removed.
 type ExpireResult struct {
 	Scanned int
 	Expired int
 }
 
-// ExpireSweep walks the expiries bucket and removes blobs whose recorded
-// deadline has passed. Removal runs under the per-hash mutex. With
-// ChunkTTL == 0 the sweep returns immediately.
+// ExpireSweep removes blobs whose recorded deadline has passed.
 func (s *Store) ExpireSweep(ctx context.Context) (ExpireResult, error) {
 	var res ExpireResult
 	if err := ctx.Err(); err != nil {
@@ -544,8 +504,7 @@ func (s *Store) ExpireSweep(ctx context.Context) (ExpireResult, error) {
 	return res, nil
 }
 
-// expireOne removes the blob and its owner+expiry rows under the per-hash
-// mutex when the recorded deadline still matches observedDeadline.
+// expireOne removes the blob and rows when the deadline still matches.
 // Returns true when a removal happened.
 func (s *Store) expireOne(hash [sha256.Size]byte, observedDeadline int64) (bool, error) {
 	mu := s.lockForHash(hash)
@@ -586,7 +545,7 @@ func (s *Store) expireOne(hash [sha256.Size]byte, observedDeadline int64) (bool,
 		}
 		s.release(info.Size())
 	case errors.Is(err, os.ErrNotExist):
-		// Blob already gone (manual delete, scrub); proceed with row cleanup.
+		// Blob already gone; proceed with row cleanup.
 	default:
 		return false, fmt.Errorf("stat expired %q: %w", path, err)
 	}
@@ -601,9 +560,8 @@ func (s *Store) expireOne(hash [sha256.Size]byte, observedDeadline int64) (bool,
 	return true, nil
 }
 
-// claimOwner asserts owner for hash, rejects a differing record, and refuses
-// to claim an unowned blob already on disk. With ChunkTTL > 0 the expiry
-// row is (re)written in the same tx as the owner row.
+// claimOwner records owner for hash and refreshes the expiry row.
+// Rejects a differing record or an unowned blob already on disk.
 func (s *Store) claimOwner(hash [sha256.Size]byte, owner []byte) error {
 	db, err := s.ensureOwnersDB()
 	if err != nil {
@@ -631,8 +589,7 @@ func (s *Store) claimOwner(hash [sha256.Size]byte, owner []byte) error {
 	})
 }
 
-// writeExpiryTx writes (now + ChunkTTL) into the expiries bucket; no-op
-// when ChunkTTL == 0.
+// writeExpiryTx writes now+ChunkTTL into the expiries bucket; no-op when ChunkTTL == 0.
 func (s *Store) writeExpiryTx(tx *bbolt.Tx, hash [sha256.Size]byte) error {
 	if s.chunkTTL == 0 {
 		return nil
@@ -655,8 +612,7 @@ func (s *Store) blobOnDisk(hash [sha256.Size]byte) (bool, error) {
 	return false, fmt.Errorf("stat %q: %w", s.pathFor(hash), err)
 }
 
-// ensureOwnersDB lazily opens the owners bbolt db. Safe for concurrent
-// use — guarded by ownersMu and idempotent on repeat calls.
+// ensureOwnersDB lazily opens the owners bbolt db.
 func (s *Store) ensureOwnersDB() (*bbolt.DB, error) {
 	s.ownersMu.Lock()
 	defer s.ownersMu.Unlock()
@@ -686,7 +642,7 @@ func (s *Store) ensureOwnersDB() (*bbolt.DB, error) {
 	return db, nil
 }
 
-// pathFor returns the on-disk path for a given hash in the sharded layout.
+// pathFor returns the on-disk path for hash in the sharded layout.
 func (s *Store) pathFor(hash [sha256.Size]byte) string {
 	hexHash := hex.EncodeToString(hash[:])
 	return filepath.Join(s.root, hexHash[:2], hexHash)
@@ -699,14 +655,12 @@ func (s *Store) Used() int64 {
 	return s.used
 }
 
-// Capacity returns the configured maximum bytes for this store. Zero
-// means unlimited.
+// Capacity returns the configured maximum bytes; 0 means unlimited.
 func (s *Store) Capacity() int64 {
 	return s.maxBytes
 }
 
-// Available returns Capacity - Used, or math.MaxInt64 when the store is
-// unlimited (Capacity == 0).
+// Available returns Capacity-Used, or math.MaxInt64 when unlimited.
 func (s *Store) Available() int64 {
 	if s.maxBytes == 0 {
 		return math.MaxInt64
@@ -720,8 +674,7 @@ func (s *Store) Available() int64 {
 	return avail
 }
 
-// reserve adds n to the running used tally if doing so would not exceed
-// maxBytes; returns ErrVolumeFull otherwise. n=0 is a no-op.
+// reserve adds n to the used tally; returns ErrVolumeFull on overflow.
 func (s *Store) reserve(n int64) error {
 	if n <= 0 {
 		return nil
@@ -735,8 +688,7 @@ func (s *Store) reserve(n int64) error {
 	return nil
 }
 
-// release subtracts n from the running used tally. n=0 is a no-op;
-// the result is clamped to zero.
+// release subtracts n from the used tally; clamps to zero.
 func (s *Store) release(n int64) {
 	if n <= 0 {
 		return
@@ -749,9 +701,7 @@ func (s *Store) release(n int64) {
 	}
 }
 
-// scanUsedBytes sums the sizes of every regular file under root's
-// shard directories. Non-regular entries and a missing root read as
-// zero bytes.
+// scanUsedBytes sums regular-file sizes under root's shard directories.
 func scanUsedBytes(root string) (int64, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -765,8 +715,6 @@ func scanUsedBytes(root string) (int64, error) {
 		if !e.IsDir() {
 			continue
 		}
-		// Snapshots live under <root>/snapshots/ and are not gated by
-		// the chunk capacity counter; skip them in the seed scan.
 		if e.Name() == snapshotsDir {
 			continue
 		}

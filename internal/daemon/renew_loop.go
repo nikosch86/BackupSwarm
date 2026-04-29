@@ -12,18 +12,16 @@ import (
 	bsquic "backupswarm/internal/quic"
 )
 
-// sendRenewFunc is the package-level seam for owner-side TTL renewal.
+// sendRenewFunc is the test seam for owner-side TTL renewal.
 var sendRenewFunc = backup.SendRenewTTL
 
 // RenewResult is the per-pass count of (chunk, peer) renewals attempted.
 type RenewResult struct {
-	// Sent is the number of RenewTTL requests the peer accepted.
+	// Sent is the number of accepted RenewTTL requests.
 	Sent int
-	// Failed is the number of RenewTTL requests the peer rejected or
-	// the transport dropped.
+	// Failed is the number of rejected or dropped RenewTTL requests.
 	Failed int
-	// Skipped is the number of (chunk, peer) pairs whose peer had no
-	// live conn when the tick ran.
+	// Skipped is the number of pairs whose peer had no live conn.
 	Skipped int
 }
 
@@ -33,8 +31,7 @@ type renewLoopOptions struct {
 	renewFn  func(ctx context.Context) (RenewResult, error)
 }
 
-// runRenewLoop runs renewFn synchronously on entry, then once every
-// opts.interval until ctx is cancelled. Errors log and continue.
+// runRenewLoop runs renewFn on entry and once per opts.interval.
 func runRenewLoop(ctx context.Context, opts renewLoopOptions) {
 	tick := func() {
 		res, err := opts.renewFn(ctx)
@@ -61,9 +58,7 @@ func runRenewLoop(ctx context.Context, opts renewLoopOptions) {
 	}
 }
 
-// renewAllChunks sends RenewTTL to every (chunk, peer) pair where peer
-// has a live conn in conns. Per-peer failures log and increment Failed;
-// pairs without a live conn increment Skipped.
+// renewAllChunks sends RenewTTL to every (chunk, peer) pair with a live conn.
 func renewAllChunks(ctx context.Context, entries []index.FileEntry, conns []*bsquic.Conn) (RenewResult, error) {
 	var res RenewResult
 	if err := ctx.Err(); err != nil {
@@ -107,8 +102,7 @@ func renewAllChunks(ctx context.Context, entries []index.FileEntry, conns []*bsq
 	return res, nil
 }
 
-// renewClosure returns a renewFn that re-reads the index and resolves a
-// fresh conn slice on each tick.
+// renewClosure returns a renewFn that re-reads the index and conns each tick.
 func renewClosure(idx *index.Index, connsFn func() []*bsquic.Conn) func(context.Context) (RenewResult, error) {
 	return func(ctx context.Context) (RenewResult, error) {
 		entries, err := idx.List()

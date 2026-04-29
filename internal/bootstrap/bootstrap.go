@@ -1,6 +1,4 @@
-// Package bootstrap implements the invite/join handshake: a single QUIC
-// stream carrying a JoinRequest from the joiner, a JoinResponse from the
-// introducer, and a PeerListMessage with the introducer's known peers.
+// Package bootstrap implements the invite/join handshake.
 package bootstrap
 
 import (
@@ -23,7 +21,7 @@ import (
 	"backupswarm/pkg/token"
 )
 
-// Test-only seams for fault-injection on transport-died error wraps.
+// Test seams.
 var (
 	writeJoinResponseFunc = protocol.WriteJoinResponse
 	writeJoinRequestFunc  = protocol.WriteJoinRequest
@@ -37,8 +35,7 @@ const maxAdvertisedAddrLen = 1 << 10
 // maxPeerListEntries caps the inbound peer-list count.
 const maxPeerListEntries = 1 << 10
 
-// maxJoinCSRLen / maxJoinCertLen cap the CSR sent by the joiner and the
-// signed leaf cert returned by the introducer. An Ed25519 CSR/leaf is ~250 bytes.
+// maxJoinCSRLen and maxJoinCertLen cap the CSR/leaf cert at 4 KiB.
 const (
 	maxJoinCSRLen  = 1 << 12
 	maxJoinCertLen = 1 << 12
@@ -60,8 +57,7 @@ var ErrSwarmMismatch = errors.New("introducer reports swarm ID mismatch")
 // recognize the single-use secret in the token.
 var ErrBadSecret = errors.New("introducer rejected join secret")
 
-// ErrTokenUsed is returned by DoJoin when the secret was previously
-// consumed by an earlier successful join.
+// ErrTokenUsed is returned by DoJoin when the secret has already been consumed.
 var ErrTokenUsed = errors.New("introducer reports token already used")
 
 // ErrIntroducerInternal is returned by DoJoin for an opaque introducer-

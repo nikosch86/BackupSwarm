@@ -94,10 +94,6 @@ func newJoinCmd(dataDir *string) *cobra.Command {
 			if !thenRun {
 				return nil
 			}
-			// Hand off the open peer store to the daemon; daemon.Run
-			// closes it on exit. The daemon binds its own listener from
-			// ListenAddr — we have no pre-bound listener on the joiner
-			// side (DoJoin dialed instead of listening).
 			sessHandedOff = true
 			return daemon.Run(cmd.Context(), daemon.Options{
 				DataDir:      sess.dir,
@@ -120,10 +116,7 @@ func newJoinCmd(dataDir *string) *cobra.Command {
 	return cmd
 }
 
-// waitForTokenFile polls path until it contains a decodable token, or
-// until ctx is cancelled. Used by join's --token-file flag to absorb
-// the docker-compose-style race where the invitee starts before the
-// inviter has written the shared token.
+// waitForTokenFile polls path until it contains a decodable token.
 func waitForTokenFile(ctx context.Context, path string) (string, error) {
 	const pollInterval = 250 * time.Millisecond
 	for {
@@ -133,8 +126,6 @@ func waitForTokenFile(ctx context.Context, path string) (string, error) {
 			if _, decodeErr := token.Decode(tokStr); decodeErr == nil {
 				return tokStr, nil
 			}
-			// File exists but not yet a valid token (partial write or
-			// stale content). Treat as "keep waiting".
 		} else if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, io.EOF) {
 			return "", fmt.Errorf("read token file %q: %w", path, err)
 		}

@@ -9,15 +9,13 @@ import (
 	"time"
 )
 
-// RuntimeSnapshotFilename is the basename of the JSON file the daemon
-// writes its live state into.
+// RuntimeSnapshotFilename is the basename of the daemon's live-state JSON file.
 const RuntimeSnapshotFilename = "runtime.json"
 
-// runtimeSnapshotVersion is the leading version field of every snapshot.
+// runtimeSnapshotVersion is the schema version embedded in each snapshot.
 const runtimeSnapshotVersion = 1
 
-// ErrNoRuntimeSnapshot is returned by ReadRuntimeSnapshot when the file
-// is absent.
+// ErrNoRuntimeSnapshot is returned when runtime.json is absent.
 var ErrNoRuntimeSnapshot = errors.New("no runtime snapshot (runtime.json missing in data dir)")
 
 // RuntimeStoreSnapshot is the daemon's local chunk-store totals.
@@ -28,8 +26,6 @@ type RuntimeStoreSnapshot struct {
 }
 
 // RuntimePeerSnapshot is one peer's slice of the daemon's live view.
-// HasCapacity is false when the last probe failed or never ran;
-// RemoteUsed/RemoteMax are then unset.
 type RuntimePeerSnapshot struct {
 	PubKeyHex    string    `json:"pubkey"`
 	Role         string    `json:"role,omitempty"`
@@ -41,9 +37,7 @@ type RuntimePeerSnapshot struct {
 	LastProbedAt time.Time `json:"last_probed_at,omitempty"`
 }
 
-// RuntimeSnapshot is the daemon's published view of its own live state.
-// Atomic-written to <data-dir>/runtime.json on every tick; removed on
-// shutdown.
+// RuntimeSnapshot is the daemon's published view of its live state.
 type RuntimeSnapshot struct {
 	Version    int                      `json:"version"`
 	Mode       string                   `json:"mode"`
@@ -55,7 +49,6 @@ type RuntimeSnapshot struct {
 }
 
 // WriteRuntimeSnapshot atomically writes s to <dir>/runtime.json.
-// The version field is set to the current schema version.
 func WriteRuntimeSnapshot(dir string, s RuntimeSnapshot) error {
 	s.Version = runtimeSnapshotVersion
 	raw, err := json.MarshalIndent(s, "", "  ")
@@ -66,8 +59,7 @@ func WriteRuntimeSnapshot(dir string, s RuntimeSnapshot) error {
 	return writeAtomicFile(path, string(raw))
 }
 
-// RemoveRuntimeSnapshot removes <dir>/runtime.json. A missing file is
-// not an error.
+// RemoveRuntimeSnapshot removes <dir>/runtime.json; missing file is not an error.
 func RemoveRuntimeSnapshot(dir string) error {
 	err := os.Remove(filepath.Join(dir, RuntimeSnapshotFilename))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -76,8 +68,7 @@ func RemoveRuntimeSnapshot(dir string) error {
 	return nil
 }
 
-// ReadRuntimeSnapshot returns the parsed snapshot from <dir>/runtime.json,
-// or ErrNoRuntimeSnapshot when the file is absent.
+// ReadRuntimeSnapshot parses <dir>/runtime.json or returns ErrNoRuntimeSnapshot.
 func ReadRuntimeSnapshot(dir string) (RuntimeSnapshot, error) {
 	path := filepath.Join(dir, RuntimeSnapshotFilename)
 	raw, err := os.ReadFile(path)
