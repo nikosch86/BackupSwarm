@@ -14,30 +14,22 @@ import (
 	"go.etcd.io/bbolt"
 )
 
-// chunkHexLen is the on-disk filename length for content-addressed blobs:
-// each sha256 byte is two hex chars.
+// chunkHexLen is the filename length for content-addressed blobs.
 const chunkHexLen = 2 * sha256.Size
 
-// shardHexLen is the on-disk shard directory name length: the first byte
-// of the hash, two hex chars.
+// shardHexLen is the shard directory name length.
 const shardHexLen = 2
 
-// ScrubResult summarizes one scrub pass: how many content-addressed
-// blobs were re-hashed and how many failed the integrity check (and
-// were removed).
+// ScrubResult is the per-pass count of blobs re-hashed and corrupt
+// blobs removed.
 type ScrubResult struct {
 	Scanned int
 	Corrupt int
 }
 
 // Scrub re-hashes every content-addressed blob in the shard tree and
-// removes any whose on-disk content no longer matches its name. The
-// per-hash mutex from PutOwned serializes a scrub-time delete with
-// concurrent same-hash writes so Used() never double-counts.
-//
-// Skips snapshots/, owners.db, and any non-shard entries at the root.
-// Per-blob failures (read/remove error) log and continue. Returns
-// ctx.Err() when cancelled between blobs.
+// removes any whose content no longer matches its name. Skips non-shard
+// entries; per-blob failures log and continue.
 func (s *Store) Scrub(ctx context.Context) (ScrubResult, error) {
 	var res ScrubResult
 	entries, err := os.ReadDir(s.root)

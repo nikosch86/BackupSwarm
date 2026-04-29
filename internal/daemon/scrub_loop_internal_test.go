@@ -75,6 +75,38 @@ func TestRunScrubLoop_ContinuesAfterScrubFnError(t *testing.T) {
 	}
 }
 
+func TestRunScrubLoop_LogsCorruptResults(t *testing.T) {
+	var calls atomic.Int32
+	scrubFn := func(_ context.Context) (store.ScrubResult, error) {
+		calls.Add(1)
+		return store.ScrubResult{Scanned: 5, Corrupt: 2}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runScrubLoop(ctx, scrubLoopOptions{
+			interval: 30 * time.Millisecond,
+			scrubFn:  scrubFn,
+		})
+		close(done)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && calls.Load() < 2 {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := calls.Load(); got < 2 {
+		t.Fatalf("scrub fired %d times with corrupt results; want >= 2", got)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runScrubLoop did not exit on ctx cancel")
+	}
+}
+
 func TestRunScrubLoop_FirstTickIsSynchronous(t *testing.T) {
 	gate := make(chan struct{})
 	scrubFn := func(_ context.Context) (store.ScrubResult, error) {
