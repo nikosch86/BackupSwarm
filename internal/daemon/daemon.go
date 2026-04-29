@@ -137,6 +137,9 @@ type Options struct {
 	BackupDir string
 	// ListenAddr is the UDP address for the inbound QUIC listener.
 	ListenAddr string
+	// AdvertiseAddr is the host:port embedded in invite tokens; empty falls
+	// back to the bound listener address.
+	AdvertiseAddr string
 	// Listener, when non-nil, replaces binding ListenAddr; Run closes it.
 	Listener *bsquic.Listener
 	// PeerStore, when non-nil, replaces opening <DataDir>/peers.db; Run closes it.
@@ -349,7 +352,11 @@ func Run(ctx context.Context, opts Options) error {
 		if swarmCA != nil {
 			caCertDER = swarmCA.CertDER
 		}
-		tokStr, issueErr := IssueInvite(opts.DataDir, listener.Addr().String(), id.PublicKey, caCertDER)
+		inviteAddr := opts.AdvertiseAddr
+		if inviteAddr == "" {
+			inviteAddr = listener.Addr().String()
+		}
+		tokStr, issueErr := IssueInvite(opts.DataDir, inviteAddr, id.PublicKey, caCertDER)
 		if issueErr != nil {
 			return fmt.Errorf("issue initial invite: %w", issueErr)
 		}

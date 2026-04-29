@@ -78,6 +78,26 @@ docker run --rm \
     run --listen 0.0.0.0:7778 --backup-dir /backup
 ```
 
+### NAT / advertised address
+
+When the introducer is behind NAT, the address embedded in invite tokens
+must be the externally-routable one, not the bound listener. Pass
+`--advertise-addr <host:port>` to `run --invite` (founder bootstrap) or
+`invite` (steady-state). When `--listen` is omitted, it defaults to
+`0.0.0.0:<port-of-advertise-addr>` — convenient for Docker setups where
+the bound address is irrelevant. `BACKUPSWARM_ADVERTISE_ADDR` is read as
+a fallback when the flag is empty.
+
+```bash
+# Founder behind NAT, port-forwarded as 203.0.113.7:7777 → container:7777
+docker run --rm \
+    -v bsw-data:/data \
+    -e BACKUPSWARM_ADVERTISE_ADDR=203.0.113.7:7777 \
+    -p 7777:7777/udp \
+    ghcr.io/nikosch86/backupswarm:latest \
+    run --invite
+```
+
 #### UDP buffer warning (optional)
 
 quic-go logs `failed to sufficiently increase receive buffer size` on

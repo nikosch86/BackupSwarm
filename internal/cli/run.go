@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"time"
 
@@ -18,10 +19,15 @@ import (
 // envInviteToken is the env var read by `run` to auto-join an unjoined node.
 const envInviteToken = "BACKUPSWARM_INVITE_TOKEN"
 
+// envAdvertiseAddr is the env var read by `run` and `invite` as a fallback
+// when --advertise-addr is omitted.
+const envAdvertiseAddr = "BACKUPSWARM_ADVERTISE_ADDR"
+
 func newRunCmd(dataDir *string) *cobra.Command {
 	var (
 		backupDir           string
 		listenAddr          string
+		advertiseAddr       string
 		chunkSize           int
 		scanInterval        time.Duration
 		heartbeatInterval   time.Duration
@@ -52,8 +58,18 @@ func newRunCmd(dataDir *string) *cobra.Command {
 			"to stdout and optionally written to --token-out. Subsequent invites against " +
 			"this running daemon use the standalone `invite` command.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if advertiseAddr == "" {
+				advertiseAddr = os.Getenv(envAdvertiseAddr)
+			}
+			if advertiseAddr != "" {
+				if _, port, err := net.SplitHostPort(advertiseAddr); err != nil {
+					return fmt.Errorf("--advertise-addr %q: %w", advertiseAddr, err)
+				} else if listenAddr == "" {
+					listenAddr = net.JoinHostPort("0.0.0.0", port)
+				}
+			}
 			if listenAddr == "" {
-				return fmt.Errorf("--listen is required")
+				return fmt.Errorf("--listen is required (or set --advertise-addr)")
 			}
 			if !invite && tokenOut != "" {
 				return fmt.Errorf("--token-out requires --invite")
@@ -97,6 +113,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				DataDir:             dir,
 				BackupDir:           backupDir,
 				ListenAddr:          listenAddr,
+				AdvertiseAddr:       advertiseAddr,
 				ChunkSize:           chunkSize,
 				ScanInterval:        scanInterval,
 				HeartbeatInterval:   heartbeatInterval,
@@ -120,7 +137,8 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&backupDir, "backup-dir", "", "Directory tree to keep synced to the swarm. Index entries are stored relative to this root. Omit for a pure storage-peer role.")
-	cmd.Flags().StringVar(&listenAddr, "listen", "", "UDP address for the inbound QUIC listener, e.g. 0.0.0.0:7777 (required)")
+	cmd.Flags().StringVar(&listenAddr, "listen", "", "UDP address for the inbound QUIC listener, e.g. 0.0.0.0:7777 (required unless --advertise-addr is set)")
+	cmd.Flags().StringVar(&advertiseAddr, "advertise-addr", "", "Externally-routable host:port to embed in invite tokens; falls back to $BACKUPSWARM_ADVERTISE_ADDR. Defaults --listen to 0.0.0.0:<port> when --listen is empty.")
 	cmd.Flags().IntVar(&chunkSize, "chunk-size", 1<<20, "Target chunk size in bytes (default 1 MiB)")
 	cmd.Flags().DurationVar(&scanInterval, "scan-interval", 60*time.Second, "Period between incremental scan passes")
 	cmd.Flags().DurationVar(&heartbeatInterval, "heartbeat-interval", 30*time.Second, "Period between liveness probes against every live conn")

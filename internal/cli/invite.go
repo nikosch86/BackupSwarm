@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -17,8 +18,9 @@ import (
 
 func newInviteCmd(dataDir *string) *cobra.Command {
 	var (
-		tokenOut string
-		wait     time.Duration
+		tokenOut      string
+		wait          time.Duration
+		advertiseAddr string
 	)
 	cmd := &cobra.Command{
 		Use:   "invite",
@@ -41,12 +43,26 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 				return fmt.Errorf("ensure identity: %w", err)
 			}
 
-			listenAddr, err := readListenAddrWithWait(cmd.Context(), dir, wait)
-			if err != nil {
-				if errors.Is(err, daemon.ErrNoRunningDaemon) {
-					return fmt.Errorf("invite: %w (start the daemon first via `run`)", err)
+			if advertiseAddr == "" {
+				advertiseAddr = os.Getenv(envAdvertiseAddr)
+			}
+			if advertiseAddr != "" {
+				if _, _, err := net.SplitHostPort(advertiseAddr); err != nil {
+					return fmt.Errorf("--advertise-addr %q: %w", advertiseAddr, err)
 				}
-				return fmt.Errorf("read listen.addr: %w", err)
+			}
+
+			var listenAddr string
+			if advertiseAddr != "" {
+				listenAddr = advertiseAddr
+			} else {
+				listenAddr, err = readListenAddrWithWait(cmd.Context(), dir, wait)
+				if err != nil {
+					if errors.Is(err, daemon.ErrNoRunningDaemon) {
+						return fmt.Errorf("invite: %w (start the daemon first via `run`)", err)
+					}
+					return fmt.Errorf("read listen.addr: %w", err)
+				}
 			}
 
 			caCertDER, err := readSwarmCACertIfPresent(dir)
@@ -69,6 +85,7 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&tokenOut, "token-out", "", "Write the printed token to this file (atomic)")
 	cmd.Flags().DurationVar(&wait, "wait", 0, "Poll for the daemon's listen.addr to appear, up to this duration (0 = fail-fast)")
+	cmd.Flags().StringVar(&advertiseAddr, "advertise-addr", "", "Externally-routable host:port to embed in the token; falls back to $BACKUPSWARM_ADVERTISE_ADDR. Skips the listen.addr read.")
 	return cmd
 }
 
