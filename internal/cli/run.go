@@ -1,13 +1,22 @@
 package cli
 
 import (
+	"context"
+	"encoding/hex"
 	"fmt"
+	"log/slog"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"backupswarm/internal/bootstrap"
+	"backupswarm/internal/ca"
 	"backupswarm/internal/daemon"
 )
+
+// envInviteToken is the env var read by `run` to auto-join an unjoined node.
+const envInviteToken = "BACKUPSWARM_INVITE_TOKEN"
 
 func newRunCmd(dataDir *string) *cobra.Command {
 	var (
@@ -79,6 +88,11 @@ func newRunCmd(dataDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if tok := os.Getenv(envInviteToken); tok != "" {
+				if err := maybeAutoJoin(cmd.Context(), dir, tok, listenAddr, dialTimeout); err != nil {
+					return err
+				}
+			}
 			return daemon.Run(cmd.Context(), daemon.Options{
 				DataDir:             dir,
 				BackupDir:           backupDir,
@@ -126,4 +140,41 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&maxStorage, "max-storage", "0", "Cap on bytes stored locally for swarm peers; accepts k/m/g/t suffixes (e.g. 10g). 0 = unlimited.")
 	cmd.Flags().IntVar(&redundancy, "redundancy", 1, "Number of unique storage peers each chunk is placed on (must be >= 1)")
 	return cmd
+}
+
+// maybeAutoJoin runs the bootstrap join handshake when peers.db is empty.
+// Idempotent: peers.db with any prior entry skips the handshake.
+func maybeAutoJoin(ctx context.Context, dataDir, tokStr, advertisedAddr string, timeout time.Duration) error {
+	sess, err := openPeerSession(dataDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = sess.Close() }()
+	list, err := sess.peerStore.List()
+	if err != nil {
+		return fmt.Errorf("list peers: %w", err)
+	}
+	if len(list) > 0 {
+		slog.InfoContext(ctx, "auto-join skipped; peers.db already populated",
+			"peer_count", len(list))
+		return nil
+	}
+	joinCtx, cancel := withTimeout(ctx, timeout)
+	defer cancel()
+	result, err := bootstrap.DoJoin(joinCtx, tokStr, sess.id.PrivateKey, advertisedAddr, sess.peerStore)
+	if err != nil {
+		return fmt.Errorf("auto-join: %w", err)
+	}
+	if len(result.SignedCert) > 0 {
+		if err := ca.SaveNodeCert(sess.dir, result.SignedCert); err != nil {
+			return fmt.Errorf("save node cert: %w", err)
+		}
+	}
+	slog.InfoContext(ctx, "auto-joined peer",
+		"peer_pub", hex.EncodeToString(result.Introducer.PubKey),
+		"peer_addr", result.Introducer.Addr,
+		"peer_list_size", len(result.Peers),
+		"signed_cert", len(result.SignedCert) > 0,
+	)
+	return nil
 }

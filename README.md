@@ -62,6 +62,39 @@ docker pull ghcr.io/nikosch86/backupswarm:latest
 docker pull ghcr.io/nikosch86/backupswarm:main-dev
 ```
 
+### Auto-join from an env var
+
+For containerised joiners, `run` reads `BACKUPSWARM_INVITE_TOKEN` at startup
+and joins the swarm before the daemon serves traffic. Subsequent restarts of
+the same data dir skip the join (idempotent on a populated `peers.db`).
+
+```bash
+docker run --rm \
+    -v bsw-data:/data \
+    -v bsw-src:/backup \
+    -e BACKUPSWARM_INVITE_TOKEN="$(cat /tmp/founder.token)" \
+    -p 7778:7778/udp \
+    ghcr.io/nikosch86/backupswarm:latest \
+    run --listen 0.0.0.0:7778 --backup-dir /backup
+```
+
+#### UDP buffer warning (optional)
+
+quic-go logs `failed to sufficiently increase receive buffer size` on
+startup when the kernel's UDP buffer ceilings are below ~7 MB. The runtime
+is unaffected; the warning is benign for small swarms. To silence it, set
+both keys on the host:
+
+```bash
+sudo sysctl -w net.core.rmem_max=7500000
+sudo sysctl -w net.core.wmem_max=7500000
+# or persist via /etc/sysctl.d/99-quic.conf
+```
+
+`docker run --sysctl` is supported on Linux 5.10+ but blocked by the
+apparmor/seccomp profiles on many distros, so the host-level fix is the
+reliable path.
+
 ## Two-node swarm (local smoke test)
 
 ```bash
