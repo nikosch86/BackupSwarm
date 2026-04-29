@@ -531,6 +531,11 @@ func scanUsedBytes(root string) (int64, error) {
 		if !e.IsDir() {
 			continue
 		}
+		// Snapshots live under <root>/snapshots/ and are not gated by
+		// the chunk capacity counter; skip them in the seed scan.
+		if e.Name() == snapshotsDir {
+			continue
+		}
 		shardDir := filepath.Join(root, e.Name())
 		shardEntries, err := os.ReadDir(shardDir)
 		if err != nil {

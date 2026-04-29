@@ -97,6 +97,21 @@ plaintext hash is verified against the index's `PlaintextHash`; a
 mismatch aborts the restore. Restored files keep their original
 mtime so the daemon's incremental scan does not re-upload them.
 
+### Disaster recovery: rebuild a lost index
+
+The running daemon periodically encrypts and ships its local index to
+every storage peer (interval configurable via `--index-backup-interval`
+on `run`, default 5 min). On a fresh node that has its keys and a
+populated `peers.db` but no `index.db`, run:
+
+```bash
+./bin/backupswarm --data-dir /tmp/bs-b restore-index
+```
+
+`restore-index` dials each storage peer, fetches the encrypted snapshot,
+decrypts it with the local recipient key, and writes `index.db`. After
+that, a normal `restore <dest>` reassembles the tree.
+
 ## Makefile Targets
 
 All development operations go through the Makefile — never invoke `go` or `docker` directly.

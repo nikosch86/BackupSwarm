@@ -696,6 +696,10 @@ func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owne
 		return handleGetCapacityStream(ctx, rw, st)
 	case protocol.MsgPing:
 		return handlePingStream(ctx, rw)
+	case protocol.MsgPutIndexSnapshot:
+		return handlePutIndexSnapshotStream(ctx, rw, st, ownerKey)
+	case protocol.MsgGetIndexSnapshot:
+		return handleGetIndexSnapshotStream(ctx, rw, st, ownerKey)
 	default:
 		return fmt.Errorf("unknown message type %d", msgType)
 	}

@@ -26,12 +26,14 @@ import (
 
 // testRig brings up a peer (listener + chunk store) and an owner QUIC connection.
 type testRig struct {
-	t            *testing.T
-	peerStore    *store.Store
-	ownerIndex   *index.Index
-	ownerConn    *bsquic.Conn
-	serveErr     chan error
-	recipientPub *[32]byte
+	t             *testing.T
+	peerStore     *store.Store
+	peerStoreRoot string
+	listenerAddr  string
+	ownerIndex    *index.Index
+	ownerConn     *bsquic.Conn
+	serveErr      chan error
+	recipientPub  *[32]byte
 
 	peerPubKey  ed25519.PublicKey
 	ownerPubKey ed25519.PublicKey
@@ -43,7 +45,8 @@ func newTestRig(t *testing.T) *testRig {
 	t.Cleanup(cancel)
 
 	peerDir := t.TempDir()
-	peerStore, err := store.New(filepath.Join(peerDir, "blobs"))
+	peerStoreRoot := filepath.Join(peerDir, "blobs")
+	peerStore, err := store.New(peerStoreRoot)
 	if err != nil {
 		t.Fatalf("store.New: %v", err)
 	}
@@ -90,14 +93,16 @@ func newTestRig(t *testing.T) *testRig {
 	}
 
 	return &testRig{
-		t:            t,
-		peerStore:    peerStore,
-		ownerIndex:   ownerIndex,
-		ownerConn:    ownerConn,
-		serveErr:     serveErr,
-		recipientPub: recipientPub,
-		peerPubKey:   peerPub,
-		ownerPubKey:  ownerPub,
+		t:             t,
+		peerStore:     peerStore,
+		peerStoreRoot: peerStoreRoot,
+		listenerAddr:  listener.Addr().String(),
+		ownerIndex:    ownerIndex,
+		ownerConn:     ownerConn,
+		serveErr:      serveErr,
+		recipientPub:  recipientPub,
+		peerPubKey:    peerPub,
+		ownerPubKey:   ownerPub,
 	}
 }
 

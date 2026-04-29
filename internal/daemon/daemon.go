@@ -170,6 +170,10 @@ type Options struct {
 	// HeartbeatInterval is the period between liveness probes against
 	// every live conn. Zero uses a sensible default (30s).
 	HeartbeatInterval time.Duration
+	// IndexBackupInterval is the period between encrypted index-snapshot
+	// uploads to every live storage conn. Zero uses a sensible default
+	// (5 minutes). Storage-only daemons skip the loop entirely.
+	IndexBackupInterval time.Duration
 	// Restore selects ModeRestore when the backup dir is empty but the
 	// index is populated.
 	Restore bool
@@ -212,10 +216,11 @@ type Options struct {
 }
 
 const (
-	defaultScanInterval      = 60 * time.Second
-	defaultHeartbeatInterval = 30 * time.Second
-	defaultDialTimeout       = 30 * time.Second
-	defaultGracePeriod       = 24 * time.Hour
+	defaultScanInterval        = 60 * time.Second
+	defaultHeartbeatInterval   = 30 * time.Second
+	defaultIndexBackupInterval = 5 * time.Minute
+	defaultDialTimeout         = 30 * time.Second
+	defaultGracePeriod         = 24 * time.Hour
 
 	indexFileName = "index.db"
 	storeDirName  = "chunks"
@@ -234,6 +239,9 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	if opts.HeartbeatInterval == 0 {
 		opts.HeartbeatInterval = defaultHeartbeatInterval
+	}
+	if opts.IndexBackupInterval == 0 {
+		opts.IndexBackupInterval = defaultIndexBackupInterval
 	}
 	if opts.GracePeriod == 0 {
 		opts.GracePeriod = defaultGracePeriod
@@ -460,6 +468,26 @@ func Run(ctx context.Context, opts Options) error {
 	}()
 	defer hbWG.Wait()
 	defer hbCancel()
+
+	// ibCtx bounds the index-backup loop to daemon.Run's lifetime.
+	// Storage-only daemons have no index of their own to back up; the
+	// loop short-circuits internally when BackupDir is empty.
+	ibCtx, ibCancel := context.WithCancel(ctx)
+	var ibWG sync.WaitGroup
+	if opts.BackupDir != "" {
+		ibWG.Add(1)
+		go func() {
+			defer ibWG.Done()
+			runIndexBackupLoop(ibCtx, indexBackupLoopOptions{
+				interval:     opts.IndexBackupInterval,
+				connsFn:      func() []*bsquic.Conn { return liveStorageConns(connSet, peerStore) },
+				indexFn:      func() *index.Index { return idx },
+				recipientPub: rk.PublicKey,
+			})
+		}()
+	}
+	defer ibWG.Wait()
+	defer ibCancel()
 
 	// Pure storage-peer role: serve inbound chunks only, no scan loop.
 	if opts.BackupDir == "" {

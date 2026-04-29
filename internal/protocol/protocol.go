@@ -37,6 +37,14 @@ const (
 	// (the type byte is the entire request); the response is a single
 	// OK/Err status frame.
 	MsgPing MessageType = 0x07
+	// MsgPutIndexSnapshot prefixes a PutIndexSnapshot request body. The
+	// owner is the conn's TLS-authenticated pubkey; peers store one
+	// latest-wins slot per owner.
+	MsgPutIndexSnapshot MessageType = 0x08
+	// MsgGetIndexSnapshot prefixes a GetIndexSnapshot stream. The
+	// request body is empty (the type byte IS the request); the response
+	// returns the encrypted snapshot for the conn's authenticated owner.
+	MsgGetIndexSnapshot MessageType = 0x09
 )
 
 // WriteMessageType writes t as a single byte.

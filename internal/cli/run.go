@@ -11,21 +11,22 @@ import (
 
 func newRunCmd(dataDir *string) *cobra.Command {
 	var (
-		backupDir         string
-		listenAddr        string
-		chunkSize         int
-		scanInterval      time.Duration
-		heartbeatInterval time.Duration
-		heartbeatMisses   int
-		gracePeriod       time.Duration
-		dialTimeout       time.Duration
-		restore           bool
-		purge             bool
-		invite            bool
-		tokenOut          string
-		noCA              bool
-		maxStorage        string
-		redundancy        int
+		backupDir           string
+		listenAddr          string
+		chunkSize           int
+		scanInterval        time.Duration
+		heartbeatInterval   time.Duration
+		heartbeatMisses     int
+		indexBackupInterval time.Duration
+		gracePeriod         time.Duration
+		dialTimeout         time.Duration
+		restore             bool
+		purge               bool
+		invite              bool
+		tokenOut            string
+		noCA                bool
+		maxStorage          string
+		redundancy          int
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -66,23 +67,24 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				return err
 			}
 			return daemon.Run(cmd.Context(), daemon.Options{
-				DataDir:            dir,
-				BackupDir:          backupDir,
-				ListenAddr:         listenAddr,
-				ChunkSize:          chunkSize,
-				ScanInterval:       scanInterval,
-				HeartbeatInterval:  heartbeatInterval,
-				MissThreshold:      heartbeatMisses,
-				GracePeriod:        gracePeriod,
-				DialTimeout:        dialTimeout,
-				Restore:            restore,
-				Purge:              purge,
-				IssueInitialInvite: invite,
-				InitialInviteOut:   tokenOut,
-				NoCA:               noCA,
-				MaxStorageBytes:    maxBytes,
-				Redundancy:         redundancy,
-				Progress:           cmd.OutOrStdout(),
+				DataDir:             dir,
+				BackupDir:           backupDir,
+				ListenAddr:          listenAddr,
+				ChunkSize:           chunkSize,
+				ScanInterval:        scanInterval,
+				HeartbeatInterval:   heartbeatInterval,
+				IndexBackupInterval: indexBackupInterval,
+				MissThreshold:       heartbeatMisses,
+				GracePeriod:         gracePeriod,
+				DialTimeout:         dialTimeout,
+				Restore:             restore,
+				Purge:               purge,
+				IssueInitialInvite:  invite,
+				InitialInviteOut:    tokenOut,
+				NoCA:                noCA,
+				MaxStorageBytes:     maxBytes,
+				Redundancy:          redundancy,
+				Progress:            cmd.OutOrStdout(),
 			})
 		},
 	}
@@ -91,6 +93,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().IntVar(&chunkSize, "chunk-size", 1<<20, "Target chunk size in bytes (default 1 MiB)")
 	cmd.Flags().DurationVar(&scanInterval, "scan-interval", 60*time.Second, "Period between incremental scan passes")
 	cmd.Flags().DurationVar(&heartbeatInterval, "heartbeat-interval", 30*time.Second, "Period between liveness probes against every live conn")
+	cmd.Flags().DurationVar(&indexBackupInterval, "index-backup-interval", 5*time.Minute, "Period between encrypted index-snapshot uploads to live storage peers (storage-only daemons skip)")
 	cmd.Flags().IntVar(&heartbeatMisses, "heartbeat-misses", 3, "Consecutive missed heartbeats required to mark a peer unreachable (must be >= 1)")
 	cmd.Flags().DurationVar(&gracePeriod, "grace-period", 24*time.Hour, "Duration a peer must stay unreachable before being treated as lost (eligible for re-replication). 0 = lost immediately.")
 	cmd.Flags().DurationVar(&dialTimeout, "dial-timeout", 30*time.Second, "Timeout for the initial dial to the storage peer")

@@ -73,6 +73,201 @@ func (f *fakeTempFile) Close() error {
 	return realErr
 }
 
+// TestPutIndexSnapshot_RenameFailure_CleansUpTempFile injects an os.Rename
+// failure and asserts the temp file is removed and the sentinel surfaces.
+func TestPutIndexSnapshot_RenameFailure_CleansUpTempFile(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	sentinel := errors.New("forced snapshot rename failure")
+	var capturedTmp string
+	withRenameFunc(t, func(oldpath, newpath string) error {
+		capturedTmp = oldpath
+		return sentinel
+	})
+
+	owner := make([]byte, 32)
+	owner[0] = 0xCC
+	if err := s.PutIndexSnapshot(owner, []byte("snap")); err == nil {
+		t.Fatal("PutIndexSnapshot succeeded despite injected rename failure")
+	} else if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+	if capturedTmp == "" {
+		t.Fatal("rename hook never fired")
+	}
+	if _, statErr := os.Stat(capturedTmp); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("temp file %s not cleaned up (stat err=%v)", capturedTmp, statErr)
+	}
+}
+
+// TestPutIndexSnapshot_CreateTempFailure asserts a createTempFunc error
+// surfaces from PutIndexSnapshot wrapped.
+func TestPutIndexSnapshot_CreateTempFailure(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	sentinel := errors.New("forced snapshot create-temp failure")
+	withCreateTempFunc(t, func(dir, pattern string) (tempFile, error) {
+		return nil, sentinel
+	})
+
+	owner := make([]byte, 32)
+	owner[0] = 0xDD
+	if err := s.PutIndexSnapshot(owner, []byte("snap")); !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+}
+
+// TestPutIndexSnapshot_WriteFailure asserts a temp-write failure surfaces
+// from PutIndexSnapshot and the temp file is cleaned up.
+func TestPutIndexSnapshot_WriteFailure(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	sentinel := errors.New("forced snapshot write failure")
+	var capturedTmp string
+	withCreateTempFunc(t, func(dir, pattern string) (tempFile, error) {
+		real, err := os.CreateTemp(dir, pattern)
+		if err != nil {
+			return nil, err
+		}
+		capturedTmp = real.Name()
+		return &fakeTempFile{real: real, writeErr: sentinel}, nil
+	})
+
+	owner := make([]byte, 32)
+	owner[0] = 0xEE
+	if err := s.PutIndexSnapshot(owner, []byte("snap")); !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+	if capturedTmp == "" {
+		t.Fatal("createTemp hook never fired")
+	}
+	if _, statErr := os.Stat(capturedTmp); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("temp file %s not cleaned up (stat err=%v)", capturedTmp, statErr)
+	}
+}
+
+// TestPutIndexSnapshot_CloseTempFailure asserts a temp-close failure
+// surfaces from PutIndexSnapshot wrapped.
+func TestPutIndexSnapshot_CloseTempFailure(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	sentinel := errors.New("forced snapshot close failure")
+	withCreateTempFunc(t, func(dir, pattern string) (tempFile, error) {
+		real, err := os.CreateTemp(dir, pattern)
+		if err != nil {
+			return nil, err
+		}
+		return &fakeTempFile{real: real, closeErr: sentinel}, nil
+	})
+
+	owner := make([]byte, 32)
+	owner[0] = 0xAB
+	if err := s.PutIndexSnapshot(owner, []byte("snap")); !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+}
+
+// TestPutIndexSnapshot_MkdirAllFailure asserts MkdirAll fails when the
+// snapshots subdir path is blocked by an existing regular file.
+func TestPutIndexSnapshot_MkdirAllFailure(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	blocker := filepath.Join(root, "snapshots")
+	if err := os.WriteFile(blocker, []byte("squat"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+
+	owner := make([]byte, 32)
+	owner[0] = 0xBC
+	err = s.PutIndexSnapshot(owner, []byte("snap"))
+	if err == nil {
+		t.Fatal("PutIndexSnapshot succeeded despite blocker file")
+	}
+}
+
+// TestGetIndexSnapshot_OpenFailure asserts a non-NotExist os.Open error
+// (e.g. mode-0 snapshot file) surfaces from GetIndexSnapshot wrapped.
+func TestGetIndexSnapshot_OpenFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses POSIX file-permission checks")
+	}
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	owner := make([]byte, 32)
+	owner[0] = 0xFE
+	if err := s.PutIndexSnapshot(owner, []byte("snap")); err != nil {
+		t.Fatalf("PutIndexSnapshot: %v", err)
+	}
+	path := snapshotPath(root, owner)
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod 0: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+
+	_, err = s.GetIndexSnapshot(owner)
+	if err == nil {
+		t.Fatal("GetIndexSnapshot succeeded despite mode-0 file")
+	}
+	if errors.Is(err, ErrSnapshotNotFound) {
+		t.Errorf("err = %v, must not wrap ErrSnapshotNotFound for non-NotExist open errors", err)
+	}
+}
+
+// TestGetIndexSnapshot_ReadFailure asserts a readAllFunc failure surfaces
+// from GetIndexSnapshot wrapped.
+func TestGetIndexSnapshot_ReadFailure(t *testing.T) {
+	root := t.TempDir()
+	s, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	owner := make([]byte, 32)
+	owner[0] = 0xCD
+	if err := s.PutIndexSnapshot(owner, []byte("snap")); err != nil {
+		t.Fatalf("seed snapshot: %v", err)
+	}
+
+	sentinel := errors.New("forced snapshot read failure")
+	withReadAllFunc(t, func(r io.Reader) ([]byte, error) {
+		return nil, sentinel
+	})
+	if _, err := s.GetIndexSnapshot(owner); !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+}
+
 // TestPut_RenameFailure_CleansUpTempFile injects an os.Rename failure and asserts Put errors and removes the temp file.
 func TestPut_RenameFailure_CleansUpTempFile(t *testing.T) {
 	s, err := New(t.TempDir())

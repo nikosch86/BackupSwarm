@@ -23,6 +23,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newJoinCmd(&dataDir))
 	root.AddCommand(newRunCmd(&dataDir))
 	root.AddCommand(newRestoreCmd(&dataDir))
+	root.AddCommand(newRestoreIndexCmd(&dataDir))
 	root.AddCommand(newPeersCmd(&dataDir))
 	root.AddCommand(newStatusCmd(&dataDir))
 
