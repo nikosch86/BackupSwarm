@@ -21,6 +21,7 @@ Status: **early development**.
 | Discovery | Explicit single-use join tokens, no auto-discovery |
 | Metadata | Local `bbolt` index, encrypted backup of the index to the swarm |
 | Placement | Weighted random by reported free capacity, lazy re-replication on churn |
+| Chunk lifecycle | Owner-signed delete on file removal; storage-side TTL safety net (30d default, owner renews periodically); periodic integrity scrub |
 | Deployment | Docker image (primary), multi-platform binaries (secondary) |
 
 ---
@@ -46,6 +47,19 @@ make test
 
 # Lint + test (the pre-PR gate)
 make check
+```
+
+### Get the prebuilt image
+
+Multi-arch images (`linux/amd64` + `linux/arm64`) ship to GitHub Container Registry:
+
+```bash
+# Stable: every git tag v* publishes :vX.Y.Z, :vX.Y, and :latest
+docker pull ghcr.io/nikosch86/backupswarm:latest
+
+# Rolling/unstable: every push to main publishes :main-dev (overwritten)
+# plus :main-dev-<short-sha> (immutable, for traceability)
+docker pull ghcr.io/nikosch86/backupswarm:main-dev
 ```
 
 ## Two-node swarm (local smoke test)
@@ -140,6 +154,7 @@ All development operations go through the Makefile — never invoke `go` or `doc
 | `make docker-compose-up` | Spin up a local 3-node swarm for testing |
 | `make docker-compose-down` | Tear down the local swarm |
 | `make docker-compose-test` | Containerised end-to-end test: assert two joiners reach the founder, the joiner backs up the seeded tree, and the announcement reaches the third node |
+| `make publish-dryrun` | Multi-arch buildx build (`linux/amd64` + `linux/arm64`) without pushing — sanity-checks the release workflow's build command locally |
 
 ### Security
 

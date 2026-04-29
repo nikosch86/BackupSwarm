@@ -9,6 +9,10 @@ COVERAGE_MIN := 90
 
 DOCKER_IMAGE := backupswarm:dev
 
+# Multi-arch publish settings — kept in sync with .github/workflows/release.yml
+PUBLISH_PLATFORMS := linux/amd64,linux/arm64
+PUBLISH_DRYRUN_TAG := backupswarm:publish-dryrun
+
 # Trivy — pinned version for reproducible security scans.
 # Named docker volume keeps the vulnerability DB cached across runs.
 TRIVY_IMAGE    := aquasec/trivy:0.70.0
@@ -20,6 +24,7 @@ GOFLAGS      ?=
 
 .PHONY: all build test coverage coverage-report lint fmt fmt-fix vet check clean \
         docker-build docker-run docker-compose-up docker-compose-down docker-compose-test \
+        publish-dryrun \
         trivy-deps trivy-image security-scan story-done help \
         mod-get mod-tidy
 
@@ -100,6 +105,16 @@ docker-compose-up:
 ## docker-compose-down: tear down the local swarm
 docker-compose-down:
 	docker compose down -v
+
+## publish-dryrun: multi-arch buildx build (no push) — mirrors release.yml's build step
+# Builds the Dockerfile for both publish platforms via buildx.
+# Output stays in the buildkit cache; no image is loaded or pushed.
+publish-dryrun:
+	docker buildx build \
+		--platform $(PUBLISH_PLATFORMS) \
+		--tag $(PUBLISH_DRYRUN_TAG) \
+		--file Dockerfile \
+		.
 
 ## docker-compose-test: end-to-end smoke test of the containerised 4-node swarm
 # Brings the swarm up detached and asserts: node-b accepted all three
