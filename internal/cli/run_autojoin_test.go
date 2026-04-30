@@ -3,12 +3,11 @@ package cli
 import (
 	"context"
 	"io"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"backupswarm/internal/peers"
 )
 
 // TestRunCmd_AutoJoinFromEnvVar boots a founder, sets the joiner's
@@ -18,6 +17,9 @@ func TestRunCmd_AutoJoinFromEnvVar(t *testing.T) {
 	dataB := filepath.Join(t.TempDir(), "node-b")
 	dataA := filepath.Join(t.TempDir(), "node-a")
 	addrB := reserveLocalUDPAddr(t)
+
+	logBuf := &syncBuffer{}
+	captureSlog(t, logBuf)
 
 	overallCtx, cancelOverall := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelOverall()
@@ -53,7 +55,7 @@ func TestRunCmd_AutoJoinFromEnvVar(t *testing.T) {
 	})
 	go func() { aDone <- aCmd.ExecuteContext(aCtx) }()
 
-	waitForPeerStorePopulated(t, filepath.Join(dataA, "peers.db"), 15*time.Second)
+	waitForLog(t, logBuf, "auto-joined peer", 15*time.Second)
 
 	cancelA()
 	if err := awaitDone(aDone, 10*time.Second); err != nil {
@@ -156,29 +158,24 @@ func TestRunCmd_AutoJoinBadToken_FailsBeforeDaemon(t *testing.T) {
 	}
 }
 
-// waitForPeerStorePopulated polls peers.db (read-only) until at least one
-// peer entry exists or the deadline expires.
-func waitForPeerStorePopulated(t *testing.T, path string, deadline time.Duration) {
+// captureSlog redirects the default slog logger to w for the lifetime
+// of the test, restoring the previous default via t.Cleanup.
+func captureSlog(t *testing.T, w io.Writer) {
+	t.Helper()
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+}
+
+// waitForLog polls buf until it contains needle or deadline expires.
+func waitForLog(t *testing.T, buf *syncBuffer, needle string, deadline time.Duration) {
 	t.Helper()
 	end := time.Now().Add(deadline)
 	for time.Now().Before(end) {
-		if hasPeer(path) {
+		if strings.Contains(buf.String(), needle) {
 			return
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("peers.db at %q did not gain a peer entry within %s", path, deadline)
-}
-
-func hasPeer(path string) bool {
-	store, err := peers.OpenReadOnly(path)
-	if err != nil {
-		return false
-	}
-	defer store.Close()
-	list, err := store.List()
-	if err != nil {
-		return false
-	}
-	return len(list) > 0
+	t.Fatalf("log did not contain %q within %s\nbuffer:\n%s", needle, deadline, buf.String())
 }
