@@ -68,10 +68,11 @@ var ErrNoExpiryRecorded = errors.New("no expiry recorded for blob")
 // Store is a content-addressed chunk store. Put is atomic via temp+rename
 // and idempotent for repeated writes of identical content.
 type Store struct {
-	root     string
-	maxBytes int64
-	chunkTTL time.Duration
-	now      func() time.Time
+	root      string
+	maxBytes  int64
+	noStorage bool
+	chunkTTL  time.Duration
+	now       func() time.Time
 
 	// owners is lazily opened on first owner-tracking call.
 	ownersMu sync.Mutex
@@ -89,6 +90,9 @@ type Store struct {
 type Options struct {
 	// MaxBytes caps total stored bytes; 0 = unlimited.
 	MaxBytes int64
+	// NoStorage refuses all Put/PutOwned with ErrVolumeFull and forces
+	// Available() to 0; takes precedence over MaxBytes.
+	NoStorage bool
 	// ChunkTTL is the lifetime applied to each PutOwned blob; 0 disables TTL.
 	ChunkTTL time.Duration
 	// Now is the clock used for expiry stamping; nil defaults to time.Now.
@@ -128,11 +132,12 @@ func NewWithOptions(dir string, opts Options) (*Store, error) {
 		now = time.Now
 	}
 	return &Store{
-		root:     dir,
-		maxBytes: opts.MaxBytes,
-		chunkTTL: opts.ChunkTTL,
-		now:      now,
-		used:     used,
+		root:      dir,
+		maxBytes:  opts.MaxBytes,
+		noStorage: opts.NoStorage,
+		chunkTTL:  opts.ChunkTTL,
+		now:       now,
+		used:      used,
 	}, nil
 }
 
@@ -151,6 +156,9 @@ func (s *Store) Close() error {
 // Put writes data and returns its SHA-256. Idempotent; no owner recorded.
 func (s *Store) Put(data []byte) ([sha256.Size]byte, error) {
 	hash := sha256.Sum256(data)
+	if s.noStorage {
+		return hash, ErrVolumeFull
+	}
 	finish, err := s.reserveForBlob(hash, int64(len(data)))
 	if err != nil {
 		return hash, err
@@ -168,6 +176,9 @@ func (s *Store) Put(data []byte) ([sha256.Size]byte, error) {
 // different owner or unowned existing blob returns ErrOwnerMismatch.
 func (s *Store) PutOwned(data, owner []byte) ([sha256.Size]byte, error) {
 	hash := sha256.Sum256(data)
+	if s.noStorage {
+		return hash, ErrVolumeFull
+	}
 	finish, err := s.reserveForBlob(hash, int64(len(data)))
 	if err != nil {
 		return hash, err
@@ -660,8 +671,11 @@ func (s *Store) Capacity() int64 {
 	return s.maxBytes
 }
 
-// Available returns Capacity-Used, or math.MaxInt64 when unlimited.
+// Available returns Capacity-Used, math.MaxInt64 when unlimited, or 0 when NoStorage.
 func (s *Store) Available() int64 {
+	if s.noStorage {
+		return 0
+	}
 	if s.maxBytes == 0 {
 		return math.MaxInt64
 	}
@@ -672,6 +686,11 @@ func (s *Store) Available() int64 {
 		return 0
 	}
 	return avail
+}
+
+// IsNoStorage reports whether this store rejects every Put/PutOwned.
+func (s *Store) IsNoStorage() bool {
+	return s.noStorage
 }
 
 // reserve adds n to the used tally; returns ErrVolumeFull on overflow.

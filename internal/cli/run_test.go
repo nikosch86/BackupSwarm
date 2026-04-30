@@ -179,6 +179,60 @@ func TestRunCmd_AcceptsHumanMaxStorage(t *testing.T) {
 	}
 }
 
+// TestRunCmd_AcceptsMaxStorageZero: --max-storage 0 passes flag validation.
+func TestRunCmd_AcceptsMaxStorageZero(t *testing.T) {
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--max-storage", "0",
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("run with --max-storage 0 returned err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit within 5s of cancel")
+	}
+}
+
+// TestRunCmd_AcceptsMaxStorageUnlimited: explicit "unlimited" literal is accepted.
+func TestRunCmd_AcceptsMaxStorageUnlimited(t *testing.T) {
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--max-storage", "unlimited",
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("run with --max-storage unlimited returned err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit within 5s of cancel")
+	}
+}
+
 // TestRunCmd_RegistersRedundancyFlag asserts the --redundancy flag is
 // exposed on the run subcommand so users can configure per-chunk peer count.
 func TestRunCmd_RegistersRedundancyFlag(t *testing.T) {

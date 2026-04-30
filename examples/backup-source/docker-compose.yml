@@ -1,0 +1,38 @@
+# Pure backup-source template: ships a local directory to swarm peers
+# but stores nothing for others. See README.md for setup.
+
+services:
+  init:
+    image: busybox:1.37
+    volumes:
+      - data:/data
+    command: chown -R 65532:65532 /data
+    restart: "no"
+
+  backup-source:
+    image: ghcr.io/nikosch86/backupswarm:latest
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    environment:
+      BACKUPSWARM_INVITE_TOKEN: "${BACKUPSWARM_INVITE_TOKEN:?must be set; see README.md}"
+      BACKUPSWARM_ADVERTISE_ADDR: "${BACKUPSWARM_ADVERTISE_ADDR:-}"
+    volumes:
+      - data:/data
+      # Bind-mount the directory you want backed up. Adjust the host path.
+      - ./backup:/backup:ro
+    ports:
+      - "7778:7778/udp"
+    command:
+      - run
+      - --listen
+      - 0.0.0.0:7778
+      - --backup-dir
+      - /backup
+      # `0` = no-storage mode: incoming PutChunk rejected; capacity probe reports saturated.
+      - --max-storage
+      - "0"
+
+volumes:
+  data:

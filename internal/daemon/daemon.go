@@ -182,6 +182,8 @@ type Options struct {
 	GracePeriod time.Duration
 	// MaxStorageBytes caps the local chunk store; 0 means unlimited.
 	MaxStorageBytes int64
+	// NoStorage refuses all incoming PutChunk and reports a saturated capacity probe.
+	NoStorage bool
 	// Redundancy is the per-chunk peer count used by ScanOnce.
 	Redundancy int
 }
@@ -266,8 +268,9 @@ func Run(ctx context.Context, opts Options) error {
 	defer func() { _ = idx.Close() }()
 
 	st, err := store.NewWithOptions(filepath.Join(opts.DataDir, storeDirName), store.Options{
-		MaxBytes: opts.MaxStorageBytes,
-		ChunkTTL: opts.ChunkTTL,
+		MaxBytes:  opts.MaxStorageBytes,
+		NoStorage: opts.NoStorage,
+		ChunkTTL:  opts.ChunkTTL,
 	})
 	if err != nil {
 		return fmt.Errorf("open chunk store: %w", err)

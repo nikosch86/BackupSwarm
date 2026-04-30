@@ -1489,6 +1489,34 @@ func TestHandleGetCapacityStream_UnlimitedReportsZeroCap(t *testing.T) {
 	}
 }
 
+// TestHandleGetCapacityStream_NoStorageReportsSaturated: NoStorage stores
+// report max>0 with used>=max so probeCandidates excludes via avail==0.
+func TestHandleGetCapacityStream_NoStorageReportsSaturated(t *testing.T) {
+	st, err := store.NewWithOptions(filepath.Join(t.TempDir(), "chunks"), store.Options{NoStorage: true})
+	if err != nil {
+		t.Fatalf("store.NewWithOptions: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(nil)}
+	if err := handleGetCapacityStream(context.Background(), rw, st); err != nil {
+		t.Fatalf("handleGetCapacityStream: %v", err)
+	}
+	used, max, appErr, err := protocol.ReadGetCapacityResponse(&rw.wbuf)
+	if err != nil {
+		t.Fatalf("ReadGetCapacityResponse: %v", err)
+	}
+	if appErr != "" {
+		t.Errorf("appErr = %q, want empty", appErr)
+	}
+	if max == 0 {
+		t.Errorf("max = 0 (unlimited sentinel) on no-storage peer; want >0 saturated")
+	}
+	if used < max {
+		t.Errorf("used (%d) < max (%d); placement would include this peer", used, max)
+	}
+}
+
 // TestDispatchStream_GetCapacityRoutesToHandler asserts the dispatcher
 // recognizes MsgGetCapacity and writes the expected used/cap pair.
 func TestDispatchStream_GetCapacityRoutesToHandler(t *testing.T) {

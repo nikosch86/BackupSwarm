@@ -62,6 +62,9 @@ docker pull ghcr.io/nikosch86/backupswarm:latest
 docker pull ghcr.io/nikosch86/backupswarm:main-dev
 ```
 
+Ready-to-run compose templates for the three node roles
+(storage-peer, backup-source, dual-role) live under [`examples/`](examples/).
+
 ### Auto-join from an env var
 
 For containerised joiners, `run` reads `BACKUPSWARM_INVITE_TOKEN` at startup

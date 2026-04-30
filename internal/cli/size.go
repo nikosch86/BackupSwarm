@@ -7,6 +7,24 @@ import (
 	"strings"
 )
 
+// parseMaxStorage parses the --max-storage flag value into (maxBytes,
+// noStorage). Empty or "unlimited" (case-insensitive) means unlimited;
+// a value that parses to zero means no storage; otherwise it is the cap.
+func parseMaxStorage(s string) (maxBytes int64, noStorage bool, err error) {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" || strings.EqualFold(trimmed, "unlimited") {
+		return 0, false, nil
+	}
+	n, err := parseSize(trimmed)
+	if err != nil {
+		return 0, false, err
+	}
+	if n == 0 {
+		return 0, true, nil
+	}
+	return n, false, nil
+}
+
 // parseSize parses an integer with an optional binary suffix (k/m/g/t).
 // Empty input returns 0; decimals and negatives are rejected.
 func parseSize(s string) (int64, error) {

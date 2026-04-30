@@ -728,7 +728,11 @@ func handleDeleteChunkStream(ctx context.Context, rw io.ReadWriter, st *store.St
 }
 
 // handleGetCapacityStream writes the store's used/max byte totals onto rw.
+// NoStorage stores report a saturated 1/1.
 func handleGetCapacityStream(_ context.Context, rw io.ReadWriter, st *store.Store) error {
+	if st.IsNoStorage() {
+		return protocol.WriteGetCapacityResponse(rw, 1, 1, "")
+	}
 	return protocol.WriteGetCapacityResponse(rw, st.Used(), st.Capacity(), "")
 }
 

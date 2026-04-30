@@ -95,7 +95,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 			if chunkExpireInterval < 0 {
 				return fmt.Errorf("--chunk-expire-interval must be >= 0, got %v", chunkExpireInterval)
 			}
-			maxBytes, err := parseSize(maxStorage)
+			maxBytes, noStorage, err := parseMaxStorage(maxStorage)
 			if err != nil {
 				return fmt.Errorf("--max-storage: %w", err)
 			}
@@ -131,6 +131,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				InitialInviteOut:    tokenOut,
 				NoCA:                noCA,
 				MaxStorageBytes:     maxBytes,
+				NoStorage:           noStorage,
 				Redundancy:          redundancy,
 				Progress:            cmd.OutOrStdout(),
 			})
@@ -155,7 +156,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().BoolVar(&invite, "invite", false, "Issue an initial invite token at startup; print it to stdout and continue into the daemon")
 	cmd.Flags().StringVar(&tokenOut, "token-out", "", "Write the initial invite token to this file (atomic); requires --invite")
 	cmd.Flags().BoolVar(&noCA, "no-ca", false, "Skip swarm CA generation; use pubkey-pin trust. Locks the swarm into pin mode for life. Requires --invite.")
-	cmd.Flags().StringVar(&maxStorage, "max-storage", "0", "Cap on bytes stored locally for swarm peers; accepts k/m/g/t suffixes (e.g. 10g). 0 = unlimited.")
+	cmd.Flags().StringVar(&maxStorage, "max-storage", "unlimited", "Cap on bytes stored locally for swarm peers; accepts k/m/g/t suffixes (e.g. 10g). 'unlimited' (default) places no cap; 0 disables storage entirely (refuse all chunks for others).")
 	cmd.Flags().IntVar(&redundancy, "redundancy", 1, "Number of unique storage peers each chunk is placed on (must be >= 1)")
 	return cmd
 }
