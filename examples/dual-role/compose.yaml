@@ -1,31 +1,25 @@
-# Pure storage-peer template: serves chunks for swarm peers, backs up
-# nothing of its own. See README.md for setup.
+# Dual-role template: backs up its own --backup-dir AND stores chunks
+# for other swarm peers. The most common operator setup. See README.md.
 
 services:
-  init:
-    image: busybox:1.37
-    volumes:
-      - data:/data
-    command: chown -R 65532:65532 /data
-    restart: "no"
-
-  storage-peer:
+  dual-role:
     image: ghcr.io/nikosch86/backupswarm:latest
-    depends_on:
-      init:
-        condition: service_completed_successfully
     restart: unless-stopped
     environment:
       BACKUPSWARM_INVITE_TOKEN: "${BACKUPSWARM_INVITE_TOKEN:?must be set; see README.md}"
       BACKUPSWARM_ADVERTISE_ADDR: "${BACKUPSWARM_ADVERTISE_ADDR:-}"
     volumes:
       - data:/data
+      # Bind-mount the directory you want backed up. Adjust the host path.
+      - ./backup:/backup:ro
     ports:
-      - "7777:7777/udp"
+      - "7779:7779/udp"
     command:
       - run
       - --listen
-      - 0.0.0.0:7777
+      - 0.0.0.0:7779
+      - --backup-dir
+      - /backup
       - --max-storage
       - 100g
 

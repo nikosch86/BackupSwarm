@@ -251,7 +251,7 @@ internal/
 pkg/token/                 Join token generation and parsing (public)
 configs/                   Default config templates
 Dockerfile                 Multi-stage build (distroless runtime)
-docker-compose.yml         Local multi-node test setup
+compose.yaml               Local multi-node test setup
 Makefile                   All development operations
 ```
 

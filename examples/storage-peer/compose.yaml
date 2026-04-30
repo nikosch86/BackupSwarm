@@ -1,0 +1,23 @@
+# Pure storage-peer template: serves chunks for swarm peers, backs up
+# nothing of its own. See README.md for setup.
+
+services:
+  storage-peer:
+    image: ghcr.io/nikosch86/backupswarm:latest
+    restart: unless-stopped
+    environment:
+      BACKUPSWARM_INVITE_TOKEN: "${BACKUPSWARM_INVITE_TOKEN:?must be set; see README.md}"
+      BACKUPSWARM_ADVERTISE_ADDR: "${BACKUPSWARM_ADVERTISE_ADDR:-}"
+    volumes:
+      - data:/data
+    ports:
+      - "7777:7777/udp"
+    command:
+      - run
+      - --listen
+      - 0.0.0.0:7777
+      - --max-storage
+      - 100g
+
+volumes:
+  data:

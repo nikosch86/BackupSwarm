@@ -2,18 +2,8 @@
 # but stores nothing for others. See README.md for setup.
 
 services:
-  init:
-    image: busybox:1.37
-    volumes:
-      - data:/data
-    command: chown -R 65532:65532 /data
-    restart: "no"
-
   backup-source:
     image: ghcr.io/nikosch86/backupswarm:latest
-    depends_on:
-      init:
-        condition: service_completed_successfully
     restart: unless-stopped
     environment:
       BACKUPSWARM_INVITE_TOKEN: "${BACKUPSWARM_INVITE_TOKEN:?must be set; see README.md}"
