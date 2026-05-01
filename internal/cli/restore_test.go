@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"backupswarm/internal/backup"
 	"backupswarm/internal/crypto"
 	"backupswarm/internal/index"
@@ -32,6 +34,27 @@ func TestRestoreCmd_RegisteredOnRoot(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("root command missing `restore` subcommand")
+	}
+}
+
+// TestRestoreCmd_HasRetryFlags asserts the new partial-availability
+// flags are registered with the expected names.
+func TestRestoreCmd_HasRetryFlags(t *testing.T) {
+	root := NewRootCmd()
+	var cmd *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Name() == "restore" {
+			cmd = c
+			break
+		}
+	}
+	if cmd == nil {
+		t.Fatal("restore command not registered")
+	}
+	for _, flagName := range []string{"retry-timeout", "retry-backoff"} {
+		if cmd.Flags().Lookup(flagName) == nil {
+			t.Errorf("restore command missing --%s flag", flagName)
+		}
 	}
 }
 

@@ -162,6 +162,12 @@ type Options struct {
 	ExpireInterval time.Duration
 	// Restore selects ModeRestore.
 	Restore bool
+	// RestoreRetryTimeout caps the time spent retrying files whose chunks
+	// could not be fetched on the first pass. Zero disables retries.
+	RestoreRetryTimeout time.Duration
+	// RestoreRetryBackoff is the initial inter-retry sleep; doubles up to
+	// 30s. Zero defaults to 1s.
+	RestoreRetryBackoff time.Duration
 	// Purge selects ModePurge.
 	Purge bool
 	// DialTimeout bounds the initial dial to the storage peer. Zero defaults to 30s.
@@ -575,6 +581,13 @@ func Run(ctx context.Context, opts Options) error {
 		idleMode := "idle"
 		modeStr.Store(&idleMode)
 	case ModeRestore:
+		var redial func(context.Context) ([]*bsquic.Conn, error)
+		if opts.RestoreRetryTimeout > 0 {
+			redial = func(rctx context.Context) ([]*bsquic.Conn, error) {
+				redialMissingPeers(rctx, peerStore, dialer, connSet)
+				return connsFn(), nil
+			}
+		}
 		if err := restore.Run(ctx, restore.Options{
 			Dest:          opts.BackupDir,
 			Conns:         connsFn(),
@@ -582,6 +595,9 @@ func Run(ctx context.Context, opts Options) error {
 			RecipientPub:  rk.PublicKey,
 			RecipientPriv: rk.PrivateKey,
 			Progress:      opts.Progress,
+			RetryTimeout:  opts.RestoreRetryTimeout,
+			RetryBackoff:  opts.RestoreRetryBackoff,
+			Redial:        redial,
 		}); err != nil {
 			return fmt.Errorf("restore: %w", err)
 		}

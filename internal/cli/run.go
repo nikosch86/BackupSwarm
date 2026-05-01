@@ -39,6 +39,8 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		chunkExpireInterval time.Duration
 		gracePeriod         time.Duration
 		dialTimeout         time.Duration
+		restoreRetryTimeout time.Duration
+		restoreRetryBackoff time.Duration
 		restore             bool
 		purge               bool
 		invite              bool
@@ -129,6 +131,8 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				MissThreshold:       heartbeatMisses,
 				GracePeriod:         gracePeriod,
 				DialTimeout:         dialTimeout,
+				RestoreRetryTimeout: restoreRetryTimeout,
+				RestoreRetryBackoff: restoreRetryBackoff,
 				Restore:             restore,
 				Purge:               purge,
 				IssueInitialInvite:  invite,
@@ -156,6 +160,8 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().DurationVar(&gracePeriod, "grace-period", 24*time.Hour, "Duration a peer must stay unreachable before being treated as lost (eligible for re-replication). 0 = lost immediately.")
 	cmd.Flags().DurationVar(&dialTimeout, "dial-timeout", 30*time.Second, "Timeout for the initial dial to the storage peer")
 	cmd.Flags().BoolVar(&restore, "restore", false, "Restore every indexed file under --backup-dir before the scan loop starts (required when backup-dir is empty but the index is populated)")
+	cmd.Flags().DurationVar(&restoreRetryTimeout, "restore-retry-timeout", 0, "When --restore is set, the maximum total time to retry files whose chunks are unreachable on the first pass (peers may come back online via heartbeat-driven re-dial). 0 disables retries.")
+	cmd.Flags().DurationVar(&restoreRetryBackoff, "restore-retry-backoff", time.Second, "Initial backoff between restore retries; doubles up to 30 s")
 	cmd.Flags().BoolVar(&purge, "purge", false, "Clear all indexed chunks from the swarm and reset the index (required alternative to --restore when backup-dir empty)")
 	cmd.Flags().BoolVar(&invite, "invite", false, "Issue an initial invite token at startup; print it to stdout and continue into the daemon")
 	cmd.Flags().StringVar(&tokenOut, "token-out", "", "Write the initial invite token to this file (atomic); requires --invite")

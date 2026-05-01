@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -20,7 +21,11 @@ import (
 var errNoStoragePeer = fmt.Errorf("no storage peer with a dialable address in peers.db; run `join <token>` first")
 
 func newRestoreCmd(dataDir *string) *cobra.Command {
-	var dialTimeout time.Duration
+	var (
+		dialTimeout  time.Duration
+		retryTimeout time.Duration
+		retryBackoff time.Duration
+	)
 	cmd := &cobra.Command{
 		Use:   "restore <dest>",
 		Short: "Fetch every indexed file from known storage peers and reassemble the tree under <dest>",
@@ -28,7 +33,10 @@ func newRestoreCmd(dataDir *string) *cobra.Command {
 			"fetch every chunk from a peer that holds it, decrypt it, verify its plaintext " +
 			"hash, and write each file under <dest> at its path relative to the original " +
 			"backup root. <dest> must be absolute. Every filesystem operation is rooted at " +
-			"<dest>, so a tampered index can never redirect writes outside the destination.",
+			"<dest>, so a tampered index can never redirect writes outside the destination. " +
+			"With --retry-timeout > 0, files whose chunks are unreachable on the first pass " +
+			"are deferred and retried with exponential backoff; peers are re-dialed between " +
+			"attempts so newly-online peers join the conn pool.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dest := args[0]
@@ -64,23 +72,37 @@ func newRestoreCmd(dataDir *string) *cobra.Command {
 			}
 			defer func() { _ = idx.Close() }()
 
-			conns, closeFn, err := dialAll(cmd.Context(), storagePeers, id.PrivateKey, dialTimeout)
+			tracker := newConnTracker()
+			defer tracker.closeAll()
+
+			initial, err := dialAndTrack(cmd.Context(), storagePeers, id.PrivateKey, dialTimeout, tracker)
 			if err != nil {
 				return err
 			}
-			defer closeFn()
+
+			redial := func(ctx context.Context) ([]*bsquic.Conn, error) {
+				return dialAndTrack(ctx, storagePeers, id.PrivateKey, dialTimeout, tracker)
+			}
+			if retryTimeout <= 0 {
+				redial = nil
+			}
 
 			return restore.Run(cmd.Context(), restore.Options{
 				Dest:          dest,
-				Conns:         conns,
+				Conns:         initial,
 				Index:         idx,
 				RecipientPub:  rk.PublicKey,
 				RecipientPriv: rk.PrivateKey,
 				Progress:      cmd.OutOrStdout(),
+				RetryTimeout:  retryTimeout,
+				RetryBackoff:  retryBackoff,
+				Redial:        redial,
 			})
 		},
 	}
 	cmd.Flags().DurationVar(&dialTimeout, "dial-timeout", 30*time.Second, "Timeout for each dial to a storage peer")
+	cmd.Flags().DurationVar(&retryTimeout, "retry-timeout", 0, "Maximum total time to retry deferred files when peers are unreachable (0 disables retries)")
+	cmd.Flags().DurationVar(&retryBackoff, "retry-backoff", time.Second, "Initial backoff between retry attempts; doubles up to 30s")
 	return cmd
 }
 
@@ -102,9 +124,35 @@ func listDialableStoragePeers(ps *peers.Store) ([]peers.Peer, error) {
 	return dialable, nil
 }
 
-// dialAll dials every peer best-effort and returns the successful conns
-// plus a closer.
-func dialAll(ctx context.Context, peerList []peers.Peer, priv ed25519.PrivateKey, timeout time.Duration) ([]*bsquic.Conn, func(), error) {
+// connTracker collects every conn dialed by the restore command so that
+// every retry's fresh dial gets cleaned up by a single defer at the end.
+type connTracker struct {
+	mu    sync.Mutex
+	conns []*bsquic.Conn
+}
+
+func newConnTracker() *connTracker { return &connTracker{} }
+
+func (t *connTracker) add(c *bsquic.Conn) {
+	t.mu.Lock()
+	t.conns = append(t.conns, c)
+	t.mu.Unlock()
+}
+
+func (t *connTracker) closeAll() {
+	t.mu.Lock()
+	conns := t.conns
+	t.conns = nil
+	t.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+}
+
+// dialAndTrack dials every peer best-effort and records each successful
+// conn in tracker for later closeAll. Returns the successful conns plus
+// the first dial error only when zero peers connected.
+func dialAndTrack(ctx context.Context, peerList []peers.Peer, priv ed25519.PrivateKey, timeout time.Duration, tracker *connTracker) ([]*bsquic.Conn, error) {
 	conns := make([]*bsquic.Conn, 0, len(peerList))
 	var firstErr error
 	for _, p := range peerList {
@@ -117,15 +165,21 @@ func dialAll(ctx context.Context, peerList []peers.Peer, priv ed25519.PrivateKey
 			}
 			continue
 		}
+		tracker.add(conn)
 		conns = append(conns, conn)
 	}
 	if len(conns) == 0 {
-		return nil, func() {}, firstErr
+		return nil, firstErr
 	}
-	closer := func() {
-		for _, c := range conns {
-			_ = c.Close()
-		}
+	return conns, nil
+}
+
+// dialAll returns successful conns and a closeFn that shuts them down.
+func dialAll(ctx context.Context, peerList []peers.Peer, priv ed25519.PrivateKey, timeout time.Duration) ([]*bsquic.Conn, func(), error) {
+	tracker := newConnTracker()
+	conns, err := dialAndTrack(ctx, peerList, priv, timeout, tracker)
+	if err != nil {
+		return nil, func() {}, err
 	}
-	return conns, closer, nil
+	return conns, tracker.closeAll, nil
 }
