@@ -113,6 +113,28 @@ func BroadcastPeerJoined(ctx context.Context, conns []*bsquic.Conn, joiner peers
 	return nil
 }
 
+// BroadcastAddressChanged opens one stream per conn and writes an
+// AddressChanged frame for subjPub's new addr. addr must be non-empty.
+func BroadcastAddressChanged(ctx context.Context, conns []*bsquic.Conn, subjPub ed25519.PublicKey, addr string) error {
+	if len(subjPub) != ed25519.PublicKeySize {
+		return fmt.Errorf("broadcast AddressChanged: pubkey size %d, want %d", len(subjPub), ed25519.PublicKeySize)
+	}
+	if addr == "" {
+		return fmt.Errorf("broadcast AddressChanged: addr is empty")
+	}
+	var ann protocol.PeerAnnouncement
+	ann.Kind = protocol.AnnounceAddressChanged
+	if _, err := randReadFunc(ann.ID[:]); err != nil {
+		return fmt.Errorf("broadcast AddressChanged: mint id: %w", err)
+	}
+	copy(ann.PubKey[:], subjPub)
+	ann.Addr = addr
+	for _, conn := range conns {
+		sendAnnouncement(ctx, conn, ann)
+	}
+	return nil
+}
+
 // sendAnnouncement opens a stream and writes one announcement frame.
 func sendAnnouncement(ctx context.Context, conn *bsquic.Conn, ann protocol.PeerAnnouncement) {
 	stream, err := conn.OpenStream(ctx)

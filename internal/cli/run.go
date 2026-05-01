@@ -14,7 +14,26 @@ import (
 	"backupswarm/internal/bootstrap"
 	"backupswarm/internal/ca"
 	"backupswarm/internal/daemon"
+	"backupswarm/internal/nat"
+	"backupswarm/internal/node"
+	bsquic "backupswarm/internal/quic"
 )
+
+// advertiseAddrAuto is the special --advertise-addr / env value triggering
+// STUN-based discovery of the externally-routable host.
+const advertiseAddrAuto = "auto"
+
+// defaultSTUNServer is queried when --stun-server is omitted.
+const defaultSTUNServer = "stun.l.google.com:19302"
+
+// stunResolveTimeout caps the synchronous STUN call done at startup.
+const stunResolveTimeout = 10 * time.Second
+
+// cliDiscoverFunc is the test seam for STUN binding requests in CLI commands.
+var cliDiscoverFunc = nat.Discover
+
+// listenFunc is the test seam for pre-binding the QUIC listener in the CLI.
+var listenFunc = bsquic.Listen
 
 // envInviteToken is the env var read by `run` to auto-join an unjoined node.
 const envInviteToken = "BACKUPSWARM_INVITE_TOKEN"
@@ -48,6 +67,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		noCA                bool
 		maxStorage          string
 		redundancy          int
+		stunServer          string
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -63,7 +83,12 @@ func newRunCmd(dataDir *string) *cobra.Command {
 			if advertiseAddr == "" {
 				advertiseAddr = os.Getenv(envAdvertiseAddr)
 			}
-			if advertiseAddr != "" {
+			isAuto := advertiseAddr == advertiseAddrAuto
+			if isAuto {
+				if listenAddr == "" {
+					listenAddr = "0.0.0.0:0"
+				}
+			} else if advertiseAddr != "" {
 				if _, port, err := net.SplitHostPort(advertiseAddr); err != nil {
 					return fmt.Errorf("--advertise-addr %q: %w", advertiseAddr, err)
 				} else if listenAddr == "" {
@@ -106,6 +131,20 @@ func newRunCmd(dataDir *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			var preBoundListener *bsquic.Listener
+			daemonSTUNServer := ""
+			if isAuto {
+				resolved, listener, err := resolveAutoAdvertise(cmd.Context(), dir, listenAddr, stunServer)
+				if err != nil {
+					return err
+				}
+				advertiseAddr = resolved
+				listenAddr = listener.Addr().String()
+				preBoundListener = listener
+				daemonSTUNServer = stunServer
+			}
+
 			if tok := os.Getenv(envInviteToken); tok != "" {
 				joinAddr := advertiseAddr
 				if joinAddr == "" {
@@ -120,6 +159,8 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				BackupDir:           backupDir,
 				ListenAddr:          listenAddr,
 				AdvertiseAddr:       advertiseAddr,
+				Listener:            preBoundListener,
+				STUNServer:          daemonSTUNServer,
 				ChunkSize:           chunkSize,
 				ScanInterval:        scanInterval,
 				HeartbeatInterval:   heartbeatInterval,
@@ -168,7 +209,38 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().BoolVar(&noCA, "no-ca", false, "Skip swarm CA generation; use pubkey-pin trust. Locks the swarm into pin mode for life. Requires --invite.")
 	cmd.Flags().StringVar(&maxStorage, "max-storage", "unlimited", "Cap on bytes stored locally for swarm peers; accepts k/m/g/t suffixes (e.g. 10g). 'unlimited' (default) places no cap; 0 disables storage entirely (refuse all chunks for others).")
 	cmd.Flags().IntVar(&redundancy, "redundancy", 1, "Number of unique storage peers each chunk is placed on (must be >= 1)")
+	cmd.Flags().StringVar(&stunServer, "stun-server", defaultSTUNServer, "host:port of the STUN server queried when --advertise-addr=auto, also used by the periodic refresh loop that broadcasts AddressChanged on detected NAT IP changes")
 	return cmd
+}
+
+// resolveAutoAdvertise pre-binds the QUIC listener at listenAddr, queries
+// stunServer for the externally-routable host, and combines the result
+// with the bound port.
+func resolveAutoAdvertise(ctx context.Context, dataDir, listenAddr, stunServer string) (string, *bsquic.Listener, error) {
+	if stunServer == "" {
+		return "", nil, fmt.Errorf("--advertise-addr=auto requires --stun-server")
+	}
+	id, _, err := node.Ensure(dataDir)
+	if err != nil {
+		return "", nil, fmt.Errorf("ensure identity: %w", err)
+	}
+	listener, err := listenFunc(listenAddr, id.PrivateKey, nil, nil)
+	if err != nil {
+		return "", nil, fmt.Errorf("listen: %w", err)
+	}
+	_, port, splitErr := net.SplitHostPort(listener.Addr().String())
+	if splitErr != nil {
+		_ = listener.Close()
+		return "", nil, fmt.Errorf("split listen addr: %w", splitErr)
+	}
+	dctx, cancel := context.WithTimeout(ctx, stunResolveTimeout)
+	defer cancel()
+	host, err := cliDiscoverFunc(dctx, stunServer)
+	if err != nil {
+		_ = listener.Close()
+		return "", nil, fmt.Errorf("nat: resolve auto advertise: %w", err)
+	}
+	return net.JoinHostPort(host, port), listener, nil
 }
 
 // maybeAutoJoin runs the bootstrap join handshake when peers.db is empty.

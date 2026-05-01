@@ -818,3 +818,111 @@ func TestRun_FounderWithBackupDir_EntersScanLoop(t *testing.T) {
 		t.Errorf("scan loop never ticked — daemon did not enter scan loop with empty peers.db.\nLogs:\n%s", w.String())
 	}
 }
+
+func TestRun_RejectsNegativeNATRefreshInterval(t *testing.T) {
+	err := Run(context.Background(), Options{
+		DataDir:            t.TempDir(),
+		ListenAddr:         "127.0.0.1:0",
+		NATRefreshInterval: -time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "nat refresh interval") {
+		t.Fatalf("err = %v, want negative-NAT-refresh rejection", err)
+	}
+}
+
+func TestRun_RejectsNegativeDurationOptions(t *testing.T) {
+	cases := []struct {
+		name string
+		opts Options
+		want string
+	}{
+		{"chunk ttl", Options{ChunkTTL: -time.Second}, "chunk TTL"},
+		{"renew interval", Options{ChunkTTL: time.Hour, RenewInterval: -time.Second}, "renew interval"},
+		{"expire interval", Options{ExpireInterval: -time.Second}, "expire interval"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.opts.DataDir = t.TempDir()
+			tc.opts.ListenAddr = "127.0.0.1:0"
+			err := Run(context.Background(), tc.opts)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRun_STUNServerSpawnsLoopWithAdvertiseAddrPort(t *testing.T) {
+	prevDiscover := natDiscoverFunc
+	t.Cleanup(func() { natDiscoverFunc = prevDiscover })
+	var calls atomic.Int32
+	natDiscoverFunc = func(_ context.Context, _ string) (string, error) {
+		calls.Add(1)
+		return "203.0.113.7", nil
+	}
+	prevBC := broadcastAddressChangedFunc
+	t.Cleanup(func() { broadcastAddressChangedFunc = prevBC })
+	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, _ string) error {
+		return nil
+	}
+
+	w := &syncWriter{}
+	captureSlog(t, w)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			DataDir:            t.TempDir(),
+			ListenAddr:         "127.0.0.1:0",
+			AdvertiseAddr:      "203.0.113.99:7777",
+			STUNServer:         "stun.example:3478",
+			NATRefreshInterval: 50 * time.Millisecond,
+			Progress:           io.Discard,
+		})
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && calls.Load() < 1 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not exit within 3s of cancel")
+	}
+	if got := calls.Load(); got < 1 {
+		t.Errorf("natDiscoverFunc never invoked: calls=%d", got)
+	}
+}
+
+func TestRun_STUNServerFallsBackToListenAddrWhenAdvertiseEmpty(t *testing.T) {
+	prevDiscover := natDiscoverFunc
+	t.Cleanup(func() { natDiscoverFunc = prevDiscover })
+	natDiscoverFunc = func(_ context.Context, _ string) (string, error) {
+		return "203.0.113.7", nil
+	}
+	prevBC := broadcastAddressChangedFunc
+	t.Cleanup(func() { broadcastAddressChangedFunc = prevBC })
+	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, _ string) error {
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			DataDir:            t.TempDir(),
+			ListenAddr:         "127.0.0.1:0",
+			STUNServer:         "stun.example:3478",
+			NATRefreshInterval: 50 * time.Millisecond,
+			Progress:           io.Discard,
+		})
+	}()
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not exit within 3s of cancel")
+	}
+}

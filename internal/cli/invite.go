@@ -21,6 +21,7 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 		tokenOut      string
 		wait          time.Duration
 		advertiseAddr string
+		stunServer    string
 	)
 	cmd := &cobra.Command{
 		Use:   "invite",
@@ -46,16 +47,35 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 			if advertiseAddr == "" {
 				advertiseAddr = os.Getenv(envAdvertiseAddr)
 			}
-			if advertiseAddr != "" {
+			isAuto := advertiseAddr == advertiseAddrAuto
+			if !isAuto && advertiseAddr != "" {
 				if _, _, err := net.SplitHostPort(advertiseAddr); err != nil {
 					return fmt.Errorf("--advertise-addr %q: %w", advertiseAddr, err)
 				}
 			}
 
 			var listenAddr string
-			if advertiseAddr != "" {
+			switch {
+			case isAuto:
+				rawListen, err := readListenAddrWithWait(cmd.Context(), dir, wait)
+				if err != nil {
+					if errors.Is(err, daemon.ErrNoRunningDaemon) {
+						return fmt.Errorf("invite: %w (start the daemon first via `run`)", err)
+					}
+					return fmt.Errorf("read listen.addr: %w", err)
+				}
+				_, port, splitErr := net.SplitHostPort(rawListen)
+				if splitErr != nil {
+					return fmt.Errorf("parse listen.addr %q: %w", rawListen, splitErr)
+				}
+				host, autoErr := resolveAutoHost(cmd.Context(), stunServer)
+				if autoErr != nil {
+					return autoErr
+				}
+				listenAddr = net.JoinHostPort(host, port)
+			case advertiseAddr != "":
 				listenAddr = advertiseAddr
-			} else {
+			default:
 				listenAddr, err = readListenAddrWithWait(cmd.Context(), dir, wait)
 				if err != nil {
 					if errors.Is(err, daemon.ErrNoRunningDaemon) {
@@ -85,8 +105,24 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&tokenOut, "token-out", "", "Write the printed token to this file (atomic)")
 	cmd.Flags().DurationVar(&wait, "wait", 0, "Poll for the daemon's listen.addr to appear, up to this duration (0 = fail-fast)")
-	cmd.Flags().StringVar(&advertiseAddr, "advertise-addr", "", "Externally-routable host:port to embed in the token; falls back to $BACKUPSWARM_ADVERTISE_ADDR. Skips the listen.addr read.")
+	cmd.Flags().StringVar(&advertiseAddr, "advertise-addr", "", "Externally-routable host:port to embed in the token; falls back to $BACKUPSWARM_ADVERTISE_ADDR. Set to 'auto' to discover the host via STUN and combine with the daemon's bound port.")
+	cmd.Flags().StringVar(&stunServer, "stun-server", defaultSTUNServer, "host:port of the STUN server queried when --advertise-addr=auto")
 	return cmd
+}
+
+// resolveAutoHost performs a single STUN lookup against stunServer with a
+// bounded deadline and returns the discovered host (no port).
+func resolveAutoHost(ctx context.Context, stunServer string) (string, error) {
+	if stunServer == "" {
+		return "", fmt.Errorf("--advertise-addr=auto requires --stun-server")
+	}
+	dctx, cancel := context.WithTimeout(ctx, stunResolveTimeout)
+	defer cancel()
+	host, err := cliDiscoverFunc(dctx, stunServer)
+	if err != nil {
+		return "", fmt.Errorf("nat: resolve auto advertise: %w", err)
+	}
+	return host, nil
 }
 
 // readListenAddrWithWait reads listen.addr, polling up to wait when absent.

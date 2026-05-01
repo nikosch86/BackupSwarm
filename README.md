@@ -106,6 +106,25 @@ docker run --rm \
     run --invite
 ```
 
+#### Auto-discovered public IP via STUN
+
+Pass `--advertise-addr auto` (or `BACKUPSWARM_ADVERTISE_ADDR=auto`) to
+`run` or `invite` to resolve the externally-routable host via a STUN
+binding request and combine it with the bound listener port.
+`--stun-server <host:port>` selects the server (default
+`stun.l.google.com:19302`). When `auto` is in effect on `run`, the daemon
+also re-queries STUN periodically (default 5 minutes) and broadcasts an
+`AddressChanged` announcement to live peers when the public IP changes.
+
+```bash
+# Founder discovers its public IP via STUN at startup and on every refresh.
+docker run --rm \
+    -v bsw-data:/data \
+    -p 7777:7777/udp \
+    ghcr.io/nikosch86/backupswarm:latest \
+    run --invite --listen 0.0.0.0:7777 --advertise-addr auto
+```
+
 #### UDP buffer warning (optional)
 
 quic-go logs `failed to sufficiently increase receive buffer size` on

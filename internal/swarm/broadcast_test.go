@@ -273,6 +273,132 @@ func TestBroadcastPeerJoined_ContinuesPastDeadConn(t *testing.T) {
 	}
 }
 
+func TestBroadcastAddressChanged_FansOutToAllConns(t *testing.T) {
+	rig := setupQuicPair(t, 3)
+	subjPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("subject key: %v", err)
+	}
+
+	type recv struct {
+		ann protocol.PeerAnnouncement
+		err error
+	}
+	results := make(chan recv, len(rig.subSide))
+	var wg sync.WaitGroup
+	for _, sub := range rig.subSide {
+		sub := sub
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			s, err := sub.AcceptStream(ctx)
+			if err != nil {
+				results <- recv{err: err}
+				return
+			}
+			defer func() { _ = s.Close() }()
+			mt, err := protocol.ReadMessageType(s)
+			if err != nil {
+				results <- recv{err: err}
+				return
+			}
+			if mt != protocol.MsgPeerAnnouncement {
+				results <- recv{err: errFromString("unexpected message type")}
+				return
+			}
+			ann, err := protocol.ReadPeerAnnouncement(s, 1<<10)
+			results <- recv{ann: ann, err: err}
+		}()
+	}
+
+	if err := swarm.BroadcastAddressChanged(context.Background(), rig.introSide, subjPub, "203.0.113.7:9001"); err != nil {
+		t.Fatalf("BroadcastAddressChanged: %v", err)
+	}
+	wg.Wait()
+	close(results)
+
+	for r := range results {
+		if r.err != nil {
+			t.Errorf("subscriber recv: %v", r.err)
+			continue
+		}
+		if r.ann.Kind != protocol.AnnounceAddressChanged {
+			t.Errorf("kind = %v, want AddressChanged", r.ann.Kind)
+		}
+		if r.ann.Addr != "203.0.113.7:9001" {
+			t.Errorf("addr = %q, want %q", r.ann.Addr, "203.0.113.7:9001")
+		}
+		var wantPub [32]byte
+		copy(wantPub[:], subjPub)
+		if r.ann.PubKey != wantPub {
+			t.Errorf("pubkey mismatch")
+		}
+	}
+}
+
+func TestBroadcastAddressChanged_RejectsEmptyAddr(t *testing.T) {
+	subjPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("subject key: %v", err)
+	}
+	if err := swarm.BroadcastAddressChanged(context.Background(), nil, subjPub, ""); err == nil {
+		t.Fatal("BroadcastAddressChanged accepted empty addr")
+	}
+}
+
+func TestBroadcastAddressChanged_RejectsBadPubkey(t *testing.T) {
+	if err := swarm.BroadcastAddressChanged(context.Background(), nil, ed25519.PublicKey{0x01, 0x02}, "203.0.113.7:9001"); err == nil {
+		t.Fatal("BroadcastAddressChanged accepted short pubkey")
+	}
+}
+
+func TestBroadcastAddressChanged_FillsRandomID(t *testing.T) {
+	rig := setupQuicPair(t, 1)
+	subjPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("subject key: %v", err)
+	}
+
+	receive := func() protocol.PeerAnnouncement {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s, err := rig.subSide[0].AcceptStream(ctx)
+		if err != nil {
+			t.Fatalf("AcceptStream: %v", err)
+		}
+		defer func() { _ = s.Close() }()
+		if _, err := protocol.ReadMessageType(s); err != nil {
+			t.Fatalf("ReadMessageType: %v", err)
+		}
+		ann, err := protocol.ReadPeerAnnouncement(s, 1<<10)
+		if err != nil {
+			t.Fatalf("ReadPeerAnnouncement: %v", err)
+		}
+		return ann
+	}
+
+	got := make([]protocol.PeerAnnouncement, 2)
+	for i := range got {
+		ch := make(chan protocol.PeerAnnouncement, 1)
+		go func() { ch <- receive() }()
+		if err := swarm.BroadcastAddressChanged(context.Background(), rig.introSide, subjPub, "203.0.113.7:9001"); err != nil {
+			t.Fatalf("BroadcastAddressChanged %d: %v", i, err)
+		}
+		got[i] = <-ch
+	}
+	for i, ann := range got {
+		var zero [protocol.AnnouncementIDSize]byte
+		if ann.ID == zero {
+			t.Errorf("broadcast %d: ID is zero", i)
+		}
+	}
+	if got[0].ID == got[1].ID {
+		t.Error("two broadcasts emitted the same ID")
+	}
+}
+
 func errFromString(s string) error { return &simpleErr{s} }
 
 type simpleErr struct{ s string }

@@ -13,6 +13,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -192,6 +193,12 @@ type Options struct {
 	NoStorage bool
 	// Redundancy is the per-chunk peer count used by ScanOnce.
 	Redundancy int
+	// STUNServer is the host:port of the STUN server queried by the NAT
+	// refresh loop. Empty disables the loop entirely.
+	STUNServer string
+	// NATRefreshInterval is the period between STUN binding requests. Zero
+	// defaults to 5 minutes when STUNServer is set.
+	NATRefreshInterval time.Duration
 }
 
 const (
@@ -203,6 +210,7 @@ const (
 	defaultGracePeriod         = 24 * time.Hour
 	defaultChunkTTL            = 30 * 24 * time.Hour
 	defaultExpireInterval      = 1 * time.Hour
+	defaultNATRefreshInterval  = 5 * time.Minute
 
 	indexFileName = "index.db"
 	storeDirName  = "chunks"
@@ -256,6 +264,12 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	if opts.DialTimeout == 0 {
 		opts.DialTimeout = defaultDialTimeout
+	}
+	if opts.NATRefreshInterval < 0 {
+		return fmt.Errorf("nat refresh interval must be non-negative, got %v", opts.NATRefreshInterval)
+	}
+	if opts.STUNServer != "" && opts.NATRefreshInterval == 0 {
+		opts.NATRefreshInterval = defaultNATRefreshInterval
 	}
 
 	id, _, err := node.Ensure(opts.DataDir)
@@ -538,6 +552,34 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer cleanupWG.Wait()
 	defer cleanupCancel()
+
+	natCtx, natCancel := context.WithCancel(ctx)
+	defer natCancel()
+	var natWG sync.WaitGroup
+	defer natWG.Wait()
+	if opts.STUNServer != "" {
+		host, port, splitErr := net.SplitHostPort(opts.AdvertiseAddr)
+		if splitErr != nil {
+			_, port, splitErr = net.SplitHostPort(listener.Addr().String())
+			if splitErr != nil {
+				return fmt.Errorf("nat loop: split listen addr: %w", splitErr)
+			}
+			host = ""
+		}
+		natWG.Add(1)
+		go func() {
+			defer natWG.Done()
+			runNATLoop(natCtx, natLoopOptions{
+				server:      opts.STUNServer,
+				interval:    opts.NATRefreshInterval,
+				perProbe:    perProbeTimeout(opts.NATRefreshInterval),
+				port:        port,
+				pub:         id.PublicKey,
+				initialHost: host,
+				connsFn:     connSet.Snapshot,
+			})
+		}()
+	}
 
 	if opts.BackupDir == "" {
 		slog.InfoContext(ctx, "daemon starting (storage-only)",
