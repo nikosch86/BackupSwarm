@@ -153,8 +153,8 @@ func TestBootstrap_EndToEnd(t *testing.T) {
 	if acceptedPeer.Addr != joinerListen {
 		t.Errorf("AcceptJoin addr = %q, want %q", acceptedPeer.Addr, joinerListen)
 	}
-	if acceptedPeer.Role != peers.RolePeer {
-		t.Errorf("AcceptJoin role = %v, want RolePeer", acceptedPeer.Role)
+	if acceptedPeer.Role != peers.RoleStorage {
+		t.Errorf("AcceptJoin role = %v, want RoleStorage", acceptedPeer.Role)
 	}
 	got, err := rig.introducerPeerList.Get(rig.joinerPub)
 	if err != nil {
@@ -163,8 +163,8 @@ func TestBootstrap_EndToEnd(t *testing.T) {
 	if got.Addr != joinerListen {
 		t.Errorf("introducer saw joiner addr %q, want %q", got.Addr, joinerListen)
 	}
-	if got.Role != peers.RolePeer {
-		t.Errorf("introducer's stored joiner role = %v, want RolePeer", got.Role)
+	if got.Role != peers.RoleStorage {
+		t.Errorf("introducer's stored joiner role = %v, want RoleStorage", got.Role)
 	}
 
 	if !bytes.Equal(result.Introducer.PubKey, rig.introducerPub) {

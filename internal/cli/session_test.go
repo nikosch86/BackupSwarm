@@ -56,6 +56,26 @@ func TestOpenPeerSession_PeersDirNotADir(t *testing.T) {
 	}
 }
 
+// TestOpenPeerSession_NodeEnsureFails asserts a node.Ensure failure
+// surfaces as the "ensure identity" wrap. The data dir's parent is a
+// regular file, so MkdirAll inside Save returns ENOTDIR.
+func TestOpenPeerSession_NodeEnsureFails(t *testing.T) {
+	root := t.TempDir()
+	blocker := filepath.Join(root, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	dir := filepath.Join(blocker, "node")
+
+	_, err := openPeerSession(dir)
+	if err == nil {
+		t.Fatal("openPeerSession against file-parent returned nil error")
+	}
+	if !strings.Contains(err.Error(), "ensure identity") {
+		t.Errorf("err = %q, want 'ensure identity' wrap", err)
+	}
+}
+
 // TestWithTimeout_Disabled asserts withTimeout(0) returns the parent ctx and a no-op cancel.
 func TestWithTimeout_Disabled(t *testing.T) {
 	parent, parentCancel := context.WithCancel(context.Background())

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -269,6 +270,25 @@ func TestSaveNodeCert_FailsWhenCertPathIsDir(t *testing.T) {
 	}
 	if err := SaveNodeCert(dir, []byte{0x30, 0x82, 0x00, 0x00}); err == nil {
 		t.Error("SaveNodeCert succeeded when node cert path is a directory")
+	}
+}
+
+// TestSaveNodeCert_ChmodFails exercises the chmod-data-dir error wrap
+// by passing /proc/self/fd: MkdirAll is a no-op (path exists) but
+// chmod on /proc paths returns EPERM for unprivileged callers.
+func TestSaveNodeCert_ChmodFails(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("/proc-based chmod fault injection is Linux-only")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses /proc chmod restrictions")
+	}
+	err := SaveNodeCert("/proc/self/fd", []byte{0x30})
+	if err == nil {
+		t.Fatal("SaveNodeCert against /proc/self/fd returned nil error")
+	}
+	if !errors.Is(err, os.ErrPermission) && !strings.Contains(err.Error(), "chmod data dir") {
+		t.Errorf("err = %v, want 'chmod data dir' wrap", err)
 	}
 }
 

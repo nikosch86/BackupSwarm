@@ -268,7 +268,7 @@ func TestDoJoin_WriteRequestFailure(t *testing.T) {
 // TestHandleJoinStream_PostTypeByte_RoundTrip exercises HandleJoinStream
 // directly with a pre-built JoinRequest body (no MsgJoinRequest type byte
 // — the dispatcher consumes it before calling the handler) and asserts
-// the persisted peer carries the joiner's pubkey, addr, and RolePeer.
+// the persisted peer carries the joiner's pubkey, addr, and RoleStorage.
 func TestHandleJoinStream_PostTypeByte_RoundTrip(t *testing.T) {
 	rig := newInternalRig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -318,8 +318,8 @@ func TestHandleJoinStream_PostTypeByte_RoundTrip(t *testing.T) {
 	if got.peer.Addr != "192.0.2.1:9000" {
 		t.Errorf("addr = %q, want %q", got.peer.Addr, "192.0.2.1:9000")
 	}
-	if got.peer.Role != peers.RolePeer {
-		t.Errorf("role = %v, want RolePeer", got.peer.Role)
+	if got.peer.Role != peers.RoleStorage {
+		t.Errorf("role = %v, want RoleStorage", got.peer.Role)
 	}
 }
 

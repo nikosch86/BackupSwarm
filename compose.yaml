@@ -2,7 +2,8 @@
 # peer dial.
 #
 #   * node-b is the founder daemon, running `run --invite --token-out
-#     /shared/token-a.txt`.
+#     /shared/token-a.txt --backup-dir /backup-b` so it scans its own
+#     payload and ships chunks to the joiners (founder-as-source).
 #   * node-a joins via that token and continues as a backup source.
 #   * inviter-c / inviter-d are oneshots that run `invite` against
 #     node-b's data dir to write fresh tokens to /shared.
@@ -21,6 +22,7 @@ services:
     image: busybox:1.37
     volumes:
       - backup-src:/backup
+      - backup-src-b:/backup-b
       - shared-token:/shared
       - node-a-data:/data-a
       - node-b-data:/data-b
@@ -35,8 +37,11 @@ services:
         printf 'hello swarm\n' > /backup/hello.txt
         printf 'nested greeting\n' > /backup/nested/greet.txt
         dd if=/dev/urandom of=/backup/nested/sub/big.bin bs=1M count=3 status=none
-        chown -R 65532:65532 /backup /shared /data-a /data-b /data-c /data-d
-        echo "prep done: seeded /backup and chowned volumes to nonroot"
+        mkdir -p /backup-b/from-founder
+        printf 'founder backup payload\n' > /backup-b/from-founder/note.txt
+        dd if=/dev/urandom of=/backup-b/from-founder/blob.bin bs=1M count=2 status=none
+        chown -R 65532:65532 /backup /backup-b /shared /data-a /data-b /data-c /data-d
+        echo "prep done: seeded /backup and /backup-b and chowned volumes to nonroot"
     restart: "no"
 
   node-b:
@@ -47,6 +52,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - node-b-data:/data
+      - backup-src-b:/backup-b:ro
       - shared-token:/shared
     networks:
       swarm:
@@ -60,6 +66,10 @@ services:
       - --invite
       - --token-out
       - /shared/token-a.txt
+      - --backup-dir
+      - /backup-b
+      - --scan-interval
+      - 5s
 
   node-a:
     build: .
@@ -209,4 +219,5 @@ volumes:
   node-c-data:
   node-d-data:
   backup-src:
+  backup-src-b:
   shared-token:

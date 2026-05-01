@@ -43,6 +43,10 @@ func (s State) String() string {
 	}
 }
 
+// OnRecoverFunc is invoked when a peer transitions from a lost state
+// (StateUnreachable past grace) back to StateReachable.
+type OnRecoverFunc func(pub []byte)
+
 // ReachabilityMap is the per-peer reachability state, keyed by hex(pubkey).
 type ReachabilityMap struct {
 	mu               sync.Mutex
@@ -53,6 +57,7 @@ type ReachabilityMap struct {
 	now              func() time.Time
 	unreachableSince map[string]time.Time
 	lostEnabled      bool
+	onRecover        OnRecoverFunc
 }
 
 // NewReachabilityMap returns a map using DefaultMissThreshold.
@@ -94,6 +99,14 @@ func NewReachabilityMapWithGrace(missThreshold int, grace time.Duration, now fun
 	}
 }
 
+// SetOnRecover installs the lost→reachable callback. Pass nil to clear.
+// The callback fires after the state transition, outside the map's lock.
+func (r *ReachabilityMap) SetOnRecover(fn OnRecoverFunc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onRecover = fn
+}
+
 // Mark records s for pub. StateUnknown removes the entry.
 func (r *ReachabilityMap) Mark(pub []byte, s State) {
 	if len(pub) == 0 {
@@ -101,17 +114,20 @@ func (r *ReachabilityMap) Mark(pub []byte, s State) {
 	}
 	key := hex.EncodeToString(pub)
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if s == StateUnknown {
 		delete(r.states, key)
 		delete(r.misses, key)
 		r.clearUnreachableSince(key)
+		r.mu.Unlock()
 		return
 	}
 	prev := r.states[key]
+	cb := r.captureRecoverCallback(key, prev, s)
 	r.states[key] = s
 	delete(r.misses, key)
 	r.maintainUnreachableSince(key, prev, s)
+	r.mu.Unlock()
+	fireRecover(cb, pub)
 }
 
 // RecordHeartbeat updates state on heartbeat outcome.
@@ -121,22 +137,55 @@ func (r *ReachabilityMap) RecordHeartbeat(pub []byte, ok bool) {
 	}
 	key := hex.EncodeToString(pub)
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	prev := r.states[key]
+	var cb OnRecoverFunc
 	if ok {
+		cb = r.captureRecoverCallback(key, prev, StateReachable)
 		r.states[key] = StateReachable
 		delete(r.misses, key)
 		r.maintainUnreachableSince(key, prev, StateReachable)
+		r.mu.Unlock()
+		fireRecover(cb, pub)
 		return
 	}
 	r.misses[key]++
 	if r.misses[key] >= r.missThreshold {
 		r.states[key] = StateUnreachable
 		r.maintainUnreachableSince(key, prev, StateUnreachable)
+		r.mu.Unlock()
 		return
 	}
 	r.states[key] = StateSuspect
 	r.maintainUnreachableSince(key, prev, StateSuspect)
+	r.mu.Unlock()
+}
+
+// captureRecoverCallback returns r.onRecover when the transition exits a
+// lost state (Unreachable past grace) into Reachable; nil otherwise.
+// Caller holds r.mu.
+func (r *ReachabilityMap) captureRecoverCallback(key string, prev, next State) OnRecoverFunc {
+	if !r.lostEnabled || r.onRecover == nil {
+		return nil
+	}
+	if next != StateReachable || prev != StateUnreachable {
+		return nil
+	}
+	since, ok := r.unreachableSince[key]
+	if !ok {
+		return nil
+	}
+	if r.now().Sub(since) < r.gracePeriod {
+		return nil
+	}
+	return r.onRecover
+}
+
+// fireRecover dispatches cb with a defensive copy of pub. nil cb is a no-op.
+func fireRecover(cb OnRecoverFunc, pub []byte) {
+	if cb == nil {
+		return
+	}
+	cb(bytes.Clone(pub))
 }
 
 // maintainUnreachableSince updates the grace timer; caller holds r.mu.

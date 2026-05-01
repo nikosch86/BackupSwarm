@@ -516,6 +516,23 @@ func Run(ctx context.Context, opts Options) error {
 	defer renewWG.Wait()
 	defer renewCancel()
 
+	cleanupCtx, cleanupCancel := context.WithCancel(ctx)
+	var cleanupWG sync.WaitGroup
+	if opts.BackupDir != "" {
+		cleanupCh := make(chan []byte, defaultCleanupChannelDepth)
+		cleanupWG.Add(1)
+		go func() {
+			defer cleanupWG.Done()
+			runCleanupLoop(cleanupCtx, cleanupLoopOptions{
+				ch:      cleanupCh,
+				cleanFn: makeCleanupFn(idx, connSet, opts.Redundancy, opts.Progress),
+			})
+		}()
+		reach.SetOnRecover(makeRecoverDispatcher(cleanupCh))
+	}
+	defer cleanupWG.Wait()
+	defer cleanupCancel()
+
 	if opts.BackupDir == "" {
 		slog.InfoContext(ctx, "daemon starting (storage-only)",
 			"node_id", id.ShortID(),
@@ -533,18 +550,19 @@ func Run(ctx context.Context, opts Options) error {
 	)
 	fmt.Fprintf(opts.Progress, "daemon starting: mode=%s listen=%s known_peers=%d\n", modeName(mode), opts.ListenAddr, len(dialablePeers))
 
-	if len(dialablePeers) == 0 {
-		return waitForServe(ctx, serveErrCh)
-	}
-
-	if err := dialAllPeers(ctx, dialer, dialablePeers); err != nil {
-		return err
+	if len(dialablePeers) > 0 {
+		if err := dialAllPeers(ctx, dialer, dialablePeers); err != nil {
+			return err
+		}
 	}
 
 	connsFn := func() []*bsquic.Conn {
 		return liveStorageConns(connSet, peerStore)
 	}
-	if len(connsFn()) == 0 {
+	// Restore and purge are one-shots that need a storage peer immediately;
+	// first-backup and reconcile enter the scan loop and pick up joiners
+	// from the inbound listener on the next tick.
+	if (mode == ModeRestore || mode == ModePurge) && len(connsFn()) == 0 {
 		return waitForServe(ctx, serveErrCh)
 	}
 

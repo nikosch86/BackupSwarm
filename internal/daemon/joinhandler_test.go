@@ -313,8 +313,8 @@ func TestDaemon_BroadcastsPeerJoinedToOtherConns(t *testing.T) {
 			if got.Addr != "192.0.2.77:9000" {
 				t.Errorf("forwarded addr = %q, want %q", got.Addr, "192.0.2.77:9000")
 			}
-			if got.Role != peers.RolePeer {
-				t.Errorf("forwarded role = %v, want RolePeer", got.Role)
+			if got.Role != peers.RoleStorage {
+				t.Errorf("forwarded role = %v, want RoleStorage", got.Role)
 			}
 			return
 		}

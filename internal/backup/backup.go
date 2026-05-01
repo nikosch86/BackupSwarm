@@ -432,6 +432,15 @@ func SendPing(ctx context.Context, conn *bsquic.Conn) error {
 	return sendPing(ctx, bsquicConnAdapter{c: conn})
 }
 
+// SendDeleteChunk asks conn to remove its blob for hash. The owner is
+// the conn's TLS-authenticated pubkey; no per-message auth is needed.
+func SendDeleteChunk(ctx context.Context, conn *bsquic.Conn, hash [32]byte) error {
+	return sendDeleteChunk(ctx, bsquicConnAdapter{c: conn}, hash)
+}
+
+// IsPeerNotFound reports whether err carries the "not_found" wire code.
+func IsPeerNotFound(err error) bool { return isPeerNotFound(err) }
+
 // sendPing opens a MsgPing stream and reads the OK/Err response.
 func sendPing(ctx context.Context, conn streamOpener) error {
 	s, err := conn.OpenStream(ctx)

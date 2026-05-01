@@ -90,6 +90,51 @@ func TestWriteTokenFile_CloseErrorCleansUp(t *testing.T) {
 	assertNoOrphanedTokenTemps(t, dir)
 }
 
+// TestWriteTokenFile_TempCreateFails asserts a createTokenTempFunc
+// error surfaces as the "create temp" wrap.
+func TestWriteTokenFile_TempCreateFails(t *testing.T) {
+	injected := errors.New("synthetic create-temp failure")
+	withCreateTokenTempFunc(t, func(string, string) (tokenTempFile, error) {
+		return nil, injected
+	})
+
+	err := writeTokenFile(filepath.Join(t.TempDir(), "token.txt"), "tok")
+	if err == nil {
+		t.Fatal("writeTokenFile with failing temp create returned nil error")
+	}
+	if !errors.Is(err, injected) {
+		t.Errorf("err = %v, want chain to contain injected error", err)
+	}
+	if !strings.Contains(err.Error(), "create temp") {
+		t.Errorf("err = %q, want 'create temp' wrap", err)
+	}
+}
+
+// TestWriteTokenFile_RenameFails asserts an os.Rename failure surfaces
+// as the "rename" wrap. The temp file is created in tempDir but the
+// target path is a directory, so rename collides on a non-empty dir.
+func TestWriteTokenFile_RenameFails(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "token.txt")
+	// Make the rename target a non-empty directory: rename(file, dir)
+	// fails with EISDIR/ENOTEMPTY across Linux filesystems.
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "occupant"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed occupant: %v", err)
+	}
+
+	err := writeTokenFile(target, "tok")
+	if err == nil {
+		t.Fatal("writeTokenFile into non-empty-dir target returned nil error")
+	}
+	if !strings.Contains(err.Error(), "rename") {
+		t.Errorf("err = %q, want 'rename' wrap", err)
+	}
+	assertNoOrphanedTokenTemps(t, dir)
+}
+
 func assertNoOrphanedTokenTemps(t *testing.T, dir string) {
 	t.Helper()
 	entries, err := os.ReadDir(dir)

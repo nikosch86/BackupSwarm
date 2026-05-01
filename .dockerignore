@@ -4,5 +4,5 @@ coverage.out
 .git/
 .gitignore
 Dockerfile
-docker-compose.yml
+compose.yaml
 .dockerignore

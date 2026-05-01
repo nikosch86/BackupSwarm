@@ -130,6 +130,59 @@ func TestInviteCmd_TokenOut_WritesFile(t *testing.T) {
 	}
 }
 
+// TestInviteCmd_EnsureIdentityFails asserts a node.Ensure failure
+// surfaces as the "ensure identity" wrap. The data dir's parent is a
+// regular file, so Ensure -> Save -> MkdirAll returns ENOTDIR.
+func TestInviteCmd_EnsureIdentityFails(t *testing.T) {
+	root := t.TempDir()
+	blocker := filepath.Join(root, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	dataDir := filepath.Join(blocker, "node")
+
+	cmd := NewRootCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--data-dir", dataDir, "invite"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("invite against file-parent data dir returned nil error")
+	}
+	if !strings.Contains(err.Error(), "ensure identity") {
+		t.Errorf("err = %q, want 'ensure identity' wrap", err)
+	}
+}
+
+// TestInviteCmd_TokenOutWriteFails asserts a writeTokenFile failure
+// surfaces as the "write token file" wrap. The --token-out target's
+// parent is a regular file, so the temp-file creation fails.
+func TestInviteCmd_TokenOutWriteFails(t *testing.T) {
+	dataDir := t.TempDir()
+	const fakeAddr = "127.0.0.1:9999"
+	if err := daemon.WriteListenAddr(dataDir, fakeAddr); err != nil {
+		t.Fatalf("seed listen.addr: %v", err)
+	}
+	tokenRoot := t.TempDir()
+	blocker := filepath.Join(tokenRoot, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	tokenOut := filepath.Join(blocker, "token.txt")
+
+	cmd := NewRootCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--data-dir", dataDir, "invite", "--token-out", tokenOut})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("invite with file-parent --token-out returned nil error")
+	}
+	if !strings.Contains(err.Error(), "write token file") {
+		t.Errorf("err = %q, want 'write token file' wrap", err)
+	}
+}
+
 // TestInviteJoin_HappyPath drives the new split surface end-to-end:
 // `run --invite` boots a daemon and prints the founder token; `join`
 // consumes it. After both commands return, the joiner's peer store

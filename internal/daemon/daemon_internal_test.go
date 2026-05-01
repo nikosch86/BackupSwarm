@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -767,5 +768,53 @@ func TestMakeImmediateDialOnApplied_NoDialOnNonJoined(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if got := rig.accepts.Load(); got != 0 {
 		t.Errorf("rig accepts = %d, want 0 (non-Joined announcement must not dial)", got)
+	}
+}
+
+// TestRun_FounderWithBackupDir_EntersScanLoop asserts a daemon started
+// with BackupDir set but an empty peers.db enters the scan loop and
+// ticks at least once, witnessed by the "scan failed" log line.
+func TestRun_FounderWithBackupDir_EntersScanLoop(t *testing.T) {
+	dataDir := t.TempDir()
+	backupDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(backupDir, "f.bin"), make([]byte, 1<<10), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	w := &syncWriter{}
+	captureSlog(t, w)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			DataDir:      dataDir,
+			BackupDir:    backupDir,
+			ListenAddr:   "127.0.0.1:0",
+			ChunkSize:    1 << 20,
+			ScanInterval: 50 * time.Millisecond,
+			Progress:     io.Discard,
+		})
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(w.String(), "scan failed") {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not exit within 5s of cancel")
+	}
+
+	if !strings.Contains(w.String(), "scan failed") {
+		t.Errorf("scan loop never ticked — daemon did not enter scan loop with empty peers.db.\nLogs:\n%s", w.String())
 	}
 }

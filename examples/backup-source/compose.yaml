@@ -3,7 +3,7 @@
 
 services:
   backup-source:
-    image: ghcr.io/nikosch86/backupswarm:latest
+    image: ghcr.io/nikosch86/backupswarm:main-dev
     restart: unless-stopped
     environment:
       BACKUPSWARM_INVITE_TOKEN: "${BACKUPSWARM_INVITE_TOKEN:?must be set; see README.md}"

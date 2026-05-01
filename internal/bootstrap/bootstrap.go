@@ -164,7 +164,7 @@ func HandleJoinStream(ctx context.Context, stream io.ReadWriter, joinerPub ed255
 	peer := peers.Peer{
 		Addr:   addr,
 		PubKey: ed25519PubCopy(joinerPub),
-		Role:   peers.RolePeer,
+		Role:   peers.RoleStorage,
 	}
 	if err := store.Add(peer); err != nil {
 		return peers.Peer{}, fmt.Errorf("persist peer: %w", err)

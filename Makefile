@@ -22,7 +22,7 @@ TRIVY_SEVERITY := HIGH,CRITICAL
 GO           ?= go
 GOFLAGS      ?=
 
-.PHONY: all build test coverage coverage-report lint fmt fmt-fix vet check clean \
+.PHONY: all build test coverage coverage-report coverage-gaps lint fmt fmt-fix vet check clean \
         docker-build docker-run docker-compose-up docker-compose-down docker-compose-test \
         publish-dryrun \
         trivy-deps trivy-image security-scan story-done help \
@@ -48,12 +48,37 @@ coverage:
 	$(GO) test -race -count=1 -covermode=atomic -coverprofile=$(COVERAGE_OUT) $(COVERAGE_PKGS)
 	@total=$$($(GO) tool cover -func=$(COVERAGE_OUT) | awk '/^total:/ {print $$3}' | tr -d '%'); \
 	echo "Total coverage: $${total}%"; \
-	awk -v t="$${total}" -v min="$(COVERAGE_MIN)" 'BEGIN { if (t+0 < min+0) { printf "FAIL: coverage %.1f%% is below required %s%%\n", t, min; exit 1 } else { printf "OK: coverage %.1f%% meets %s%% target\n", t, min } }'
+	awk -v t="$${total}" -v min="$(COVERAGE_MIN)" 'BEGIN { if (t+0 < min+0) { printf "FAIL: coverage %.1f%% is below required %s%%\n", t, min; exit 1 } else { printf "OK: coverage %.1f%% meets %s%% target\n", t, min } }' \
+		|| { $(MAKE) -s coverage-gaps; exit 1; }
 
 ## coverage-report: print per-function coverage (requires coverage.out from `make coverage`)
 coverage-report:
 	@test -s $(COVERAGE_OUT) || { echo "no $(COVERAGE_OUT); run 'make coverage' first"; exit 1; }
 	$(GO) tool cover -func=$(COVERAGE_OUT)
+
+## coverage-gaps: list files below COVERAGE_MIN% (requires coverage.out from `make coverage`)
+coverage-gaps:
+	@test -s $(COVERAGE_OUT) || { echo "no $(COVERAGE_OUT); run 'make coverage' first"; exit 1; }
+	@gaps=$$(awk -v min=$(COVERAGE_MIN) ' \
+		NR > 1 && NF == 3 { \
+			p = index($$1, ":"); \
+			if (p == 0) next; \
+			f = substr($$1, 1, p - 1); \
+			s[f] += $$2; \
+			if ($$3 + 0 > 0) c[f] += $$2 \
+		} \
+		END { \
+			for (f in s) if (s[f] > 0) { \
+				pct = (c[f] / s[f]) * 100; \
+				if (pct < min + 0) printf "%6.2f%% %s\n", pct, f \
+			} \
+		}' $(COVERAGE_OUT) | sort -n); \
+	if [ -z "$$gaps" ]; then \
+		echo "all files meet the $(COVERAGE_MIN)% coverage gate"; \
+	else \
+		echo "files below $(COVERAGE_MIN)% coverage gate:"; \
+		echo "$$gaps"; \
+	fi
 
 ## fmt: check formatting (fails if any file needs gofmt)
 fmt:
@@ -119,8 +144,9 @@ publish-dryrun:
 ## docker-compose-test: end-to-end smoke test of the containerised 4-node swarm
 # Brings the swarm up detached and asserts: node-b accepted all three
 # joiners ("peer joined" >= 3), node-a backed up the seeded tree,
-# node-a observed both forwarded announcements ("applied announcement"
-# >= 2), and node-a dialed every announced peer ("dialed peer" >= 3).
+# node-b shipped its own backup payload (founder-as-source), node-a
+# observed both forwarded announcements ("applied announcement" >= 2),
+# and node-a dialed every announced peer ("dialed peer" >= 3).
 docker-compose-test:
 	docker compose up -d --build
 	@echo "waiting for node-b to accept all three joiners..."
@@ -141,6 +167,13 @@ docker-compose-test:
 	done
 	@docker compose logs node-a 2>/dev/null | grep -q 'backed up ' || \
 		{ echo "node-a never logged 'backed up'"; docker compose logs node-a; docker compose down -v; exit 1; }
+	@echo "waiting for node-b to ship its own payload (founder-as-source)..."
+	@for i in $$(seq 1 60); do \
+		if docker compose logs node-b 2>/dev/null | grep -q 'backed up '; then break; fi; \
+		sleep 1; \
+	done
+	@docker compose logs node-b 2>/dev/null | grep -q 'backed up ' || \
+		{ echo "node-b never logged 'backed up' — founder-as-source flow regressed"; docker compose logs node-b; docker compose down -v; exit 1; }
 	@echo "waiting for node-a to observe both forwarded PeerJoined announcements..."
 	@for i in $$(seq 1 90); do \
 		count=$$(docker compose logs node-a 2>/dev/null | grep -c '"msg":"applied announcement"'); \
@@ -163,7 +196,7 @@ docker-compose-test:
 		echo "node-a only logged $$count 'dialed peer' events; want >=3 (node-b at startup + node-c + node-d post-startup)"; \
 		docker compose logs node-a; docker compose down -v; exit 1; \
 	fi
-	@echo "docker-compose-test: 4-node swarm formed; node-a backed up the seeded tree, saw both forwarded announcements, and dialed each announced peer"
+	@echo "docker-compose-test: 4-node swarm formed; node-a backed up the seeded tree, node-b shipped its own payload, both saw forwarded announcements, and node-a dialed each announced peer"
 	docker compose down -v
 
 ## trivy-deps: scan source tree for vulnerable deps, secrets, and misconfigs (HIGH+CRITICAL)
