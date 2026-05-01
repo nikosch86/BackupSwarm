@@ -105,7 +105,11 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				return err
 			}
 			if tok := os.Getenv(envInviteToken); tok != "" {
-				if err := maybeAutoJoin(cmd.Context(), dir, tok, listenAddr, dialTimeout); err != nil {
+				joinAddr := advertiseAddr
+				if joinAddr == "" {
+					joinAddr = listenAddr
+				}
+				if err := maybeAutoJoin(cmd.Context(), dir, tok, joinAddr, dialTimeout); err != nil {
 					return err
 				}
 			}

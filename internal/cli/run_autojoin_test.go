@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"backupswarm/internal/peers"
 )
 
 // TestRunCmd_AutoJoinFromEnvVar boots a founder, sets the joiner's
@@ -126,6 +128,84 @@ func TestRunCmd_AutoJoinSkippedWhenAlreadyJoined(t *testing.T) {
 	cancelA()
 	if err := awaitDone(aDone, 10*time.Second); err != nil {
 		t.Fatalf("node A second run: %v", err)
+	}
+}
+
+// TestRunCmd_AutoJoin_AdvertiseAddrSentToFounder asserts the joiner sends
+// its --advertise-addr (not the 0.0.0.0:<port> bind address) when --listen
+// is omitted, so the founder's peers.db records a routable peer address.
+func TestRunCmd_AutoJoin_AdvertiseAddrSentToFounder(t *testing.T) {
+	dataB := filepath.Join(t.TempDir(), "node-b")
+	dataA := filepath.Join(t.TempDir(), "node-a")
+	addrB := reserveLocalUDPAddr(t)
+	joinerAdvertise := reserveLocalUDPAddr(t)
+
+	logBuf := &syncBuffer{}
+	captureSlog(t, logBuf)
+
+	overallCtx, cancelOverall := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelOverall()
+
+	bCtx, cancelB := context.WithCancel(overallCtx)
+	bDone := make(chan error, 1)
+	bCmd := NewRootCmd()
+	bOut := &syncBuffer{}
+	bCmd.SetOut(bOut)
+	bCmd.SetErr(io.Discard)
+	bCmd.SetArgs([]string{
+		"--data-dir", dataB,
+		"run",
+		"--listen", addrB,
+		"--invite",
+	})
+	go func() { bDone <- bCmd.ExecuteContext(bCtx) }()
+	tokStr := waitForToken(t, bOut, 10*time.Second)
+
+	t.Setenv("BACKUPSWARM_INVITE_TOKEN", tokStr)
+
+	aCtx, cancelA := context.WithCancel(overallCtx)
+	aDone := make(chan error, 1)
+	aCmd := NewRootCmd()
+	aOut := &syncBuffer{}
+	aCmd.SetOut(aOut)
+	aCmd.SetErr(io.Discard)
+	aCmd.SetArgs([]string{
+		"--data-dir", dataA,
+		"run",
+		"--advertise-addr", joinerAdvertise,
+	})
+	go func() { aDone <- aCmd.ExecuteContext(aCtx) }()
+
+	waitForLog(t, logBuf, "auto-joined peer", 15*time.Second)
+	waitForLog(t, logBuf, "peer joined", 5*time.Second)
+
+	cancelA()
+	if err := awaitDone(aDone, 10*time.Second); err != nil {
+		t.Fatalf("node A run: %v", err)
+	}
+	cancelB()
+	if err := awaitDone(bDone, 10*time.Second); err != nil {
+		t.Fatalf("node B run: %v", err)
+	}
+
+	bStore, err := peers.OpenReadOnly(filepath.Join(dataB, peers.DefaultFilename))
+	if err != nil {
+		t.Fatalf("open founder peers.db: %v", err)
+	}
+	defer func() { _ = bStore.Close() }()
+	list, err := bStore.List()
+	if err != nil {
+		t.Fatalf("list founder peers: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("founder peers.db: want exactly 1 peer (the joiner), got %d: %v", len(list), list)
+	}
+	got := list[0].Addr
+	if strings.HasPrefix(got, "0.0.0.0:") {
+		t.Errorf("founder peers.db recorded bind addr %q; want advertise addr %q", got, joinerAdvertise)
+	}
+	if got != joinerAdvertise {
+		t.Errorf("founder peers.db Addr = %q, want %q", got, joinerAdvertise)
 	}
 }
 

@@ -91,6 +91,11 @@ must be the externally-routable one, not the bound listener. Pass
 the bound address is irrelevant. `BACKUPSWARM_ADVERTISE_ADDR` is read as
 a fallback when the flag is empty.
 
+The same flag also controls the address a joiner reports to the founder
+during the auto-join handshake — set it on the joiner side too when the
+joiner is reachable at a different address than its bound listener, so
+the founder's peers.db records a routable peer address.
+
 ```bash
 # Founder behind NAT, port-forwarded as 203.0.113.7:7777 → container:7777
 docker run --rm \
