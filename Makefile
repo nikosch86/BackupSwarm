@@ -149,13 +149,13 @@ publish-dryrun:
 # and node-a dialed every announced peer ("dialed peer" >= 3).
 docker-compose-test:
 	docker compose up -d --build
-	@echo "verifying image's BACKUPSWARM_LISTEN default feeds --listen..."
+	@echo "verifying --port default of 7777 binds 0.0.0.0:7777..."
 	@for i in $$(seq 1 30); do \
 		if docker compose logs env-default-check 2>/dev/null | grep -q '"listen":"0.0.0.0:7777"'; then break; fi; \
 		sleep 1; \
 	done
 	@docker compose logs env-default-check 2>/dev/null | grep -q '"listen":"0.0.0.0:7777"' || \
-		{ echo "env-default-check did not bind to 0.0.0.0:7777 (image's BACKUPSWARM_LISTEN default broke)"; docker compose logs env-default-check; docker compose down -v; exit 1; }
+		{ echo "env-default-check did not bind to 0.0.0.0:7777 (--port default broke)"; docker compose logs env-default-check; docker compose down -v; exit 1; }
 	@echo "waiting for node-b to accept all three joiners..."
 	@for i in $$(seq 1 90); do \
 		count=$$(docker compose logs node-b 2>/dev/null | grep -c '"msg":"peer joined"'); \
@@ -203,7 +203,7 @@ docker-compose-test:
 		echo "node-a only logged $$count 'dialed peer' events; want >=3 (node-b at startup + node-c + node-d post-startup)"; \
 		docker compose logs node-a; docker compose down -v; exit 1; \
 	fi
-	@echo "docker-compose-test: 4-node swarm formed; node-a backed up the seeded tree, node-b shipped its own payload, both saw forwarded announcements, node-a dialed each announced peer, and env-default-check bound via the image's BACKUPSWARM_LISTEN default"
+	@echo "docker-compose-test: 4-node swarm formed; node-a backed up the seeded tree, node-b shipped its own payload, both saw forwarded announcements, node-a dialed each announced peer, and env-default-check bound via the --port default"
 	docker compose down -v
 
 ## trivy-deps: scan source tree for vulnerable deps, secrets, and misconfigs (HIGH+CRITICAL)

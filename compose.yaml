@@ -206,9 +206,9 @@ services:
       - --listen
       - 172.28.0.23:7780
 
-  # Storage peer with no --listen and no env override; daemon picks up
-  # the image's BACKUPSWARM_LISTEN=0.0.0.0:7777 default. Test scrapes
-  # its log for `"listen":"0.0.0.0:7777"`.
+  # Storage peer with no --listen, no --port, and no env override; daemon
+  # picks up the --port default (7777) and binds 0.0.0.0:7777. Test
+  # scrapes its log for `"listen":"0.0.0.0:7777"`.
   env-default-check:
     build: .
     image: backupswarm:dev

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -46,11 +47,54 @@ const envAdvertiseAddr = "BACKUPSWARM_ADVERTISE_ADDR"
 // is omitted.
 const envListenAddr = "BACKUPSWARM_LISTEN"
 
+// envPort is the env var read by `run` as a fallback when --port is omitted.
+const envPort = "BACKUPSWARM_PORT"
+
+// defaultPort is the default UDP port for both listen and advertise when
+// neither --listen nor --advertise-addr carries an explicit port.
+const defaultPort = 7777
+
+// resolveListenAdvertise produces the final listen and advertise host:port
+// strings. Bare hosts combine with port; host:port forms pass through;
+// "auto" is preserved for downstream STUN resolution.
+func resolveListenAdvertise(listenIn, advertiseIn string, port int) (listen, advertise string, err error) {
+	portStr := strconv.Itoa(port)
+	switch {
+	case advertiseIn == advertiseAddrAuto:
+		advertise = advertiseAddrAuto
+	case advertiseIn != "":
+		if _, _, splitErr := net.SplitHostPort(advertiseIn); splitErr == nil {
+			advertise = advertiseIn
+		} else {
+			advertise = net.JoinHostPort(advertiseIn, portStr)
+		}
+	}
+
+	switch {
+	case listenIn == "":
+		bindPort := portStr
+		if advertise != "" && advertise != advertiseAddrAuto {
+			if _, advPort, splitErr := net.SplitHostPort(advertise); splitErr == nil {
+				bindPort = advPort
+			}
+		}
+		listen = net.JoinHostPort("0.0.0.0", bindPort)
+	default:
+		if _, _, splitErr := net.SplitHostPort(listenIn); splitErr == nil {
+			listen = listenIn
+		} else {
+			listen = net.JoinHostPort(listenIn, portStr)
+		}
+	}
+	return listen, advertise, nil
+}
+
 func newRunCmd(dataDir *string) *cobra.Command {
 	var (
 		backupDir           string
 		listenAddr          string
 		advertiseAddr       string
+		port                int
 		chunkSize           int
 		scanInterval        time.Duration
 		heartbeatInterval   time.Duration
@@ -91,21 +135,25 @@ func newRunCmd(dataDir *string) *cobra.Command {
 			if listenAddr == "" {
 				listenAddr = os.Getenv(envListenAddr)
 			}
+			if !cmd.Flags().Changed("port") {
+				if envVal := os.Getenv(envPort); envVal != "" {
+					parsed, err := strconv.Atoi(envVal)
+					if err != nil {
+						return fmt.Errorf("$%s %q: %w", envPort, envVal, err)
+					}
+					port = parsed
+				}
+			}
+			if port < 0 || port > 65535 {
+				return fmt.Errorf("--port out of range [0, 65535]: %d", port)
+			}
 			isAuto := advertiseAddr == advertiseAddrAuto
-			if isAuto {
-				if listenAddr == "" {
-					listenAddr = "0.0.0.0:0"
-				}
-			} else if advertiseAddr != "" {
-				if _, port, err := net.SplitHostPort(advertiseAddr); err != nil {
-					return fmt.Errorf("--advertise-addr %q: %w", advertiseAddr, err)
-				} else if listenAddr == "" {
-					listenAddr = net.JoinHostPort("0.0.0.0", port)
-				}
+			resolvedListen, resolvedAdvertise, err := resolveListenAdvertise(listenAddr, advertiseAddr, port)
+			if err != nil {
+				return err
 			}
-			if listenAddr == "" {
-				return fmt.Errorf("--listen is required (or set --advertise-addr)")
-			}
+			listenAddr = resolvedListen
+			advertiseAddr = resolvedAdvertise
 			if !invite && tokenOut != "" {
 				return fmt.Errorf("--token-out requires --invite")
 			}
@@ -196,8 +244,9 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&backupDir, "backup-dir", "", "Directory tree to keep synced to the swarm. Index entries are stored relative to this root. Omit for a pure storage-peer role.")
-	cmd.Flags().StringVar(&listenAddr, "listen", "", "UDP address for the inbound QUIC listener, e.g. 0.0.0.0:7777; falls back to $BACKUPSWARM_LISTEN (required unless --advertise-addr is set)")
-	cmd.Flags().StringVar(&advertiseAddr, "advertise-addr", "", "Externally-routable host:port to embed in invite tokens; falls back to $BACKUPSWARM_ADVERTISE_ADDR. Defaults --listen to 0.0.0.0:<port> when --listen is empty.")
+	cmd.Flags().StringVar(&listenAddr, "listen", "", "Bind host or host:port for the inbound QUIC listener; falls back to $BACKUPSWARM_LISTEN. Bare host (e.g. 0.0.0.0) combines with --port; full host:port overrides --port.")
+	cmd.Flags().StringVar(&advertiseAddr, "advertise-addr", "", "Externally-routable host or host:port embedded in invite tokens; falls back to $BACKUPSWARM_ADVERTISE_ADDR. Bare host combines with --port; 'auto' discovers the host via STUN.")
+	cmd.Flags().IntVar(&port, "port", defaultPort, "UDP port for both listen and advertise when not embedded in those flags; falls back to $BACKUPSWARM_PORT.")
 	cmd.Flags().IntVar(&chunkSize, "chunk-size", 1<<20, "Target chunk size in bytes (default 1 MiB)")
 	cmd.Flags().DurationVar(&scanInterval, "scan-interval", 60*time.Second, "Period between incremental scan passes")
 	cmd.Flags().DurationVar(&heartbeatInterval, "heartbeat-interval", 30*time.Second, "Period between liveness probes against every live conn")

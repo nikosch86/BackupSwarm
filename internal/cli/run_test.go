@@ -52,15 +52,30 @@ func TestRunCmd_AcceptsMissingBackupDir(t *testing.T) {
 	}
 }
 
-func TestRunCmd_RequiresListen(t *testing.T) {
+// TestRunCmd_DefaultsListenWhenNothingSet asserts that with no --listen,
+// no --advertise-addr, and no env overrides, run binds 0.0.0.0:<defaultPort>
+// from --port's default.
+func TestRunCmd_DefaultsListenWhenNothingSet(t *testing.T) {
 	t.Setenv("BACKUPSWARM_LISTEN", "")
+	t.Setenv("BACKUPSWARM_PORT", "0")
 	root := NewRootCmd()
 	var stdout, stderr bytes.Buffer
 	root.SetOut(&stdout)
 	root.SetErr(&stderr)
 	root.SetArgs([]string{"--data-dir", t.TempDir(), "run", "--backup-dir", t.TempDir()})
-	if err := root.Execute(); err == nil {
-		t.Error("run accepted missing --listen")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+	time.AfterFunc(150*time.Millisecond, cancel)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("run with all defaults returned err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit within 5s of cancel")
 	}
 }
 

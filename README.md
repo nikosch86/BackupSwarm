@@ -67,7 +67,7 @@ Ready-to-run compose templates for the three node roles
 
 ### Container defaults
 
-The image bakes in `BACKUPSWARM_LISTEN=0.0.0.0:7777`, so `docker run … backupswarm run` binds to that port without a `--listen` flag. Override by setting the env var (`-e BACKUPSWARM_LISTEN=0.0.0.0:9000`) or by passing `--listen` on the CLI; the flag wins over the env.
+`run --port` defaults to `7777`, so `docker run … backupswarm run` binds to `0.0.0.0:7777` without any flag. Override the port with `--port 9000` (or `-e BACKUPSWARM_PORT=9000`); the flag wins over the env. To set bind host and port together, pass `--listen 0.0.0.0:9000` or `-e BACKUPSWARM_LISTEN=0.0.0.0:9000`.
 
 ### Auto-join from an env var
 
@@ -89,12 +89,12 @@ docker run --rm \
 
 When the introducer is behind NAT, the address embedded in invite tokens
 must be the externally-routable one, not the bound listener. Pass
-`--advertise-addr <host:port>` to `run --invite` (founder bootstrap) or
-`invite` (steady-state). When `--listen` is omitted (and
-`BACKUPSWARM_LISTEN` is unset), it defaults to
-`0.0.0.0:<port-of-advertise-addr>` — convenient for Docker setups where
-the bound address is irrelevant. `BACKUPSWARM_ADVERTISE_ADDR` is read as
-a fallback when the flag is empty.
+`--advertise-addr <host>` (or `<host:port>`) to `run --invite` (founder
+bootstrap) or `invite` (steady-state); a bare host combines with
+`--port`. When `--listen` is omitted, the daemon binds `0.0.0.0:<port>`
+where `<port>` comes from `--advertise-addr`'s explicit port if it has
+one, otherwise from `--port`. `BACKUPSWARM_ADVERTISE_ADDR` is read as a
+fallback when the flag is empty.
 
 The same flag also controls the address a joiner reports to the founder
 during the auto-join handshake — set it on the joiner side too when the

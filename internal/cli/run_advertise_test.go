@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"strings"
 	"testing"
 	"time"
 
@@ -106,40 +105,68 @@ func TestRunCmd_AdvertiseAddrFlagOverridesEnv(t *testing.T) {
 	}
 }
 
-// TestRunCmd_RequiresListenOrAdvertise asserts that without either flag the
-// command rejects at parse time.
-func TestRunCmd_RequiresListenOrAdvertise(t *testing.T) {
-	cmd := NewRootCmd()
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-	cmd.SetArgs([]string{
-		"--data-dir", t.TempDir(),
-		"run",
-	})
-	err := cmd.Execute()
-	if err == nil {
-		t.Fatal("run with no --listen and no --advertise-addr returned nil error")
+// TestRunCmd_PortFlag_AppliedToHostOnlyAdvertise asserts --port supplies
+// the port for a bare-host --advertise-addr value.
+func TestRunCmd_PortFlag_AppliedToHostOnlyAdvertise(t *testing.T) {
+	tokStr := runRunInviteForToken(t, t.TempDir(),
+		"--port", "7779",
+		"--advertise-addr", "203.0.113.7",
+	)
+	tok, err := token.Decode(tokStr)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
 	}
-	if !strings.Contains(err.Error(), "listen") && !strings.Contains(err.Error(), "advertise") {
-		t.Errorf("error did not mention listen or advertise: %v", err)
+	if tok.Addr != "203.0.113.7:7779" {
+		t.Errorf("token.Addr = %q, want %q", tok.Addr, "203.0.113.7:7779")
 	}
 }
 
-// TestRunCmd_BadAdvertiseAddrRejected asserts a malformed advertise value is
+// TestRunCmd_PortEnv_AppliedToHostOnlyAdvertise asserts BACKUPSWARM_PORT
+// supplies the port when --port is omitted.
+func TestRunCmd_PortEnv_AppliedToHostOnlyAdvertise(t *testing.T) {
+	t.Setenv("BACKUPSWARM_PORT", "7779")
+	tokStr := runRunInviteForToken(t, t.TempDir(),
+		"--advertise-addr", "203.0.113.7",
+	)
+	tok, err := token.Decode(tokStr)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if tok.Addr != "203.0.113.7:7779" {
+		t.Errorf("token.Addr = %q, want %q", tok.Addr, "203.0.113.7:7779")
+	}
+}
+
+// TestRunCmd_PortFlagWinsOverEnv asserts --port overrides BACKUPSWARM_PORT.
+func TestRunCmd_PortFlagWinsOverEnv(t *testing.T) {
+	t.Setenv("BACKUPSWARM_PORT", "8000")
+	tokStr := runRunInviteForToken(t, t.TempDir(),
+		"--port", "7779",
+		"--advertise-addr", "203.0.113.7",
+	)
+	tok, err := token.Decode(tokStr)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if tok.Addr != "203.0.113.7:7779" {
+		t.Errorf("token.Addr = %q, want %q (flag should override env)", tok.Addr, "203.0.113.7:7779")
+	}
+}
+
+// TestRunCmd_BadPortRejected asserts an out-of-range --port value is
 // rejected before the daemon starts.
-func TestRunCmd_BadAdvertiseAddrRejected(t *testing.T) {
+func TestRunCmd_BadPortRejected(t *testing.T) {
 	cmd := NewRootCmd()
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs([]string{
 		"--data-dir", t.TempDir(),
 		"run",
-		"--invite",
-		"--advertise-addr", "no-port-here",
+		"--port", "99999",
 	})
 	err := cmd.Execute()
 	if err == nil {
-		t.Fatal("run with bad --advertise-addr returned nil error")
+		t.Fatal("run with --port 99999 returned nil error")
 	}
 }
 
