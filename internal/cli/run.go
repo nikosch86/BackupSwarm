@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -17,7 +18,9 @@ import (
 	"backupswarm/internal/daemon"
 	"backupswarm/internal/nat"
 	"backupswarm/internal/node"
+	"backupswarm/internal/peers"
 	bsquic "backupswarm/internal/quic"
+	"backupswarm/pkg/token"
 )
 
 // advertiseAddrAuto is the special --advertise-addr / env value triggering
@@ -326,6 +329,16 @@ func resolveAutoAdvertise(ctx context.Context, dataDir, listenAddr, stunServer s
 	return net.JoinHostPort(host, port), listener, nil
 }
 
+// peerListContainsPub reports whether any peer in list has pubkey pub.
+func peerListContainsPub(list []peers.Peer, pub []byte) bool {
+	for _, p := range list {
+		if bytes.Equal(p.PubKey, pub) {
+			return true
+		}
+	}
+	return false
+}
+
 // maybeAutoJoin runs the bootstrap join handshake when peers.db is empty.
 // Idempotent: peers.db with any prior entry skips the handshake.
 func maybeAutoJoin(ctx context.Context, dataDir, tokStr, advertisedAddr string, timeout time.Duration) error {
@@ -339,9 +352,19 @@ func maybeAutoJoin(ctx context.Context, dataDir, tokStr, advertisedAddr string, 
 		return fmt.Errorf("list peers: %w", err)
 	}
 	if len(list) > 0 {
-		slog.InfoContext(ctx, "auto-join skipped; peers.db already populated",
-			"peer_count", len(list))
-		return nil
+		tok, err := token.Decode(tokStr)
+		if err != nil {
+			return fmt.Errorf("decode invite token: %w", err)
+		}
+		if peerListContainsPub(list, tok.Pub) {
+			slog.InfoContext(ctx, "auto-join skipped; invite is for current swarm",
+				"peer_count", len(list),
+				"introducer_pub", hex.EncodeToString(tok.Pub))
+			return nil
+		}
+		return fmt.Errorf("invite is for a different swarm (introducer pub %s not in peers.db); "+
+			"clear --data-dir %q to switch swarms or unset %s",
+			hex.EncodeToString(tok.Pub), dataDir, envInviteToken)
 	}
 	joinCtx, cancel := withTimeout(ctx, timeout)
 	defer cancel()

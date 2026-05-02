@@ -73,7 +73,12 @@ Ready-to-run compose templates for the three node roles
 
 For containerised joiners, `run` reads `BACKUPSWARM_INVITE_TOKEN` at startup
 and joins the swarm before the daemon serves traffic. Subsequent restarts of
-the same data dir skip the join (idempotent on a populated `peers.db`).
+the same data dir skip the join when the token is for the swarm already in
+`peers.db` (matched by introducer pubkey) and log
+`auto-join skipped; invite is for current swarm`. If the token is for a
+*different* swarm, startup fails with an actionable error rather than
+silently joining or silently ignoring; clear `--data-dir` (or unset
+`BACKUPSWARM_INVITE_TOKEN`) to resolve it.
 
 ```bash
 docker run --rm \
