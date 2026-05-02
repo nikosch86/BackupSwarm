@@ -51,6 +51,28 @@ func TestRootCmd_SilencesUsageAndErrors(t *testing.T) {
 	}
 }
 
+func TestRootCmd_HasLogLevelFlag(t *testing.T) {
+	root := NewRootCmd()
+	f := root.PersistentFlags().Lookup("log-level")
+	if f == nil {
+		t.Fatal("root command missing --log-level persistent flag")
+	}
+	if f.Usage == "" {
+		t.Error("--log-level flag has empty usage string")
+	}
+}
+
+func TestRootCmd_LogLevelInvalidErrors(t *testing.T) {
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--log-level", "trace", "peers"})
+	if err := root.Execute(); err == nil {
+		t.Fatal("expected error for invalid --log-level")
+	}
+}
+
 func TestRootCmd_HelpRuns(t *testing.T) {
 	root := NewRootCmd()
 	var stdout bytes.Buffer

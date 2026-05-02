@@ -2,6 +2,8 @@
 package cli
 
 import (
+	"os"
+
 	"github.com/spf13/cobra"
 )
 
@@ -18,6 +20,22 @@ func NewRootCmd() *cobra.Command {
 	var dataDir string
 	root.PersistentFlags().StringVar(&dataDir, "data-dir", "",
 		"Node data directory (default $BACKUPSWARM_DATA_DIR or $XDG_DATA_HOME/backupswarm)")
+
+	var logLevel string
+	root.PersistentFlags().StringVar(&logLevel, "log-level", "",
+		"Log level: debug|info|warn|error (default $"+LogLevelEnvVar+" or info)")
+
+	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		envVal := os.Getenv(LogLevelEnvVar)
+		level, err := resolveLogLevel(logLevel, envVal)
+		if err != nil {
+			return err
+		}
+		if logLevel != "" || envVal != "" {
+			installLogger(cmd.ErrOrStderr(), level)
+		}
+		return nil
+	}
 
 	root.AddCommand(newInviteCmd(&dataDir))
 	root.AddCommand(newJoinCmd(&dataDir))

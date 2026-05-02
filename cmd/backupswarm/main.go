@@ -14,8 +14,7 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	logger := slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	slog.SetDefault(logger)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	root := cli.NewRootCmd()
 	root.SetOut(stdout)
@@ -23,7 +22,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	root.SetArgs(args)
 
 	if err := root.Execute(); err != nil {
-		logger.Error("command failed", "err", err)
+		slog.Error("command failed", "err", err)
 		return 1
 	}
 	return 0

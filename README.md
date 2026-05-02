@@ -69,6 +69,11 @@ Ready-to-run compose templates for the three node roles
 
 `run --port` defaults to `7777`, so `docker run … backupswarm run` binds to `0.0.0.0:7777` without any flag. Override the port with `--port 9000` (or `-e BACKUPSWARM_PORT=9000`); the flag wins over the env. To set bind host and port together, pass `--listen 0.0.0.0:9000` or `-e BACKUPSWARM_LISTEN=0.0.0.0:9000`.
 
+### Log level
+
+All commands honour `--log-level debug|info|warn|error` (default `info`),
+or the `BACKUPSWARM_LOG_LEVEL` env var. The flag wins over the env.
+
 ### Auto-join from an env var
 
 For containerised joiners, `run` reads `BACKUPSWARM_INVITE_TOKEN` at startup
