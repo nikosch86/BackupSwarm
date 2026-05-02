@@ -15,6 +15,10 @@ import (
 // natDiscoverFunc is the test seam for STUN binding requests.
 var natDiscoverFunc = nat.Discover
 
+// turnAllocateFunc is the test seam for TURN relay allocation; production
+// wraps nat.Allocate.
+var turnAllocateFunc = nat.Allocate
+
 // broadcastAddressChangedFunc is the test seam for AddressChanged emission.
 var broadcastAddressChangedFunc = swarm.BroadcastAddressChanged
 

@@ -79,7 +79,7 @@ var ErrInvalidTrustConfig = errors.New("TrustConfig requires both Cert and Pool"
 type Listener struct {
 	inner      *qgo.Listener
 	tr         *qgo.Transport
-	conn       *net.UDPConn
+	conn       net.PacketConn
 	verifyPeer atomic.Pointer[VerifyPeerFunc]
 }
 
@@ -174,6 +174,13 @@ func (l *Listener) Close() error {
 // to expectedPeerPub. Non-nil trust = CA-mode (peer chain-verified against
 // trust.Pool). Wraps ErrPeerPubkeyMismatch on identity mismatch.
 func Dial(ctx context.Context, addr string, priv ed25519.PrivateKey, expectedPeerPub ed25519.PublicKey, trust *TrustConfig) (*Conn, error) {
+	return DialOver(ctx, nil, addr, priv, expectedPeerPub, trust)
+}
+
+// DialOver opens an outbound QUIC connection through pc to addr. nil pc
+// uses a fresh UDP socket; non-nil carries QUIC over the supplied
+// transport (e.g. a TURN-allocated relay).
+func DialOver(ctx context.Context, pc net.PacketConn, addr string, priv ed25519.PrivateKey, expectedPeerPub ed25519.PublicKey, trust *TrustConfig) (*Conn, error) {
 	if err := validateTrust(trust); err != nil {
 		return nil, err
 	}
@@ -205,11 +212,66 @@ func Dial(ctx context.Context, addr string, priv ed25519.PrivateKey, expectedPee
 		MinVersion: tls.VersionTLS13,
 		NextProtos: []string{NextProtocol},
 	}
-	qc, err := qgo.DialAddr(ctx, addr, tlsConf, newQUICConfig())
+	var qc *qgo.Conn
+	if pc == nil {
+		qc, err = qgo.DialAddr(ctx, addr, tlsConf, newQUICConfig())
+	} else {
+		udpAddr, rerr := net.ResolveUDPAddr("udp", addr)
+		if rerr != nil {
+			return nil, fmt.Errorf("resolve udp %q: %w", addr, rerr)
+		}
+		tr := &qgo.Transport{Conn: pc}
+		qc, err = tr.Dial(ctx, udpAddr, tlsConf, newQUICConfig())
+	}
 	if err != nil {
 		return nil, fmt.Errorf("quic dial %q: %w", addr, err)
 	}
 	return &Conn{inner: qc, remotePub: connRemotePub(qc)}, nil
+}
+
+// ListenOver wraps an existing net.PacketConn (e.g. a TURN-allocated
+// relay) as a QUIC Listener. Same TLS configuration as Listen; the
+// returned Listener's Close also closes pc.
+func ListenOver(pc net.PacketConn, priv ed25519.PrivateKey, verifyPeer VerifyPeerFunc, trust *TrustConfig) (*Listener, error) {
+	if err := validateTrust(trust); err != nil {
+		return nil, err
+	}
+	cert, err := leafCert(priv, trust)
+	if err != nil {
+		return nil, fmt.Errorf("build server cert: %w", err)
+	}
+	l := &Listener{}
+	l.SetVerifyPeer(verifyPeer)
+	tlsConf := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.RequireAnyClientCert,
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if trust != nil {
+				if err := verifyChain(rawCerts, trust.Pool); err != nil {
+					return err
+				}
+			}
+			pub, err := peerEd25519Pub(rawCerts)
+			if err != nil {
+				return err
+			}
+			if fn := l.verifyPeer.Load(); fn != nil && *fn != nil {
+				return (*fn)(pub)
+			}
+			return nil
+		},
+		MinVersion: tls.VersionTLS13,
+		NextProtos: []string{NextProtocol},
+	}
+	tr := &qgo.Transport{Conn: pc}
+	inner, err := tr.Listen(tlsConf, newQUICConfig())
+	if err != nil {
+		return nil, fmt.Errorf("quic listen over packet conn: %w", err)
+	}
+	l.inner = inner
+	l.tr = tr
+	l.conn = pc
+	return l, nil
 }
 
 // Conn is a QUIC connection to a single peer with a verified Ed25519 identity.

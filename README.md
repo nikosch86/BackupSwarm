@@ -130,6 +130,28 @@ docker run --rm \
     run --invite --advertise-addr auto
 ```
 
+#### TURN relay (symmetric NAT fallback)
+
+When neither direct connectivity nor UDP hole-punching reaches a peer
+(typically symmetric NATs), point `run` at a TURN server with long-term
+credentials:
+
+```bash
+docker run --rm \
+    -v bsw-data:/data \
+    ghcr.io/nikosch86/backupswarm:latest \
+    run --invite --advertise-addr auto \
+        --turn-server turn.example.org:3478 \
+        --turn-user alice --turn-pass secret \
+        --turn-realm backupswarm
+```
+
+`--turn-server` requires the matching `--turn-user`, `--turn-pass`, and
+`--turn-realm` triple. The daemon allocates a relay at startup, logs
+`nat: turn relay allocated relay_addr=<host:port>`, and holds the
+allocation for its lifetime. Per-dial selection of the relay path lands
+with the connection-fallback chain in a subsequent milestone.
+
 #### UDP buffer warning (optional)
 
 quic-go logs `failed to sufficiently increase receive buffer size` on

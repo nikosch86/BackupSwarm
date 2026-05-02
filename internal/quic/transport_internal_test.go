@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"io"
+	"net"
 	"testing"
 	"testing/iotest"
 )
@@ -121,6 +122,48 @@ func TestDial_CertBuildFailure(t *testing.T) {
 	cancel()
 	if _, err := Dial(ctx, "127.0.0.1:1", priv, pub, nil); err == nil {
 		t.Fatal("expected Dial to fail when cert build fails")
+	}
+}
+
+// TestListenOver_TrustConfigValidation rejects a half-populated TrustConfig.
+func TestListenOver_TrustConfigValidation(t *testing.T) {
+	priv := newTestKey(t)
+	pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen packet: %v", err)
+	}
+	defer func() { _ = pc.Close() }()
+	if _, err := ListenOver(pc, priv, nil, &TrustConfig{}); err == nil {
+		t.Fatal("expected ListenOver to error on TrustConfig{} (both fields nil)")
+	}
+}
+
+// TestListenOver_CertBuildFailure asserts ListenOver fails when self-signed
+// cert generation fails (rand source errors).
+func TestListenOver_CertBuildFailure(t *testing.T) {
+	priv := newTestKey(t)
+	withRandReader(t, iotest.ErrReader(errors.New("forced rng failure")))
+	pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen packet: %v", err)
+	}
+	defer func() { _ = pc.Close() }()
+	if _, err := ListenOver(pc, priv, nil, nil); err == nil {
+		t.Fatal("expected ListenOver to fail when cert build fails")
+	}
+}
+
+// TestListenOver_TransportListenFailure asserts ListenOver wraps a
+// quic-go transport listen error (closed packet conn).
+func TestListenOver_TransportListenFailure(t *testing.T) {
+	priv := newTestKey(t)
+	pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen packet: %v", err)
+	}
+	_ = pc.Close()
+	if _, err := ListenOver(pc, priv, nil, nil); err == nil {
+		t.Fatal("expected ListenOver to fail on closed packet conn")
 	}
 }
 

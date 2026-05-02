@@ -117,6 +117,10 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		maxStorage          string
 		redundancy          int
 		stunServer          string
+		turnServer          string
+		turnUser            string
+		turnPass            string
+		turnRealm           string
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -210,6 +214,11 @@ func newRunCmd(dataDir *string) *cobra.Command {
 					return err
 				}
 			}
+			if turnServer != "" {
+				if turnUser == "" || turnPass == "" || turnRealm == "" {
+					return fmt.Errorf("--turn-server requires --turn-user, --turn-pass, and --turn-realm")
+				}
+			}
 			return daemon.Run(cmd.Context(), daemon.Options{
 				DataDir:             dir,
 				BackupDir:           backupDir,
@@ -240,6 +249,12 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				NoStorage:           noStorage,
 				Redundancy:          redundancy,
 				Progress:            cmd.OutOrStdout(),
+				TURN: daemon.TURNOptions{
+					Server:   turnServer,
+					Username: turnUser,
+					Password: turnPass,
+					Realm:    turnRealm,
+				},
 			})
 		},
 	}
@@ -269,6 +284,10 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&maxStorage, "max-storage", "unlimited", "Cap on bytes stored locally for swarm peers; accepts k/m/g/t suffixes (e.g. 10g). 'unlimited' (default) places no cap; 0 disables storage entirely (refuse all chunks for others).")
 	cmd.Flags().IntVar(&redundancy, "redundancy", 1, "Number of unique storage peers each chunk is placed on (must be >= 1)")
 	cmd.Flags().StringVar(&stunServer, "stun-server", defaultSTUNServer, "host:port of the STUN server queried when --advertise-addr=auto, also used by the periodic refresh loop that broadcasts AddressChanged on detected NAT IP changes")
+	cmd.Flags().StringVar(&turnServer, "turn-server", "", "host:port of a TURN server to allocate a relay against at startup; empty disables the relay")
+	cmd.Flags().StringVar(&turnUser, "turn-user", "", "Username for the TURN long-term credential (required with --turn-server)")
+	cmd.Flags().StringVar(&turnPass, "turn-pass", "", "Password for the TURN long-term credential (required with --turn-server)")
+	cmd.Flags().StringVar(&turnRealm, "turn-realm", "", "Realm for the TURN long-term credential (required with --turn-server)")
 	return cmd
 }
 

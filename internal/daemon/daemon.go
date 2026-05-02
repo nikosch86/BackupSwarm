@@ -24,6 +24,7 @@ import (
 	"backupswarm/internal/ca"
 	"backupswarm/internal/crypto"
 	"backupswarm/internal/index"
+	"backupswarm/internal/nat"
 	"backupswarm/internal/node"
 	"backupswarm/internal/peers"
 	"backupswarm/internal/protocol"
@@ -202,6 +203,18 @@ type Options struct {
 	// NATRefreshInterval is the period between STUN binding requests. Zero
 	// defaults to 5 minutes when STUNServer is set.
 	NATRefreshInterval time.Duration
+	// TURN allocates a relay at startup and holds it for the daemon's
+	// lifetime; empty Server disables.
+	TURN TURNOptions
+}
+
+// TURNOptions configures the TURN client. All four fields are required
+// when Server is non-empty.
+type TURNOptions struct {
+	Server   string
+	Username string
+	Password string
+	Realm    string
 }
 
 const (
@@ -584,6 +597,18 @@ func Run(ctx context.Context, opts Options) error {
 	defer natCancel()
 	var natWG sync.WaitGroup
 	defer natWG.Wait()
+	if opts.TURN.Server != "" {
+		alloc, err := turnAllocateFunc(ctx, nat.TURNConfig(opts.TURN))
+		if err != nil {
+			return fmt.Errorf("turn allocate: %w", err)
+		}
+		slog.InfoContext(ctx, "nat: turn relay allocated",
+			"server", opts.TURN.Server,
+			"relay_addr", alloc.RelayAddr().String(),
+		)
+		defer func() { _ = alloc.Close() }()
+	}
+
 	if opts.STUNServer != "" {
 		host, port, splitErr := net.SplitHostPort(opts.AdvertiseAddr)
 		if splitErr != nil {
