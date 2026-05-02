@@ -38,4 +38,5 @@ To stand up a brand-new swarm of N dual-role nodes:
 3. On every other node, set `BACKUPSWARM_INVITE_TOKEN` to that token and
    `docker compose up -d`.
 4. To add more nodes later, issue fresh tokens from any running daemon:
-   `docker exec <container> backupswarm --data-dir /data invite`.
+   `docker exec <container> backupswarm invite` (the image presets
+   `BACKUPSWARM_DATA_DIR=/data`).

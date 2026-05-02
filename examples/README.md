@@ -39,8 +39,11 @@ Every variant expects an invite token in `BACKUPSWARM_INVITE_TOKEN`. To
 issue one against an already-running daemon container:
 
 ```bash
-docker exec <existing-container> backupswarm --data-dir /data invite
+docker exec <existing-container> backupswarm invite
 ```
+
+The image presets `BACKUPSWARM_DATA_DIR=/data`, so `--data-dir` is
+already wired to the named volume.
 
 To bootstrap a brand-new swarm, run `run --invite` once on a founder
 node (see the [Two-node swarm](../README.md#two-node-swarm-local-smoke-test)

@@ -29,5 +29,9 @@ USER nonroot:nonroot
 WORKDIR /data
 VOLUME ["/data"]
 
+# Default the data dir to the mounted volume; --data-dir or a user-set
+# BACKUPSWARM_DATA_DIR overrides.
+ENV BACKUPSWARM_DATA_DIR=/data
+
 ENTRYPOINT ["/usr/local/bin/backupswarm"]
 CMD ["--help"]

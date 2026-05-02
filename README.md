@@ -69,6 +69,8 @@ Ready-to-run compose templates for the three node roles
 
 `run --port` defaults to `7777`, so `docker run … backupswarm run` binds to `0.0.0.0:7777` without any flag. Override the port with `--port 9000` (or `-e BACKUPSWARM_PORT=9000`); the flag wins over the env. To set bind host and port together, pass `--listen 0.0.0.0:9000` or `-e BACKUPSWARM_LISTEN=0.0.0.0:9000`.
 
+The image sets `BACKUPSWARM_DATA_DIR=/data` so a `-v <vol>:/data` mount (or compose `volumes: [data:/data]`) persists identity, swarm CA, `peers.db`, `invites.db`, the index, and the chunk store across `docker compose up --force-recreate`. Override with `--data-dir` or by setting `BACKUPSWARM_DATA_DIR` yourself.
+
 ### Log level
 
 All commands honour `--log-level debug|info|warn|error` (default `info`),

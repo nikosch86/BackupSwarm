@@ -32,8 +32,11 @@ remembers the swarm via `peers.db` in the named `data` volume.
 To get a token from an existing swarm member's running daemon:
 
 ```bash
-docker exec <existing-container> backupswarm --data-dir /data invite
+docker exec <existing-container> backupswarm invite
 ```
+
+The image presets `BACKUPSWARM_DATA_DIR=/data`, so `--data-dir` is
+already wired to the named volume.
 
 Or bootstrap a brand-new swarm with `run --invite` once on a founder
 node, then copy that token here.
