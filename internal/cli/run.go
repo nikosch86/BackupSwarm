@@ -109,6 +109,8 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		chunkExpireInterval time.Duration
 		gracePeriod         time.Duration
 		dialTimeout         time.Duration
+		punchTimeout        time.Duration
+		turnDialTimeout     time.Duration
 		restoreRetryTimeout time.Duration
 		restoreRetryBackoff time.Duration
 		restore             bool
@@ -240,6 +242,8 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				MissThreshold:       heartbeatMisses,
 				GracePeriod:         gracePeriod,
 				DialTimeout:         dialTimeout,
+				PunchTimeout:        punchTimeout,
+				TURNDialTimeout:     turnDialTimeout,
 				RestoreRetryTimeout: restoreRetryTimeout,
 				RestoreRetryBackoff: restoreRetryBackoff,
 				Restore:             restore,
@@ -275,7 +279,9 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().DurationVar(&chunkExpireInterval, "chunk-expire-interval", 1*time.Hour, "Cadence at which the local store sweeps expired blobs out (storage-peer GC)")
 	cmd.Flags().IntVar(&heartbeatMisses, "heartbeat-misses", 3, "Consecutive missed heartbeats required to mark a peer unreachable (must be >= 1)")
 	cmd.Flags().DurationVar(&gracePeriod, "grace-period", 24*time.Hour, "Duration a peer must stay unreachable before being treated as lost (eligible for re-replication). 0 = lost immediately.")
-	cmd.Flags().DurationVar(&dialTimeout, "dial-timeout", 30*time.Second, "Timeout for the initial dial to the storage peer")
+	cmd.Flags().DurationVar(&dialTimeout, "dial-timeout", 30*time.Second, "Timeout for the direct dial step in the connection fallback chain")
+	cmd.Flags().DurationVar(&punchTimeout, "punch-timeout", 5*time.Second, "Timeout for the hole-punch step in the connection fallback chain")
+	cmd.Flags().DurationVar(&turnDialTimeout, "turn-dial-timeout", 15*time.Second, "Timeout for the TURN-relay step in the connection fallback chain")
 	cmd.Flags().BoolVar(&restore, "restore", false, "Restore every indexed file under --backup-dir before the scan loop starts (required when backup-dir is empty but the index is populated)")
 	cmd.Flags().DurationVar(&restoreRetryTimeout, "restore-retry-timeout", 0, "When --restore is set, the maximum total time to retry files whose chunks are unreachable on the first pass (peers may come back online via heartbeat-driven re-dial). 0 disables retries.")
 	cmd.Flags().DurationVar(&restoreRetryBackoff, "restore-retry-backoff", time.Second, "Initial backoff between restore retries; doubles up to 30 s")

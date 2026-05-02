@@ -175,8 +175,12 @@ type Options struct {
 	// AcknowledgeDeletes lets the daemon proceed when indexed files are
 	// missing from disk; the next scan tick propagates DeleteChunk to peers.
 	AcknowledgeDeletes bool
-	// DialTimeout bounds the initial dial to the storage peer. Zero defaults to 30s.
+	// DialTimeout bounds the direct dial step. Zero defaults to 30s.
 	DialTimeout time.Duration
+	// PunchTimeout bounds the hole-punch fallback step. Zero defaults to 5s.
+	PunchTimeout time.Duration
+	// TURNDialTimeout bounds the TURN fallback step. Zero defaults to 15s.
+	TURNDialTimeout time.Duration
 	// IssueInitialInvite issues a token at startup.
 	IssueInitialInvite bool
 	// InitialInviteOut is the file path the initial invite token is written to.
@@ -223,6 +227,8 @@ const (
 	defaultIndexBackupInterval = 5 * time.Minute
 	defaultScrubInterval       = 6 * time.Hour
 	defaultDialTimeout         = 30 * time.Second
+	defaultPunchTimeout        = 5 * time.Second
+	defaultTURNDialTimeout     = 15 * time.Second
 	defaultGracePeriod         = 24 * time.Hour
 	defaultChunkTTL            = 30 * 24 * time.Hour
 	defaultExpireInterval      = 1 * time.Hour
@@ -280,6 +286,18 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	if opts.DialTimeout == 0 {
 		opts.DialTimeout = defaultDialTimeout
+	}
+	if opts.PunchTimeout == 0 {
+		opts.PunchTimeout = defaultPunchTimeout
+	}
+	if opts.PunchTimeout < 0 {
+		return fmt.Errorf("punch timeout must be non-negative, got %v", opts.PunchTimeout)
+	}
+	if opts.TURNDialTimeout == 0 {
+		opts.TURNDialTimeout = defaultTURNDialTimeout
+	}
+	if opts.TURNDialTimeout < 0 {
+		return fmt.Errorf("turn dial timeout must be non-negative, got %v", opts.TURNDialTimeout)
 	}
 	if opts.NATRefreshInterval < 0 {
 		return fmt.Errorf("nat refresh interval must be non-negative, got %v", opts.NATRefreshInterval)
@@ -443,13 +461,15 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	dialer := &outboundDialer{
-		ctx:        ctx,
-		priv:       id.PrivateKey,
-		timeout:    opts.DialTimeout,
-		st:         st,
-		annHandler: router.HandleStream,
-		connSet:    connSet,
-		reach:      reach,
+		ctx:          ctx,
+		priv:         id.PrivateKey,
+		timeout:      opts.DialTimeout,
+		punchTimeout: opts.PunchTimeout,
+		turnTimeout:  opts.TURNDialTimeout,
+		st:           st,
+		annHandler:   router.HandleStream,
+		connSet:      connSet,
+		reach:        reach,
 	}
 	defer dialer.CloseAll()
 	joinHandler := makeJoinHandler(opts.DataDir, peerStore, swarmCA, connSet, dialer)
@@ -462,6 +482,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	punchOrch := newPunchOrchestrator(ctx, listener, connSet, peerStore, id.PrivateKey, punchAdvertise)
 	defer punchOrch.pendingPunches.Wait()
+	dialer.punchOrch = punchOrch
 
 	serveErrCh := make(chan error, 1)
 	go func() {
@@ -607,6 +628,7 @@ func Run(ctx context.Context, opts Options) error {
 			"relay_addr", alloc.RelayAddr().String(),
 		)
 		defer func() { _ = alloc.Close() }()
+		dialer.turnPC = alloc.PacketConn()
 	}
 
 	if opts.STUNServer != "" {
@@ -765,35 +787,52 @@ type outboundDialer struct {
 	connSet     *swarm.ConnSet
 	reach       *swarm.ReachabilityMap
 
+	// punchTimeout / turnTimeout bound the hole-punch and TURN steps of
+	// the fallback chain; punchOrch / turnPC enable each step. Set
+	// post-construction by the daemon once those subsystems are ready.
+	punchTimeout time.Duration
+	turnTimeout  time.Duration
+	punchOrch    *punchOrchestrator
+	turnPC       net.PacketConn
+
 	mu    sync.Mutex
 	conns []*bsquic.Conn
 }
 
 // register wires conn into connSet+reach and spawns AcceptStreams.
-func (d *outboundDialer) register(conn *bsquic.Conn, p peers.Peer) {
+func (d *outboundDialer) register(conn *bsquic.Conn, p peers.Peer, method chainMethod) {
 	d.connSet.Add(conn)
 	d.reach.MarkConn(conn, swarm.StateReachable)
 	go backup.AcceptStreams(d.ctx, conn, d.st, d.annHandler, d.joinHandler, nil, nil)
 	d.mu.Lock()
 	d.conns = append(d.conns, conn)
 	d.mu.Unlock()
-	slog.InfoContext(d.ctx, "dialed peer",
+	slog.InfoContext(d.ctx, "peer connected",
+		"method", string(method),
 		"peer_addr", p.Addr,
 		"peer_pub", hex.EncodeToString(p.PubKey),
 		"role", p.Role,
 	)
 }
 
-// dial dials p with the bounded timeout, marks reachability, and registers on success.
+// dial runs the direct → hole-punch → TURN fallback chain, marks
+// reachability, and registers the resulting conn.
 func (d *outboundDialer) dial(ctx context.Context, p peers.Peer) (*bsquic.Conn, error) {
-	dctx, cancel := context.WithTimeout(ctx, d.timeout)
-	defer cancel()
-	conn, err := bsquic.Dial(dctx, p.Addr, d.priv, p.PubKey, nil)
+	conn, method, err := chainDial(ctx, chainDialOptions{
+		target:        p,
+		priv:          d.priv,
+		directTimeout: d.timeout,
+		punchTimeout:  d.punchTimeout,
+		turnTimeout:   d.turnTimeout,
+		punchOrch:     d.punchOrch,
+		turnPC:        d.turnPC,
+		connSet:       d.connSet,
+	})
 	if err != nil {
 		d.reach.Mark(p.PubKey, swarm.StateUnreachable)
 		return nil, err
 	}
-	d.register(conn, p)
+	d.register(conn, p, method)
 	return conn, nil
 }
 

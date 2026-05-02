@@ -225,9 +225,5 @@ func (po *punchOrchestrator) RequestPunch(ctx context.Context, targetPub ed25519
 			"err", err)
 		return nil, fmt.Errorf("punch: dial after punch: %w", err)
 	}
-	slog.InfoContext(ctx, "peer connected",
-		"method", "hole_punch",
-		"peer_pub", hex.EncodeToString(targetPub),
-		"addr", target.Addr)
 	return conn, nil
 }
