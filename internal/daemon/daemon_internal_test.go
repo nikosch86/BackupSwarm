@@ -926,3 +926,57 @@ func TestRun_STUNServerFallsBackToListenAddrWhenAdvertiseEmpty(t *testing.T) {
 		t.Fatal("Run did not exit within 3s of cancel")
 	}
 }
+
+// TestRedialMissingPeers_LogsFailureAtWarnLevel asserts a failed dial
+// during the scan-loop sweep is logged at WARN level.
+func TestRedialMissingPeers_LogsFailureAtWarnLevel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	_, dialerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("dialer key: %v", err)
+	}
+
+	ps := openPickStoragePeerStore(t)
+	unreachablePub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("unreachable key: %v", err)
+	}
+	if err := ps.Add(peers.Peer{
+		Addr:   "127.0.0.1:1",
+		PubKey: unreachablePub,
+		Role:   peers.RoleStorage,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	dialer := &outboundDialer{
+		ctx:     ctx,
+		priv:    dialerPriv,
+		timeout: 200 * time.Millisecond,
+		st:      st,
+		connSet: swarm.NewConnSet(),
+		reach:   swarm.NewReachabilityMap(),
+	}
+	t.Cleanup(dialer.CloseAll)
+
+	w := &syncWriter{}
+	captureSlog(t, w)
+
+	redialMissingPeers(ctx, ps, dialer, swarm.NewConnSet())
+
+	got := w.String()
+	if !strings.Contains(got, "redial sweep: dial peer failed") {
+		t.Fatalf("expected dial-fail log line, got:\n%s", got)
+	}
+	if !strings.Contains(got, "level=WARN") {
+		t.Errorf("expected WARN level for dial failure, got:\n%s", got)
+	}
+}

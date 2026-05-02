@@ -7,9 +7,11 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"backupswarm/internal/backup"
 	"backupswarm/internal/bootstrap"
 	"backupswarm/internal/ca"
 	"backupswarm/internal/daemon"
@@ -18,6 +20,7 @@ import (
 	"backupswarm/internal/peers"
 	"backupswarm/internal/protocol"
 	bsquic "backupswarm/internal/quic"
+	"backupswarm/internal/store"
 	"backupswarm/internal/swarm"
 	"backupswarm/pkg/token"
 )
@@ -369,4 +372,66 @@ func TestDaemon_RejectsStrangerWithoutPendingInvite(t *testing.T) {
 	if _, err := bootstrap.DoJoin(dialCtx, tokStr, strangerPriv, "192.0.2.66:9000", strangerStore); err == nil {
 		t.Fatal("DoJoin succeeded against a daemon with no pending invites; predicate let the stranger through")
 	}
+}
+
+// TestDaemon_DialsJoinerAfterPeerJoined asserts the founder daemon
+// initiates an outbound dial to the joiner's advertised address after
+// the join handshake succeeds.
+func TestDaemon_DialsJoinerAfterPeerJoined(t *testing.T) {
+	dataDir := t.TempDir()
+	id, _, err := node.Ensure(dataDir)
+	if err != nil {
+		t.Fatalf("node.Ensure: %v", err)
+	}
+	addr, stop := startStorageDaemon(t, dataDir)
+	defer stop()
+
+	_, joinerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("joiner key: %v", err)
+	}
+	joinerListener, err := bsquic.Listen("127.0.0.1:0", joinerPriv, nil, nil)
+	if err != nil {
+		t.Fatalf("joiner Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = joinerListener.Close() })
+	joinerAddr := joinerListener.Addr().String()
+
+	joinerSt, err := store.New(filepath.Join(t.TempDir(), "joiner-chunks"))
+	if err != nil {
+		t.Fatalf("joiner store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = joinerSt.Close() })
+
+	var dialBacks atomic.Int32
+	obs := &backup.ConnObserver{
+		OnAccept: func(*bsquic.Conn) { dialBacks.Add(1) },
+	}
+	serveCtx, serveCancel := context.WithCancel(context.Background())
+	t.Cleanup(serveCancel)
+	go func() { _ = backup.Serve(serveCtx, joinerListener, joinerSt, nil, nil, nil, nil, obs) }()
+
+	tokStr := preIssueInvite(t, dataDir, addr, id.PublicKey, nil)
+	time.Sleep(pollSettleWindow)
+
+	joinerStore, err := peers.Open(filepath.Join(t.TempDir(), "joiner-peers.db"))
+	if err != nil {
+		t.Fatalf("joiner peers.Open: %v", err)
+	}
+	defer func() { _ = joinerStore.Close() }()
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dialCancel()
+	if _, err := bootstrap.DoJoin(dialCtx, tokStr, joinerPriv, joinerAddr, joinerStore); err != nil {
+		t.Fatalf("DoJoin: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if dialBacks.Load() >= 1 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("founder did not dial joiner-side listener within 3s (dialBacks=%d)", dialBacks.Load())
 }

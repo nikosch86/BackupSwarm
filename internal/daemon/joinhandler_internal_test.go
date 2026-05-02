@@ -88,7 +88,7 @@ func TestMakeJoinHandler_OpenInvitesFails(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
-	handler := makeJoinHandler(dir, ps, nil, nil)
+	handler := makeJoinHandler(dir, ps, nil, nil, nil)
 	joinerPub, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("ed25519: %v", err)

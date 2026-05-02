@@ -428,19 +428,19 @@ func Run(ctx context.Context, opts Options) error {
 			reach.MarkConn(c, swarm.StateUnreachable)
 		},
 	}
-	joinHandler := makeJoinHandler(opts.DataDir, peerStore, swarmCA, connSet)
 
 	dialer := &outboundDialer{
-		ctx:         ctx,
-		priv:        id.PrivateKey,
-		timeout:     opts.DialTimeout,
-		st:          st,
-		annHandler:  router.HandleStream,
-		joinHandler: joinHandler,
-		connSet:     connSet,
-		reach:       reach,
+		ctx:        ctx,
+		priv:       id.PrivateKey,
+		timeout:    opts.DialTimeout,
+		st:         st,
+		annHandler: router.HandleStream,
+		connSet:    connSet,
+		reach:      reach,
 	}
 	defer dialer.CloseAll()
+	joinHandler := makeJoinHandler(opts.DataDir, peerStore, swarmCA, connSet, dialer)
+	dialer.joinHandler = joinHandler
 	router.OnApplied = makeImmediateDialOnApplied(peerStore, connSet, dialer)
 
 	punchAdvertise := opts.AdvertiseAddr
@@ -901,7 +901,7 @@ func redialMissingPeers(ctx context.Context, peerStore *peers.Store, dialer *out
 			continue
 		}
 		if _, err := dialer.dial(ctx, p); err != nil {
-			slog.DebugContext(ctx, "redial sweep: dial peer failed",
+			slog.WarnContext(ctx, "redial sweep: dial peer failed",
 				"peer_addr", p.Addr,
 				"peer_pub", hex.EncodeToString(p.PubKey),
 				"err", err)

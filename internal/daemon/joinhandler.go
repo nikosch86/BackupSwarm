@@ -33,8 +33,9 @@ func loadSwarmCAIfPresent(dir string) (*ca.CA, error) {
 	return swarmCA, nil
 }
 
-// makeJoinHandler returns the MsgJoinRequest handler.
-func makeJoinHandler(dataDir string, peerStore *peers.Store, swarmCA *ca.CA, conns *swarm.ConnSet) backup.JoinHandler {
+// makeJoinHandler returns the MsgJoinRequest handler. After a join
+// succeeds the handler spawns an outbound dial back to the joiner.
+func makeJoinHandler(dataDir string, peerStore *peers.Store, swarmCA *ca.CA, conns *swarm.ConnSet, dialer *outboundDialer) backup.JoinHandler {
 	return func(ctx context.Context, rw io.ReadWriter, joinerPub []byte) error {
 		invStore, err := invites.Open(filepath.Join(dataDir, invites.DefaultFilename))
 		if err != nil {
@@ -56,6 +57,16 @@ func makeJoinHandler(dataDir string, peerStore *peers.Store, swarmCA *ca.CA, con
 			if err := swarm.BroadcastPeerJoined(ctx, targets, peer); err != nil && !errors.Is(err, context.Canceled) {
 				slog.WarnContext(ctx, "broadcast peer joined", "err", err)
 			}
+		}
+		if dialer != nil && peer.Addr != "" {
+			go func() {
+				if _, err := dialer.dial(dialer.ctx, peer); err != nil {
+					slog.WarnContext(dialer.ctx, "post-join dial failed",
+						"peer_addr", peer.Addr,
+						"peer_pub", hex.EncodeToString(peer.PubKey),
+						"err", err)
+				}
+			}()
 		}
 		return nil
 	}
