@@ -36,8 +36,18 @@ func TestClassify_AllFourBasicStates(t *testing.T) {
 			want: daemon.ModeReconcile,
 		},
 		{
+			name:     "reconcile: local empty, index populated, no flag (gate handles it post-classify)",
+			localPop: false, indexPop: true,
+			want: daemon.ModeReconcile,
+		},
+		{
 			name:     "restore: local empty, index populated, --restore",
 			localPop: false, indexPop: true, restore: true,
+			want: daemon.ModeRestore,
+		},
+		{
+			name:     "restore: local populated, index populated, --restore",
+			localPop: true, indexPop: true, restore: true,
 			want: daemon.ModeRestore,
 		},
 		{
@@ -46,9 +56,14 @@ func TestClassify_AllFourBasicStates(t *testing.T) {
 			want: daemon.ModePurge,
 		},
 		{
-			name:     "refuse: local empty, index populated, no flag",
-			localPop: false, indexPop: true,
-			wantErr: true, wantSentry: daemon.ErrRefuseStart,
+			name:     "purge: local populated, index populated, --purge",
+			localPop: true, indexPop: true, purge: true,
+			want: daemon.ModePurge,
+		},
+		{
+			name:     "first-backup wins over restore when index is empty",
+			localPop: true, indexPop: false, restore: true,
+			want: daemon.ModeFirstBackup,
 		},
 		{
 			name:     "refuse: --restore and --purge both set is a caller error",

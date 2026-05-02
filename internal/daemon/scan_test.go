@@ -237,8 +237,10 @@ func TestScanOnce_PruneFailurePropagates(t *testing.T) {
 	}
 }
 
-// TestRun_RefusesWhenBackupDirEmptyButIndexPopulated asserts Run wraps ErrRefuseStart for an empty backup dir with a populated index.
-func TestRun_RefusesWhenBackupDirEmptyButIndexPopulated(t *testing.T) {
+// TestRun_RefusesWhenIndexedFilesMissing asserts Run refuses to start when
+// any indexed file is absent on disk and no flag has been provided. Tests
+// run with non-TTY stdin, so the gate's refuse path fires.
+func TestRun_RefusesWhenIndexedFilesMissing(t *testing.T) {
 	dataDir := t.TempDir()
 	backupDir := t.TempDir()
 
@@ -246,7 +248,7 @@ func TestRun_RefusesWhenBackupDirEmptyButIndexPopulated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed index: %v", err)
 	}
-	if err := ix.Put(index.FileEntry{Path: filepath.Join(backupDir, "gone.bin"), Size: 1}); err != nil {
+	if err := ix.Put(index.FileEntry{Path: "gone.bin", Size: 1}); err != nil {
 		t.Fatalf("seed put: %v", err)
 	}
 	if err := ix.Close(); err != nil {
@@ -260,7 +262,7 @@ func TestRun_RefusesWhenBackupDirEmptyButIndexPopulated(t *testing.T) {
 		ChunkSize:  1 << 20,
 	})
 	if err == nil {
-		t.Fatal("Run accepted empty-local + populated-index without --restore/--purge")
+		t.Fatal("Run accepted missing-from-disk indexed file without --restore/--purge/--acknowledge-deletes")
 	}
 	if !errors.Is(err, daemon.ErrRefuseStart) {
 		t.Errorf("err = %v, want wraps ErrRefuseStart", err)

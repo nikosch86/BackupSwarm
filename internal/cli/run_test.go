@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -529,8 +530,8 @@ func TestRunCmd_AcceptsScrubInterval(t *testing.T) {
 	}
 }
 
-// TestRunCmd_RefusesWhenLocalEmptyIndexPopulated asserts run wraps daemon.ErrRefuseStart for an empty local with a populated index.
-func TestRunCmd_RefusesWhenLocalEmptyIndexPopulated(t *testing.T) {
+// TestRunCmd_RefusesWhenIndexedFilesMissing asserts run wraps daemon.ErrRefuseStart when indexed files are absent on disk and no flag has been provided.
+func TestRunCmd_RefusesWhenIndexedFilesMissing(t *testing.T) {
 	dataDir := t.TempDir()
 	backupDir := t.TempDir()
 
@@ -538,7 +539,7 @@ func TestRunCmd_RefusesWhenLocalEmptyIndexPopulated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed index open: %v", err)
 	}
-	if err := ix.Put(index.FileEntry{Path: "/irrelevant", Size: 1}); err != nil {
+	if err := ix.Put(index.FileEntry{Path: "gone.bin", Size: 1}); err != nil {
 		t.Fatalf("seed index put: %v", err)
 	}
 	if err := ix.Close(); err != nil {
@@ -557,9 +558,54 @@ func TestRunCmd_RefusesWhenLocalEmptyIndexPopulated(t *testing.T) {
 	})
 	err = root.Execute()
 	if err == nil {
-		t.Error("run accepted empty-local + populated-index without --restore/--purge")
+		t.Error("run accepted indexed-but-missing file without --restore/--purge/--acknowledge-deletes")
 	}
 	if !errors.Is(err, daemon.ErrRefuseStart) {
 		t.Errorf("err = %v, want wraps daemon.ErrRefuseStart", err)
+	}
+}
+
+// TestRunCmd_AcknowledgeDeletesBypassesGate asserts --acknowledge-deletes lets the daemon proceed past the gate (it then enters the scan loop, which we cancel).
+func TestRunCmd_AcknowledgeDeletesBypassesGate(t *testing.T) {
+	dataDir := t.TempDir()
+	backupDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(backupDir, "still-here.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	ix, err := index.Open(filepath.Join(dataDir, "index.db"))
+	if err != nil {
+		t.Fatalf("seed index open: %v", err)
+	}
+	if err := ix.Put(index.FileEntry{Path: "gone.bin", Size: 1}); err != nil {
+		t.Fatalf("seed index put: %v", err)
+	}
+	if err := ix.Close(); err != nil {
+		t.Fatalf("seed index close: %v", err)
+	}
+
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", dataDir,
+		"run",
+		"--backup-dir", backupDir,
+		"--listen", "127.0.0.1:0",
+		"--acknowledge-deletes",
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+	time.AfterFunc(200*time.Millisecond, cancel)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("run with --acknowledge-deletes returned err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit within 5s of cancel")
 	}
 }

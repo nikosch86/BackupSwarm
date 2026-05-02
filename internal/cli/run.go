@@ -66,6 +66,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		restoreRetryBackoff time.Duration
 		restore             bool
 		purge               bool
+		acknowledgeDeletes  bool
 		invite              bool
 		tokenOut            string
 		noCA                bool
@@ -183,6 +184,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				RestoreRetryBackoff: restoreRetryBackoff,
 				Restore:             restore,
 				Purge:               purge,
+				AcknowledgeDeletes:  acknowledgeDeletes,
 				IssueInitialInvite:  invite,
 				InitialInviteOut:    tokenOut,
 				NoCA:                noCA,
@@ -211,6 +213,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().DurationVar(&restoreRetryTimeout, "restore-retry-timeout", 0, "When --restore is set, the maximum total time to retry files whose chunks are unreachable on the first pass (peers may come back online via heartbeat-driven re-dial). 0 disables retries.")
 	cmd.Flags().DurationVar(&restoreRetryBackoff, "restore-retry-backoff", time.Second, "Initial backoff between restore retries; doubles up to 30 s")
 	cmd.Flags().BoolVar(&purge, "purge", false, "Clear all indexed chunks from the swarm and reset the index (required alternative to --restore when backup-dir empty)")
+	cmd.Flags().BoolVar(&acknowledgeDeletes, "acknowledge-deletes", false, "Confirm that indexed files now missing from disk were intentionally deleted; the next scan tick propagates DeleteChunk to peers")
 	cmd.Flags().BoolVar(&invite, "invite", false, "Issue an initial invite token at startup; print it to stdout and continue into the daemon")
 	cmd.Flags().StringVar(&tokenOut, "token-out", "", "Write the initial invite token to this file (atomic); requires --invite")
 	cmd.Flags().BoolVar(&noCA, "no-ca", false, "Skip swarm CA generation; use pubkey-pin trust. Locks the swarm into pin mode for life. Requires --invite.")

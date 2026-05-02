@@ -53,33 +53,33 @@ const (
 	ModePurge
 )
 
-// ErrRefuseStart is returned by Classify when the backup dir is empty but
-// the index is populated without --restore or --purge.
-var ErrRefuseStart = errors.New("local backup dir is empty but index is populated; pass --restore or --purge")
+// ErrRefuseStart is the sentinel returned when indexed files are missing
+// from disk and no resolution flag has been supplied.
+var ErrRefuseStart = errors.New("indexed files missing from disk; pass --restore, --purge, or --acknowledge-deletes")
 
 // ErrConflictingFlags is returned by Classify when both --restore and --purge are set.
 var ErrConflictingFlags = errors.New("--restore and --purge are mutually exclusive")
 
-// Classify returns the Mode the daemon should run in. restore and purge
-// are only consulted in the (local-empty, index-populated) case.
+// Classify returns the Mode the daemon should run in. Refuse-to-start on
+// missing-from-disk files is deferred to the per-file gate run after
+// Classify.
 func Classify(localPopulated, indexPopulated, restore, purge bool) (Mode, error) {
 	if restore && purge {
 		return 0, ErrConflictingFlags
 	}
-	switch {
-	case !localPopulated && !indexPopulated:
+	if !indexPopulated {
+		if localPopulated {
+			return ModeFirstBackup, nil
+		}
 		return ModeIdle, nil
-	case localPopulated && !indexPopulated:
-		return ModeFirstBackup, nil
-	case localPopulated && indexPopulated:
-		return ModeReconcile, nil
-	case !localPopulated && indexPopulated && restore:
-		return ModeRestore, nil
-	case !localPopulated && indexPopulated && purge:
-		return ModePurge, nil
-	default:
-		return 0, ErrRefuseStart
 	}
+	if restore {
+		return ModeRestore, nil
+	}
+	if purge {
+		return ModePurge, nil
+	}
+	return ModeReconcile, nil
 }
 
 // ScanOnceOptions configures a single owner-side scan: back up changed
@@ -171,6 +171,9 @@ type Options struct {
 	RestoreRetryBackoff time.Duration
 	// Purge selects ModePurge.
 	Purge bool
+	// AcknowledgeDeletes lets the daemon proceed when indexed files are
+	// missing from disk; the next scan tick propagates DeleteChunk to peers.
+	AcknowledgeDeletes bool
 	// DialTimeout bounds the initial dial to the storage peer. Zero defaults to 30s.
 	DialTimeout time.Duration
 	// IssueInitialInvite issues a token at startup.
@@ -335,6 +338,21 @@ func Run(ctx context.Context, opts Options) error {
 		mode, err = Classify(localPop, len(indexEntries) > 0, opts.Restore, opts.Purge)
 		if err != nil {
 			return fmt.Errorf("classify startup mode: %w", err)
+		}
+		if mode == ModeReconcile {
+			missing, err := EnumerateMissingIndexEntries(opts.BackupDir, idx)
+			if err != nil {
+				return fmt.Errorf("enumerate missing index entries: %w", err)
+			}
+			mode, err = ResolveMissingFilesGate(GateOptions{
+				Missing:            missing,
+				Restore:            opts.Restore,
+				Purge:              opts.Purge,
+				AcknowledgeDeletes: opts.AcknowledgeDeletes,
+			})
+			if err != nil {
+				return err
+			}
 		}
 	}
 

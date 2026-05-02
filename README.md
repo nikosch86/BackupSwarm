@@ -196,6 +196,25 @@ plaintext hash is verified against the index's `PlaintextHash`; a
 mismatch aborts the restore. Restored files keep their original
 mtime so the daemon's incremental scan does not re-upload them.
 
+### Restart-time safety: missing-source files block startup
+
+If the daemon comes up and finds index entries pointing at files that
+are no longer on disk under `--backup-dir`, it does **not** propagate
+the deletes to peers automatically. Instead it stops at startup and
+asks for an explicit resolution:
+
+| Flag | Effect |
+|---|---|
+| `--restore` | reassemble the missing files from peers, then enter the scan loop |
+| `--purge` | delete every indexed chunk from peers and clear the index |
+| `--acknowledge-deletes` | confirm the deletes were intentional; the next scan tick sends `DeleteChunk` to peers |
+
+On an interactive terminal the daemon prompts for `[r]/[p]/[a]/[q]`
+instead of refusing. Compose / systemd / non-TTY runs always need one
+of the flags. This is the tripwire that prevents a wiped or
+not-yet-mounted source directory from auto-pruning the only off-site
+copy of your data.
+
 ## Disaster recovery
 
 If the backup-source node is wiped — disk failure, lost laptop, ransomware
