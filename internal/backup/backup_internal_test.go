@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -1842,6 +1843,47 @@ func TestHandlePutChunkStream_LogsRichError(t *testing.T) {
 	}
 	if !strings.Contains(logged, "level=WARN") {
 		t.Errorf("slog capture missing WARN level; got: %s", logged)
+	}
+}
+
+// TestHandlePutChunkStream_LogsSuccess asserts a successful PutOwned
+// emits an INFO line carrying the owner pubkey, content hash, and blob
+// size.
+func TestHandlePutChunkStream_LogsSuccess(t *testing.T) {
+	var captured bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&captured, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	blob := []byte("payload-for-stored-log")
+	var reqBuf bytes.Buffer
+	if err := protocol.WritePutChunkRequest(&reqBuf, blob); err != nil {
+		t.Fatalf("WritePutChunkRequest: %v", err)
+	}
+	owner := []byte{0xab, 0xcd, 0xef}
+	rw := &fakeStream{writeErrAt: -1, rd: &reqBuf}
+	if err := handlePutChunkStream(context.Background(), rw, st, owner); err != nil {
+		t.Fatalf("handlePutChunkStream: %v", err)
+	}
+
+	logged := captured.String()
+	if !strings.Contains(logged, "stored chunk") {
+		t.Errorf("missing 'stored chunk' message; got: %s", logged)
+	}
+	if !strings.Contains(logged, "level=INFO") {
+		t.Errorf("missing INFO level; got: %s", logged)
+	}
+	if !strings.Contains(logged, hex.EncodeToString(owner)) {
+		t.Errorf("missing peer_pub %q; got: %s", hex.EncodeToString(owner), logged)
+	}
+	if !strings.Contains(logged, "bytes=22") {
+		t.Errorf("missing bytes=22 (len of payload); got: %s", logged)
 	}
 }
 
