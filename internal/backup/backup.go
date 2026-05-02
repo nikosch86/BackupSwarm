@@ -775,7 +775,7 @@ func handlePutChunkStream(ctx context.Context, rw io.ReadWriter, st *store.Store
 		slog.WarnContext(ctx, "put chunk failed", "code", code, "err", putErr)
 		return protocol.WritePutChunkResponse(rw, [32]byte{}, code)
 	}
-	slog.InfoContext(ctx, "stored chunk",
+	slog.DebugContext(ctx, "stored chunk",
 		"peer_pub", hex.EncodeToString(owner),
 		"hash", hex.EncodeToString(hash[:]),
 		"bytes", len(blob),

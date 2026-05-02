@@ -1847,7 +1847,7 @@ func TestHandlePutChunkStream_LogsRichError(t *testing.T) {
 }
 
 // TestHandlePutChunkStream_LogsSuccess asserts a successful PutOwned
-// emits an INFO line carrying the owner pubkey, content hash, and blob
+// emits a DEBUG line carrying the owner pubkey, content hash, and blob
 // size.
 func TestHandlePutChunkStream_LogsSuccess(t *testing.T) {
 	var captured bytes.Buffer
@@ -1876,8 +1876,8 @@ func TestHandlePutChunkStream_LogsSuccess(t *testing.T) {
 	if !strings.Contains(logged, "stored chunk") {
 		t.Errorf("missing 'stored chunk' message; got: %s", logged)
 	}
-	if !strings.Contains(logged, "level=INFO") {
-		t.Errorf("missing INFO level; got: %s", logged)
+	if !strings.Contains(logged, "level=DEBUG") {
+		t.Errorf("missing DEBUG level; got: %s", logged)
 	}
 	if !strings.Contains(logged, hex.EncodeToString(owner)) {
 		t.Errorf("missing peer_pub %q; got: %s", hex.EncodeToString(owner), logged)
