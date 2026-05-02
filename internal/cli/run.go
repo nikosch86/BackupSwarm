@@ -299,6 +299,11 @@ func resolveAutoAdvertise(ctx context.Context, dataDir, listenAddr, stunServer s
 		_ = listener.Close()
 		return "", nil, fmt.Errorf("nat: resolve auto advertise: %w", err)
 	}
+	slog.InfoContext(ctx, "nat: discovered external advertise address",
+		"host", host,
+		"server", stunServer,
+		"port", port,
+	)
 	return net.JoinHostPort(host, port), listener, nil
 }
 

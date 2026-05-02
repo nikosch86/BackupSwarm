@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -110,6 +111,50 @@ func TestInviteCmd_AdvertiseAddrAuto_STUNFailureSurfaces(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "network unreachable") {
 		t.Errorf("err = %v, want STUN failure mentioned", err)
+	}
+}
+
+// TestInviteCmd_AdvertiseAddrAuto_LogsDiscovery asserts the steady-state
+// invite path emits an slog Info line naming the STUN-discovered host.
+func TestInviteCmd_AdvertiseAddrAuto_LogsDiscovery(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := daemon.WriteListenAddr(dataDir, "127.0.0.1:54321"); err != nil {
+		t.Fatalf("seed listen.addr: %v", err)
+	}
+
+	orig := cliDiscoverFunc
+	t.Cleanup(func() { cliDiscoverFunc = orig })
+	cliDiscoverFunc = func(_ context.Context, _ string) (string, error) {
+		return "203.0.113.99", nil
+	}
+
+	logBuf := &syncBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	root := NewRootCmd()
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{
+		"--data-dir", dataDir,
+		"invite",
+		"--advertise-addr", "auto",
+		"--stun-server", "stun.example.org:3478",
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("invite: %v", err)
+	}
+
+	got := logBuf.String()
+	if !strings.Contains(got, "nat: discovered external advertise address") {
+		t.Errorf("missing discovery log line; buffer:\n%s", got)
+	}
+	if !strings.Contains(got, "host=203.0.113.99") {
+		t.Errorf("discovery log missing host=203.0.113.99; buffer:\n%s", got)
+	}
+	if !strings.Contains(got, "server=stun.example.org:3478") {
+		t.Errorf("discovery log missing server=stun.example.org:3478; buffer:\n%s", got)
 	}
 }
 

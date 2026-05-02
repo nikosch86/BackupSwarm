@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -87,6 +88,37 @@ func TestRunCmd_AdvertiseAddrAuto_STUNFailureSurfaces(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "network unreachable") {
 		t.Errorf("err = %v, want STUN failure mentioned", err)
+	}
+}
+
+// TestRunCmd_AdvertiseAddrAuto_LogsDiscovery asserts the run path emits
+// an slog Info line naming the STUN-discovered host so operators can see
+// what `--advertise-addr=auto` resolved to.
+func TestRunCmd_AdvertiseAddrAuto_LogsDiscovery(t *testing.T) {
+	orig := cliDiscoverFunc
+	t.Cleanup(func() { cliDiscoverFunc = orig })
+	cliDiscoverFunc = func(_ context.Context, _ string) (string, error) {
+		return "203.0.113.99", nil
+	}
+
+	logBuf := &syncBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	_ = runRunInviteForToken(t, t.TempDir(),
+		"--advertise-addr", "auto",
+		"--stun-server", "stun.example.org:3478",
+	)
+	got := logBuf.String()
+	if !strings.Contains(got, "nat: discovered external advertise address") {
+		t.Errorf("missing discovery log line; buffer:\n%s", got)
+	}
+	if !strings.Contains(got, "host=203.0.113.99") {
+		t.Errorf("discovery log missing host=203.0.113.99; buffer:\n%s", got)
+	}
+	if !strings.Contains(got, "server=stun.example.org:3478") {
+		t.Errorf("discovery log missing server=stun.example.org:3478; buffer:\n%s", got)
 	}
 }
 

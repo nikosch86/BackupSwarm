@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -122,6 +123,10 @@ func resolveAutoHost(ctx context.Context, stunServer string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("nat: resolve auto advertise: %w", err)
 	}
+	slog.InfoContext(ctx, "nat: discovered external advertise address",
+		"host", host,
+		"server", stunServer,
+	)
 	return host, nil
 }
 
