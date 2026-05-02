@@ -20,7 +20,7 @@ echo "your data here" > ./backup/notes.txt
 
 export BACKUPSWARM_INVITE_TOKEN="<token issued by an existing swarm member>"
 # Optional: NAT-routable advertise address if you'll issue invites later.
-# export BACKUPSWARM_ADVERTISE_ADDR=203.0.113.7:7779
+# export BACKUPSWARM_ADVERTISE_ADDR=203.0.113.7:7777
 
 docker compose up -d
 docker compose logs -f dual-role

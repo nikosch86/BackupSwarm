@@ -14,6 +14,11 @@ All variants pull the prebuilt image from GitHub Container Registry. See
 [Get the prebuilt image](../README.md#get-the-prebuilt-image) in the
 top-level README for tag conventions and the rolling/stable channels.
 
+All three compose files bind to `0.0.0.0:7777` via the image's
+`BACKUPSWARM_LISTEN` default — no `--listen` flag needed. To run several
+of these on one host, change the `ports:` host-side mapping or override
+`BACKUPSWARM_LISTEN` per service.
+
 ## The three roles
 
 - **storage-peer**: donates disk + bandwidth to the swarm; has no local

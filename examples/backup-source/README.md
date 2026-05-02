@@ -26,7 +26,7 @@ echo "your data here" > ./backup/notes.txt
 
 export BACKUPSWARM_INVITE_TOKEN="<token issued by a storage-capable swarm member>"
 # Optional: NAT-routable advertise address if you'll issue invites later.
-# export BACKUPSWARM_ADVERTISE_ADDR=203.0.113.7:7778
+# export BACKUPSWARM_ADVERTISE_ADDR=203.0.113.7:7777
 
 docker compose up -d
 docker compose logs -f backup-source
@@ -44,7 +44,7 @@ To restore the contents of `/backup` from the swarm onto a fresh node:
 ```bash
 docker compose down
 rm -rf ./backup/*    # or run on a new host with an empty mount
-docker compose run --rm backup-source run --backup-dir /backup --restore --listen 0.0.0.0:7778
+docker compose run --rm backup-source run --backup-dir /backup --restore
 ```
 
 See the top-level README "Restore" section for the disaster-recovery

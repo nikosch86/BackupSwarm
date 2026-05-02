@@ -50,6 +50,18 @@ func (s *ConnSet) Remove(conn *bsquic.Conn) {
 	}
 }
 
+// Get returns the live conn for the given pubkey, or nil+false if absent.
+func (s *ConnSet) Get(pub []byte) (*bsquic.Conn, bool) {
+	if len(pub) == 0 {
+		return nil, false
+	}
+	key := hex.EncodeToString(pub)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.conns[key]
+	return c, ok
+}
+
 // Snapshot returns a copy of the current conn slice for safe iteration.
 func (s *ConnSet) Snapshot() []*bsquic.Conn {
 	s.mu.Lock()

@@ -49,7 +49,7 @@ func TestBroadcast_EndToEnd(t *testing.T) {
 	}
 	serveErrCh := make(chan error, 1)
 	go func() {
-		serveErrCh <- backup.Serve(ctx, listener, nil, announceFn, nil, nil)
+		serveErrCh <- backup.Serve(ctx, listener, nil, announceFn, nil, nil, nil, nil)
 	}()
 
 	dialCtx, dialCancel := context.WithTimeout(ctx, 5*time.Second)
@@ -128,7 +128,7 @@ func newGossipNode(t *testing.T, ctx context.Context, name string) *gossipNode {
 		Conns: cs,
 	}
 	obs := &backup.ConnObserver{OnAccept: cs.Add, OnClose: cs.Remove}
-	go func() { _ = backup.Serve(ctx, listener, nil, router.HandleStream, nil, obs) }()
+	go func() { _ = backup.Serve(ctx, listener, nil, router.HandleStream, nil, nil, nil, obs) }()
 
 	return &gossipNode{
 		pub:      pub,

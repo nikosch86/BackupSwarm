@@ -52,6 +52,7 @@ func TestRunCmd_AcceptsMissingBackupDir(t *testing.T) {
 }
 
 func TestRunCmd_RequiresListen(t *testing.T) {
+	t.Setenv("BACKUPSWARM_LISTEN", "")
 	root := NewRootCmd()
 	var stdout, stderr bytes.Buffer
 	root.SetOut(&stdout)
@@ -59,6 +60,63 @@ func TestRunCmd_RequiresListen(t *testing.T) {
 	root.SetArgs([]string{"--data-dir", t.TempDir(), "run", "--backup-dir", t.TempDir()})
 	if err := root.Execute(); err == nil {
 		t.Error("run accepted missing --listen")
+	}
+}
+
+// TestRunCmd_AcceptsListenFromEnv asserts BACKUPSWARM_LISTEN supplies the
+// listen address when --listen is omitted.
+func TestRunCmd_AcceptsListenFromEnv(t *testing.T) {
+	t.Setenv("BACKUPSWARM_LISTEN", "127.0.0.1:0")
+
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"--data-dir", t.TempDir(), "run", "--backup-dir", t.TempDir()})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("run with BACKUPSWARM_LISTEN env returned err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit within 5s of cancel")
+	}
+}
+
+// TestRunCmd_ListenFlagOverridesEnv asserts an explicit --listen wins over
+// BACKUPSWARM_LISTEN.
+func TestRunCmd_ListenFlagOverridesEnv(t *testing.T) {
+	t.Setenv("BACKUPSWARM_LISTEN", "999.999.999.999:7777")
+
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--backup-dir", t.TempDir(),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("run with --listen + invalid env returned err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit within 5s of cancel")
 	}
 }
 

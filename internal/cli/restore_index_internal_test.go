@@ -191,7 +191,7 @@ func newRestoreIndexCmdRig(t *testing.T) *restoreIndexCmdRig {
 		cancel()
 		_ = listener.Close()
 	})
-	go func() { _ = backup.Serve(ctx, listener, peerStore, nil, nil, nil) }()
+	go func() { _ = backup.Serve(ctx, listener, peerStore, nil, nil, nil, nil, nil) }()
 
 	if _, _, err := node.Ensure(dataDir); err != nil {
 		t.Fatalf("node.Ensure: %v", err)

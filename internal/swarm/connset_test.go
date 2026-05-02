@@ -2,6 +2,7 @@ package swarm_test
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
 	"testing"
 
 	bsquic "backupswarm/internal/quic"
@@ -109,5 +110,56 @@ func TestConnSet_SnapshotExceptEmptyExcludeReturnsAll(t *testing.T) {
 	}
 	if got := len(cs.SnapshotExcept(nil)); got != 2 {
 		t.Errorf("SnapshotExcept(nil) len = %d, want 2", got)
+	}
+}
+
+// Get returns the live conn registered under its pubkey.
+func TestConnSet_Get_HitReturnsConn(t *testing.T) {
+	rig := setupQuicPair(t, 1)
+	cs := swarm.NewConnSet()
+	cs.Add(rig.introSide[0])
+	got, ok := cs.Get(rig.introSide[0].RemotePub())
+	if !ok {
+		t.Fatal("Get(known pub) ok = false, want true")
+	}
+	if got != rig.introSide[0] {
+		t.Errorf("Get returned different *Conn pointer")
+	}
+}
+
+// Get returns nil+false for an unknown pubkey.
+func TestConnSet_Get_MissReturnsZeroValue(t *testing.T) {
+	rig := setupQuicPair(t, 1)
+	cs := swarm.NewConnSet()
+	cs.Add(rig.introSide[0])
+	stranger, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("gen stranger key: %v", err)
+	}
+	got, ok := cs.Get(stranger)
+	if ok {
+		t.Error("Get(unknown pub) ok = true, want false")
+	}
+	if got != nil {
+		t.Error("Get(unknown pub) returned non-nil conn")
+	}
+}
+
+// Get short-circuits on an empty pubkey: nil+false, no map lookup.
+func TestConnSet_Get_EmptyPubReturnsZeroValue(t *testing.T) {
+	cs := swarm.NewConnSet()
+	got, ok := cs.Get(nil)
+	if ok {
+		t.Error("Get(nil) ok = true, want false")
+	}
+	if got != nil {
+		t.Error("Get(nil) returned non-nil conn")
+	}
+	got, ok = cs.Get([]byte{})
+	if ok {
+		t.Error("Get([]byte{}) ok = true, want false")
+	}
+	if got != nil {
+		t.Error("Get([]byte{}) returned non-nil conn")
 	}
 }

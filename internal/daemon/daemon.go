@@ -425,8 +425,17 @@ func Run(ctx context.Context, opts Options) error {
 	defer dialer.CloseAll()
 	router.OnApplied = makeImmediateDialOnApplied(peerStore, connSet, dialer)
 
+	punchAdvertise := opts.AdvertiseAddr
+	if punchAdvertise == "" {
+		punchAdvertise = listener.Addr().String()
+	}
+	punchOrch := newPunchOrchestrator(ctx, listener, connSet, peerStore, id.PrivateKey, punchAdvertise)
+	defer punchOrch.pendingPunches.Wait()
+
 	serveErrCh := make(chan error, 1)
-	go func() { serveErrCh <- backup.Serve(ctx, listener, st, router.HandleStream, joinHandler, obs) }()
+	go func() {
+		serveErrCh <- backup.Serve(ctx, listener, st, router.HandleStream, joinHandler, punchOrch.handleRequest, punchOrch.handleSignal, obs)
+	}()
 
 	var modeStr atomic.Pointer[string]
 	initialMode := "storage-only"
@@ -721,7 +730,7 @@ type outboundDialer struct {
 func (d *outboundDialer) register(conn *bsquic.Conn, p peers.Peer) {
 	d.connSet.Add(conn)
 	d.reach.MarkConn(conn, swarm.StateReachable)
-	go backup.AcceptStreams(d.ctx, conn, d.st, d.annHandler, d.joinHandler)
+	go backup.AcceptStreams(d.ctx, conn, d.st, d.annHandler, d.joinHandler, nil, nil)
 	d.mu.Lock()
 	d.conns = append(d.conns, conn)
 	d.mu.Unlock()

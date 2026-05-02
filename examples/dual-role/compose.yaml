@@ -13,11 +13,9 @@ services:
       # Bind-mount the directory you want backed up. Adjust the host path.
       - ./backup:/backup:ro
     ports:
-      - "7779:7779/udp"
+      - "7777:7777/udp"
     command:
       - run
-      - --listen
-      - 0.0.0.0:7779
       - --backup-dir
       - /backup
       - --max-storage

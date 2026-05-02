@@ -65,6 +65,10 @@ docker pull ghcr.io/nikosch86/backupswarm:main-dev
 Ready-to-run compose templates for the three node roles
 (storage-peer, backup-source, dual-role) live under [`examples/`](examples/).
 
+### Container defaults
+
+The image bakes in `BACKUPSWARM_LISTEN=0.0.0.0:7777`, so `docker run … backupswarm run` binds to that port without a `--listen` flag. Override by setting the env var (`-e BACKUPSWARM_LISTEN=0.0.0.0:9000`) or by passing `--listen` on the CLI; the flag wins over the env.
+
 ### Auto-join from an env var
 
 For containerised joiners, `run` reads `BACKUPSWARM_INVITE_TOKEN` at startup
@@ -76,9 +80,9 @@ docker run --rm \
     -v bsw-data:/data \
     -v bsw-src:/backup \
     -e BACKUPSWARM_INVITE_TOKEN="$(cat /tmp/founder.token)" \
-    -p 7778:7778/udp \
+    -p 7777:7777/udp \
     ghcr.io/nikosch86/backupswarm:latest \
-    run --listen 0.0.0.0:7778 --backup-dir /backup
+    run --backup-dir /backup
 ```
 
 ### NAT / advertised address
@@ -86,7 +90,8 @@ docker run --rm \
 When the introducer is behind NAT, the address embedded in invite tokens
 must be the externally-routable one, not the bound listener. Pass
 `--advertise-addr <host:port>` to `run --invite` (founder bootstrap) or
-`invite` (steady-state). When `--listen` is omitted, it defaults to
+`invite` (steady-state). When `--listen` is omitted (and
+`BACKUPSWARM_LISTEN` is unset), it defaults to
 `0.0.0.0:<port-of-advertise-addr>` — convenient for Docker setups where
 the bound address is irrelevant. `BACKUPSWARM_ADVERTISE_ADDR` is read as
 a fallback when the flag is empty.
@@ -122,7 +127,7 @@ docker run --rm \
     -v bsw-data:/data \
     -p 7777:7777/udp \
     ghcr.io/nikosch86/backupswarm:latest \
-    run --invite --listen 0.0.0.0:7777 --advertise-addr auto
+    run --invite --advertise-addr auto
 ```
 
 #### UDP buffer warning (optional)

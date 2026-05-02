@@ -147,6 +147,13 @@ func (l *Listener) SetVerifyPeer(fn VerifyPeerFunc) {
 // Addr returns the local address the listener is bound to.
 func (l *Listener) Addr() net.Addr { return l.inner.Addr() }
 
+// PacketConn returns the underlying UDP socket. NAT-traversal callers
+// reuse it to send raw datagrams from the same (ip,port) tuple the QUIC
+// stack listens on, so a punch packet opens the same NAT mapping a
+// subsequent QUIC Dial will traverse. Writes to the returned conn do not
+// disturb the QUIC accept loop.
+func (l *Listener) PacketConn() net.PacketConn { return l.conn }
+
 // Accept blocks until a new peer connection is established or ctx is cancelled.
 func (l *Listener) Accept(ctx context.Context) (*Conn, error) {
 	qc, err := l.inner.Accept(ctx)

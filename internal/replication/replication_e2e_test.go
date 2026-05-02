@@ -44,7 +44,7 @@ func newRepPeer(t *testing.T, ctx context.Context) *repPeer {
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 
-	go func() { _ = backup.Serve(ctx, listener, st, nil, nil, nil) }()
+	go func() { _ = backup.Serve(ctx, listener, st, nil, nil, nil, nil, nil) }()
 
 	return &repPeer{pub: pub, listener: listener, store: st}
 }

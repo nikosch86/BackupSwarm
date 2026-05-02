@@ -70,6 +70,26 @@ func TestListen_AssignsAddr(t *testing.T) {
 	}
 }
 
+// TestListener_PacketConn_ExposesUnderlyingSocket asserts the listener
+// surfaces its UDP socket so callers (NAT punching) can WriteTo through
+// the same mapping QUIC binds to. The returned conn must share Addr.
+func TestListener_PacketConn_ExposesUnderlyingSocket(t *testing.T) {
+	t.Parallel()
+	_, priv := newKeyPair(t)
+	l, err := bsw.Listen("127.0.0.1:0", priv, nil, nil)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+	pc := l.PacketConn()
+	if pc == nil {
+		t.Fatal("PacketConn returned nil")
+	}
+	if pc.LocalAddr().String() != l.Addr().String() {
+		t.Errorf("PacketConn LocalAddr = %q, Listener Addr = %q", pc.LocalAddr(), l.Addr())
+	}
+}
+
 // TestRoundTrip exercises an mTLS handshake and chunk-sized stream echo and asserts both sides observe the peer's verified Ed25519 pubkey.
 func TestRoundTrip(t *testing.T) {
 	t.Parallel()

@@ -37,8 +37,8 @@ var (
 	indexPutFunc = func(idx *index.Index, entry index.FileEntry) error {
 		return idx.Put(entry)
 	}
-	dispatchStreamFunc func(ctx context.Context, rw io.ReadWriter, st *store.Store, ownerKey []byte, ann AnnouncementHandler, join JoinHandler) error = dispatchStream
-	serveConnStreamCap                                                                                                                                = int(bsquic.MaxIncomingStreamsPerConn)
+	dispatchStreamFunc func(ctx context.Context, rw io.ReadWriter, st *store.Store, ownerKey []byte, ann AnnouncementHandler, join JoinHandler, punchReq, punchSig PunchHandler) error = dispatchStream
+	serveConnStreamCap                                                                                                                                                                 = int(bsquic.MaxIncomingStreamsPerConn)
 )
 
 // RunOptions is the owner-side configuration for a backup invocation.
@@ -432,6 +432,47 @@ func SendPing(ctx context.Context, conn *bsquic.Conn) error {
 	return sendPing(ctx, bsquicConnAdapter{c: conn})
 }
 
+// SendPunchRequest asks the rendezvous on conn to relay a punch signal
+// to the peer named in p.PeerPub, advertising p.Addr as the initiator's
+// external addr.
+func SendPunchRequest(ctx context.Context, conn *bsquic.Conn, p protocol.PunchPayload) error {
+	return sendPunch(ctx, bsquicConnAdapter{c: conn}, protocol.MsgPunchRequest, p)
+}
+
+// SendPunchSignal relays a punch signal from a rendezvous to a target,
+// telling the target to fire punch packets at the initiator named in p.
+func SendPunchSignal(ctx context.Context, conn *bsquic.Conn, p protocol.PunchPayload) error {
+	return sendPunch(ctx, bsquicConnAdapter{c: conn}, protocol.MsgPunchSignal, p)
+}
+
+// sendPunch is the shared body for both punch send paths; the only
+// difference is the dispatch byte.
+func sendPunch(ctx context.Context, conn streamOpener, kind protocol.MessageType, p protocol.PunchPayload) error {
+	s, err := conn.OpenStream(ctx)
+	if err != nil {
+		return fmt.Errorf("open stream: %w", err)
+	}
+	if err := protocol.WriteMessageType(s, kind); err != nil {
+		_ = s.Close()
+		return err
+	}
+	if err := protocol.WritePunchPayload(s, p); err != nil {
+		_ = s.Close()
+		return err
+	}
+	if err := s.Close(); err != nil {
+		return fmt.Errorf("close send side: %w", err)
+	}
+	appErr, err := protocol.ReadPunchResponse(s)
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+	if appErr != "" {
+		return fmt.Errorf("peer rejected punch: %s", appErr)
+	}
+	return nil
+}
+
 // SendDeleteChunk asks conn to remove its blob for hash. The owner is
 // the conn's TLS-authenticated pubkey; no per-message auth is needed.
 func SendDeleteChunk(ctx context.Context, conn *bsquic.Conn, hash [32]byte) error {
@@ -585,6 +626,11 @@ type AnnouncementHandler func(ctx context.Context, r io.Reader, senderPub []byte
 // joinerPub is the conn's TLS-authenticated pubkey.
 type JoinHandler func(ctx context.Context, rw io.ReadWriter, joinerPub []byte) error
 
+// PunchHandler reads one MsgPunchRequest or MsgPunchSignal body off rw
+// and writes the response. peerPub is the conn's TLS-authenticated pubkey
+// (the initiator on a rendezvous; the relaying rendezvous on a target).
+type PunchHandler func(ctx context.Context, rw io.ReadWriter, peerPub []byte) error
+
 // ConnObserver receives per-connection accept/close callbacks.
 type ConnObserver struct {
 	OnAccept func(*bsquic.Conn)
@@ -592,7 +638,7 @@ type ConnObserver struct {
 }
 
 // Serve accepts inbound QUIC connections on l and dispatches streams against st.
-func Serve(ctx context.Context, l *bsquic.Listener, st *store.Store, ann AnnouncementHandler, join JoinHandler, obs *ConnObserver) error {
+func Serve(ctx context.Context, l *bsquic.Listener, st *store.Store, ann AnnouncementHandler, join JoinHandler, punchReq, punchSig PunchHandler, obs *ConnObserver) error {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	for {
@@ -606,12 +652,12 @@ func Serve(ctx context.Context, l *bsquic.Listener, st *store.Store, ann Announc
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			serveConn(ctx, conn, st, ann, join, obs)
+			serveConn(ctx, conn, st, ann, join, punchReq, punchSig, obs)
 		}()
 	}
 }
 
-func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann AnnouncementHandler, join JoinHandler, obs *ConnObserver) {
+func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann AnnouncementHandler, join JoinHandler, punchReq, punchSig PunchHandler, obs *ConnObserver) {
 	if obs != nil && obs.OnAccept != nil {
 		obs.OnAccept(conn)
 	}
@@ -621,11 +667,11 @@ func serveConn(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann Anno
 		}
 		_ = conn.Close()
 	}()
-	AcceptStreams(ctx, conn, st, ann, join)
+	AcceptStreams(ctx, conn, st, ann, join, punchReq, punchSig)
 }
 
 // AcceptStreams runs the dispatch loop on conn until conn closes or ctx cancels.
-func AcceptStreams(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann AnnouncementHandler, join JoinHandler) {
+func AcceptStreams(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann AnnouncementHandler, join JoinHandler, punchReq, punchSig PunchHandler) {
 	ownerKey := append([]byte(nil), conn.RemotePub()...)
 	sem := make(chan struct{}, serveConnStreamCap)
 	var wg sync.WaitGroup
@@ -648,7 +694,7 @@ func AcceptStreams(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann 
 				<-sem
 				_ = stream.Close()
 			}()
-			if err := dispatchStreamFunc(ctx, stream, st, ownerKey, ann, join); err != nil {
+			if err := dispatchStreamFunc(ctx, stream, st, ownerKey, ann, join, punchReq, punchSig); err != nil {
 				slog.WarnContext(ctx, "dispatch stream", "err", err)
 			}
 		}(s)
@@ -656,7 +702,7 @@ func AcceptStreams(ctx context.Context, conn *bsquic.Conn, st *store.Store, ann 
 }
 
 // dispatchStream routes each inbound stream on its leading MessageType byte.
-func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, ownerKey []byte, ann AnnouncementHandler, join JoinHandler) error {
+func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, ownerKey []byte, ann AnnouncementHandler, join JoinHandler, punchReq, punchSig PunchHandler) error {
 	msgType, err := protocol.ReadMessageType(rw)
 	if err != nil {
 		return fmt.Errorf("read message type: %w", err)
@@ -688,6 +734,16 @@ func dispatchStream(ctx context.Context, rw io.ReadWriter, st *store.Store, owne
 		return handleGetIndexSnapshotStream(ctx, rw, st, ownerKey)
 	case protocol.MsgRenewTTL:
 		return handleRenewTTLStream(ctx, rw, st, ownerKey)
+	case protocol.MsgPunchRequest:
+		if punchReq == nil {
+			return fmt.Errorf("punch request received but no handler configured")
+		}
+		return punchReq(ctx, rw, ownerKey)
+	case protocol.MsgPunchSignal:
+		if punchSig == nil {
+			return fmt.Errorf("punch signal received but no handler configured")
+		}
+		return punchSig(ctx, rw, ownerKey)
 	default:
 		return fmt.Errorf("unknown message type %d", msgType)
 	}

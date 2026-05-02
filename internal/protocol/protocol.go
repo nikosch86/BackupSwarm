@@ -45,6 +45,12 @@ const (
 	// MsgRenewTTL prefixes a RenewTTL request body (32-byte hash).
 	// Owner-authenticated by the conn's TLS pubkey.
 	MsgRenewTTL MessageType = 0x0a
+	// MsgPunchRequest prefixes a punch-request body sent from an initiator
+	// to a rendezvous peer that's connected to the desired target.
+	MsgPunchRequest MessageType = 0x0b
+	// MsgPunchSignal prefixes a punch-signal body relayed by a rendezvous
+	// peer to the punch target, carrying the initiator's pubkey and addr.
+	MsgPunchSignal MessageType = 0x0c
 )
 
 // WriteMessageType writes t as a single byte.

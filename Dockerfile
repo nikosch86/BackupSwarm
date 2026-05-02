@@ -29,5 +29,8 @@ USER nonroot:nonroot
 WORKDIR /data
 VOLUME ["/data"]
 
+# Default --listen for `run` inside the container.
+ENV BACKUPSWARM_LISTEN=0.0.0.0:7777
+
 ENTRYPOINT ["/usr/local/bin/backupswarm"]
 CMD ["--help"]

@@ -74,7 +74,7 @@ func newScanRig(t *testing.T) *scanRig {
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 
-	go func() { _ = backup.Serve(ctx, listener, peerStore, nil, nil, nil) }()
+	go func() { _ = backup.Serve(ctx, listener, peerStore, nil, nil, nil, nil, nil) }()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()
@@ -357,7 +357,7 @@ func newPeerRig(t *testing.T) *peerRig {
 	obs := &backup.ConnObserver{
 		OnAccept: func(*bsquic.Conn) { rig.accepts.Add(1) },
 	}
-	go func() { done <- backup.Serve(serveCtx, listener, peerStore, nil, nil, obs) }()
+	go func() { done <- backup.Serve(serveCtx, listener, peerStore, nil, nil, nil, nil, obs) }()
 	rig.serveDone = done
 	return rig
 }

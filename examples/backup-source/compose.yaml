@@ -13,11 +13,9 @@ services:
       # Bind-mount the directory you want backed up. Adjust the host path.
       - ./backup:/backup:ro
     ports:
-      - "7778:7778/udp"
+      - "7777:7777/udp"
     command:
       - run
-      - --listen
-      - 0.0.0.0:7778
       - --backup-dir
       - /backup
       # `0` = no-storage mode: incoming PutChunk rejected; capacity probe reports saturated.

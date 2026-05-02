@@ -322,7 +322,7 @@ func TestHandleDeleteChunkStream_ReadRequestError(t *testing.T) {
 // TestDispatchStream_UnknownMessageType asserts the dispatcher rejects an unrecognized message type byte.
 func TestDispatchStream_UnknownMessageType(t *testing.T) {
 	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader([]byte{0xff})}
-	err := dispatchStream(context.Background(), rw, nil, []byte{0x01}, nil, nil)
+	err := dispatchStream(context.Background(), rw, nil, []byte{0x01}, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("dispatchStream accepted unknown message type")
 	}
@@ -333,7 +333,7 @@ func TestDispatchStream_UnknownMessageType(t *testing.T) {
 
 func TestDispatchStream_ReadTypeError(t *testing.T) {
 	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(nil)}
-	err := dispatchStream(context.Background(), rw, nil, []byte{0x01}, nil, nil)
+	err := dispatchStream(context.Background(), rw, nil, []byte{0x01}, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("dispatchStream returned nil on empty stream")
 	}
@@ -355,7 +355,7 @@ func TestDispatchStream_RoutesPeerAnnouncement(t *testing.T) {
 		_, err := got.ReadFrom(r)
 		return err
 	}
-	if err := dispatchStream(context.Background(), rw, nil, []byte("alice"), announceFn, nil); err != nil {
+	if err := dispatchStream(context.Background(), rw, nil, []byte("alice"), announceFn, nil, nil, nil); err != nil {
 		t.Fatalf("dispatchStream: %v", err)
 	}
 	if got.String() != "ANNOUNCEMENT_PAYLOAD" {
@@ -379,7 +379,7 @@ func TestDispatchStream_RoutesJoinRequest(t *testing.T) {
 		_, err := got.ReadFrom(rw)
 		return err
 	}
-	if err := dispatchStream(context.Background(), rw, nil, []byte("alice"), nil, joinFn); err != nil {
+	if err := dispatchStream(context.Background(), rw, nil, []byte("alice"), nil, joinFn, nil, nil); err != nil {
 		t.Fatalf("dispatchStream: %v", err)
 	}
 	if got.String() != "JOIN_REQUEST_PAYLOAD" {
@@ -392,7 +392,7 @@ func TestDispatchStream_RoutesJoinRequest(t *testing.T) {
 
 func TestDispatchStream_JoinRequest_NoHandler(t *testing.T) {
 	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader([]byte{byte(protocol.MsgJoinRequest)})}
-	err := dispatchStream(context.Background(), rw, nil, []byte("alice"), nil, nil)
+	err := dispatchStream(context.Background(), rw, nil, []byte("alice"), nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("dispatchStream accepted MsgJoinRequest with nil handler")
 	}
@@ -403,12 +403,82 @@ func TestDispatchStream_JoinRequest_NoHandler(t *testing.T) {
 
 func TestDispatchStream_PeerAnnouncement_NoHandler(t *testing.T) {
 	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader([]byte{byte(protocol.MsgPeerAnnouncement)})}
-	err := dispatchStream(context.Background(), rw, nil, []byte("alice"), nil, nil)
+	err := dispatchStream(context.Background(), rw, nil, []byte("alice"), nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("dispatchStream accepted MsgPeerAnnouncement with nil handler")
 	}
 	if !bytes.Contains([]byte(err.Error()), []byte("announcement")) {
 		t.Errorf("err = %q, want 'announcement' substring", err)
+	}
+}
+
+func TestDispatchStream_RoutesPunchRequest(t *testing.T) {
+	body := bytes.NewBuffer(nil)
+	body.WriteByte(byte(protocol.MsgPunchRequest))
+	body.Write([]byte("PUNCH_REQ_PAYLOAD"))
+	rw := &fakeStream{writeErrAt: -1, rd: body}
+
+	var got bytes.Buffer
+	var gotSender []byte
+	punchReq := func(_ context.Context, r io.ReadWriter, peerPub []byte) error {
+		gotSender = append([]byte(nil), peerPub...)
+		_, err := got.ReadFrom(r)
+		return err
+	}
+	if err := dispatchStream(context.Background(), rw, nil, []byte("alice"), nil, nil, punchReq, nil); err != nil {
+		t.Fatalf("dispatchStream: %v", err)
+	}
+	if got.String() != "PUNCH_REQ_PAYLOAD" {
+		t.Errorf("punchReq body = %q, want 'PUNCH_REQ_PAYLOAD'", got.String())
+	}
+	if string(gotSender) != "alice" {
+		t.Errorf("punchReq peerPub = %q, want 'alice'", gotSender)
+	}
+}
+
+func TestDispatchStream_RoutesPunchSignal(t *testing.T) {
+	body := bytes.NewBuffer(nil)
+	body.WriteByte(byte(protocol.MsgPunchSignal))
+	body.Write([]byte("PUNCH_SIG_PAYLOAD"))
+	rw := &fakeStream{writeErrAt: -1, rd: body}
+
+	var got bytes.Buffer
+	var gotSender []byte
+	punchSig := func(_ context.Context, r io.ReadWriter, peerPub []byte) error {
+		gotSender = append([]byte(nil), peerPub...)
+		_, err := got.ReadFrom(r)
+		return err
+	}
+	if err := dispatchStream(context.Background(), rw, nil, []byte("bob"), nil, nil, nil, punchSig); err != nil {
+		t.Fatalf("dispatchStream: %v", err)
+	}
+	if got.String() != "PUNCH_SIG_PAYLOAD" {
+		t.Errorf("punchSig body = %q, want 'PUNCH_SIG_PAYLOAD'", got.String())
+	}
+	if string(gotSender) != "bob" {
+		t.Errorf("punchSig peerPub = %q, want 'bob'", gotSender)
+	}
+}
+
+func TestDispatchStream_PunchRequest_NoHandler(t *testing.T) {
+	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader([]byte{byte(protocol.MsgPunchRequest)})}
+	err := dispatchStream(context.Background(), rw, nil, []byte("alice"), nil, nil, nil, nil)
+	if err == nil {
+		t.Fatal("dispatchStream accepted MsgPunchRequest with nil handler")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("punch")) {
+		t.Errorf("err = %q, want 'punch' substring", err)
+	}
+}
+
+func TestDispatchStream_PunchSignal_NoHandler(t *testing.T) {
+	rw := &fakeStream{writeErrAt: -1, rd: bytes.NewReader([]byte{byte(protocol.MsgPunchSignal)})}
+	err := dispatchStream(context.Background(), rw, nil, []byte("alice"), nil, nil, nil, nil)
+	if err == nil {
+		t.Fatal("dispatchStream accepted MsgPunchSignal with nil handler")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("punch")) {
+		t.Errorf("err = %q, want 'punch' substring", err)
 	}
 }
 
@@ -428,7 +498,7 @@ func TestDispatchStream_RoutesPutChunk(t *testing.T) {
 		t.Fatalf("WritePutChunkRequest: %v", err)
 	}
 	rw := &fakeStream{writeErrAt: -1, rd: &reqBuf}
-	if err := dispatchStream(context.Background(), rw, st, []byte("alice"), nil, nil); err != nil {
+	if err := dispatchStream(context.Background(), rw, st, []byte("alice"), nil, nil, nil, nil); err != nil {
 		t.Fatalf("dispatchStream: %v", err)
 	}
 	hash, appErr, err := protocol.ReadPutChunkResponse(&rw.wbuf)
@@ -577,7 +647,7 @@ func TestRun_IndexPutError(t *testing.T) {
 
 	serveCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = Serve(serveCtx, listener, peerStore, nil, nil, nil) }()
+	go func() { _ = Serve(serveCtx, listener, peerStore, nil, nil, nil, nil, nil) }()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer dialCancel()
@@ -651,7 +721,7 @@ func TestPrune_IndexDeleteError(t *testing.T) {
 
 	serveCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = Serve(serveCtx, listener, peerStore, nil, nil, nil) }()
+	go func() { _ = Serve(serveCtx, listener, peerStore, nil, nil, nil, nil, nil) }()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer dialCancel()
@@ -921,7 +991,7 @@ func TestDispatchStream_RoutesGetChunk(t *testing.T) {
 		t.Fatalf("WriteGetChunkRequest: %v", err)
 	}
 	rw := &fakeStream{writeErrAt: -1, rd: &reqBuf}
-	if err := dispatchStream(context.Background(), rw, st, owner, nil, nil); err != nil {
+	if err := dispatchStream(context.Background(), rw, st, owner, nil, nil, nil, nil); err != nil {
 		t.Fatalf("dispatchStream: %v", err)
 	}
 	got, appErr, err := protocol.ReadGetChunkResponse(&rw.wbuf, 1<<20)
@@ -1027,7 +1097,7 @@ func TestSendGetChunk_ReadResponseError(t *testing.T) {
 }
 
 // withDispatchStreamFunc swaps dispatchStreamFunc for the duration of a test.
-func withDispatchStreamFunc(t *testing.T, fn func(context.Context, io.ReadWriter, *store.Store, []byte, AnnouncementHandler, JoinHandler) error) {
+func withDispatchStreamFunc(t *testing.T, fn func(context.Context, io.ReadWriter, *store.Store, []byte, AnnouncementHandler, JoinHandler, PunchHandler, PunchHandler) error) {
 	t.Helper()
 	prev := dispatchStreamFunc
 	dispatchStreamFunc = fn
@@ -1062,7 +1132,7 @@ func TestServeConn_BoundsConcurrentDispatchers(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 
-	withDispatchStreamFunc(t, func(_ context.Context, _ io.ReadWriter, _ *store.Store, _ []byte, _ AnnouncementHandler, _ JoinHandler) error {
+	withDispatchStreamFunc(t, func(_ context.Context, _ io.ReadWriter, _ *store.Store, _ []byte, _ AnnouncementHandler, _ JoinHandler, _ PunchHandler, _ PunchHandler) error {
 		started <- struct{}{}
 		<-release
 		return nil
@@ -1086,7 +1156,7 @@ func TestServeConn_BoundsConcurrentDispatchers(t *testing.T) {
 	serveCtx, cancel := context.WithCancel(context.Background())
 	serveDone := make(chan struct{})
 	go func() {
-		_ = Serve(serveCtx, listener, nil, nil, nil, nil)
+		_ = Serve(serveCtx, listener, nil, nil, nil, nil, nil, nil)
 		close(serveDone)
 	}()
 	// Registered after withDispatchStreamFunc so LIFO drains all
@@ -1159,7 +1229,7 @@ loop:
 // error through the warn-log branch without crashing.
 func TestServeConn_LogsDispatchError(t *testing.T) {
 	dispatchDone := make(chan struct{}, 1)
-	withDispatchStreamFunc(t, func(_ context.Context, _ io.ReadWriter, _ *store.Store, _ []byte, _ AnnouncementHandler, _ JoinHandler) error {
+	withDispatchStreamFunc(t, func(_ context.Context, _ io.ReadWriter, _ *store.Store, _ []byte, _ AnnouncementHandler, _ JoinHandler, _ PunchHandler, _ PunchHandler) error {
 		dispatchDone <- struct{}{}
 		return errors.New("dispatch boom")
 	})
@@ -1181,7 +1251,7 @@ func TestServeConn_LogsDispatchError(t *testing.T) {
 
 	serveCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = Serve(serveCtx, listener, nil, nil, nil, nil) }()
+	go func() { _ = Serve(serveCtx, listener, nil, nil, nil, nil, nil, nil) }()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(dialCancel)
@@ -1234,7 +1304,7 @@ func TestServe_ConnObserverFiresOnAcceptAndClose(t *testing.T) {
 
 	serveCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = Serve(serveCtx, listener, nil, nil, nil, obs) }()
+	go func() { _ = Serve(serveCtx, listener, nil, nil, nil, nil, nil, obs) }()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(dialCancel)
@@ -1284,7 +1354,7 @@ func TestServeConn_SemaphoreAcquireCancelled(t *testing.T) {
 	var releaseOnce sync.Once
 	t.Cleanup(func() { releaseOnce.Do(func() { close(blockForever) }) })
 
-	withDispatchStreamFunc(t, func(_ context.Context, _ io.ReadWriter, _ *store.Store, _ []byte, _ AnnouncementHandler, _ JoinHandler) error {
+	withDispatchStreamFunc(t, func(_ context.Context, _ io.ReadWriter, _ *store.Store, _ []byte, _ AnnouncementHandler, _ JoinHandler, _ PunchHandler, _ PunchHandler) error {
 		stubEntered <- struct{}{}
 		<-blockForever
 		return nil
@@ -1308,7 +1378,7 @@ func TestServeConn_SemaphoreAcquireCancelled(t *testing.T) {
 	serveCtx, cancel := context.WithCancel(context.Background())
 	serveDone := make(chan struct{})
 	go func() {
-		_ = Serve(serveCtx, listener, nil, nil, nil, nil)
+		_ = Serve(serveCtx, listener, nil, nil, nil, nil, nil, nil)
 		close(serveDone)
 	}()
 
@@ -1531,7 +1601,7 @@ func TestDispatchStream_GetCapacityRoutesToHandler(t *testing.T) {
 		t.Fatalf("WriteMessageType: %v", err)
 	}
 	rw := &fakeStream{writeErrAt: -1, rd: &inBuf}
-	if err := dispatchStream(context.Background(), rw, st, []byte("any"), nil, nil); err != nil {
+	if err := dispatchStream(context.Background(), rw, st, []byte("any"), nil, nil, nil, nil); err != nil {
 		t.Fatalf("dispatchStream: %v", err)
 	}
 	used, cap, _, err := protocol.ReadGetCapacityResponse(&rw.wbuf)
@@ -1551,7 +1621,7 @@ func TestDispatchStream_PingRoutesToHandler(t *testing.T) {
 		t.Fatalf("WriteMessageType: %v", err)
 	}
 	rw := &fakeStream{writeErrAt: -1, rd: &inBuf}
-	if err := dispatchStream(context.Background(), rw, nil, []byte("any"), nil, nil); err != nil {
+	if err := dispatchStream(context.Background(), rw, nil, []byte("any"), nil, nil, nil, nil); err != nil {
 		t.Fatalf("dispatchStream: %v", err)
 	}
 	appErr, err := protocol.ReadPingResponse(&rw.wbuf)
@@ -1923,6 +1993,76 @@ func TestSendPing_OpenStreamError(t *testing.T) {
 	sentinel := errors.New("open boom")
 	opener := &fakeOpener{openErr: sentinel}
 	err := sendPing(context.Background(), opener)
+	if !errors.Is(err, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", err)
+	}
+}
+
+func punchOKFrame(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := protocol.WritePunchResponse(&buf, ""); err != nil {
+		t.Fatalf("build punch ok frame: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func punchErrFrame(t *testing.T, msg string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := protocol.WritePunchResponse(&buf, msg); err != nil {
+		t.Fatalf("build punch err frame: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestSendPunch_RequestSuccessPath(t *testing.T) {
+	stream := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(punchOKFrame(t))}
+	opener := &fakeOpener{stream: stream}
+	p := protocol.PunchPayload{PeerPub: [32]byte{0xaa}, Addr: "203.0.113.7:9090"}
+	if err := sendPunch(context.Background(), opener, protocol.MsgPunchRequest, p); err != nil {
+		t.Fatalf("sendPunch: %v", err)
+	}
+	if !stream.closed {
+		t.Error("sendPunch did not half-close stream")
+	}
+	wbuf := stream.wbuf.Bytes()
+	if len(wbuf) == 0 || wbuf[0] != byte(protocol.MsgPunchRequest) {
+		t.Errorf("first byte = %v, want MsgPunchRequest", wbuf[0])
+	}
+}
+
+func TestSendPunch_SignalUsesSignalDispatchByte(t *testing.T) {
+	stream := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(punchOKFrame(t))}
+	opener := &fakeOpener{stream: stream}
+	p := protocol.PunchPayload{PeerPub: [32]byte{0xbb}, Addr: "198.51.100.4:9090"}
+	if err := sendPunch(context.Background(), opener, protocol.MsgPunchSignal, p); err != nil {
+		t.Fatalf("sendPunch: %v", err)
+	}
+	wbuf := stream.wbuf.Bytes()
+	if len(wbuf) == 0 || wbuf[0] != byte(protocol.MsgPunchSignal) {
+		t.Errorf("first byte = %v, want MsgPunchSignal", wbuf[0])
+	}
+}
+
+func TestSendPunch_AppErrorPropagation(t *testing.T) {
+	stream := &fakeStream{writeErrAt: -1, rd: bytes.NewReader(punchErrFrame(t, "target_offline"))}
+	opener := &fakeOpener{stream: stream}
+	p := protocol.PunchPayload{PeerPub: [32]byte{0xcc}, Addr: "192.0.2.1:9090"}
+	err := sendPunch(context.Background(), opener, protocol.MsgPunchRequest, p)
+	if err == nil {
+		t.Fatal("sendPunch returned nil despite app-error frame")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("target_offline")) {
+		t.Errorf("err = %q, want includes peer code", err)
+	}
+}
+
+func TestSendPunch_OpenStreamError(t *testing.T) {
+	sentinel := errors.New("open boom")
+	opener := &fakeOpener{openErr: sentinel}
+	p := protocol.PunchPayload{PeerPub: [32]byte{0xdd}, Addr: "192.0.2.2:9090"}
+	err := sendPunch(context.Background(), opener, protocol.MsgPunchRequest, p)
 	if !errors.Is(err, sentinel) {
 		t.Errorf("err = %v, want wraps sentinel", err)
 	}

@@ -42,7 +42,7 @@ func newRestorePeerInst(t *testing.T, ctx context.Context) *peerInst {
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
-	go func() { _ = backup.Serve(ctx, listener, st, nil, nil, nil) }()
+	go func() { _ = backup.Serve(ctx, listener, st, nil, nil, nil, nil, nil) }()
 	t.Cleanup(func() { _ = listener.Close() })
 	return &peerInst{store: st, pubKey: pub, priv: priv, listener: listener}
 }

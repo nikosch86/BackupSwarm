@@ -42,6 +42,10 @@ const envInviteToken = "BACKUPSWARM_INVITE_TOKEN"
 // when --advertise-addr is omitted.
 const envAdvertiseAddr = "BACKUPSWARM_ADVERTISE_ADDR"
 
+// envListenAddr is the env var read by `run` as a fallback when --listen
+// is omitted.
+const envListenAddr = "BACKUPSWARM_LISTEN"
+
 func newRunCmd(dataDir *string) *cobra.Command {
 	var (
 		backupDir           string
@@ -82,6 +86,9 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if advertiseAddr == "" {
 				advertiseAddr = os.Getenv(envAdvertiseAddr)
+			}
+			if listenAddr == "" {
+				listenAddr = os.Getenv(envListenAddr)
 			}
 			isAuto := advertiseAddr == advertiseAddrAuto
 			if isAuto {
@@ -187,7 +194,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&backupDir, "backup-dir", "", "Directory tree to keep synced to the swarm. Index entries are stored relative to this root. Omit for a pure storage-peer role.")
-	cmd.Flags().StringVar(&listenAddr, "listen", "", "UDP address for the inbound QUIC listener, e.g. 0.0.0.0:7777 (required unless --advertise-addr is set)")
+	cmd.Flags().StringVar(&listenAddr, "listen", "", "UDP address for the inbound QUIC listener, e.g. 0.0.0.0:7777; falls back to $BACKUPSWARM_LISTEN (required unless --advertise-addr is set)")
 	cmd.Flags().StringVar(&advertiseAddr, "advertise-addr", "", "Externally-routable host:port to embed in invite tokens; falls back to $BACKUPSWARM_ADVERTISE_ADDR. Defaults --listen to 0.0.0.0:<port> when --listen is empty.")
 	cmd.Flags().IntVar(&chunkSize, "chunk-size", 1<<20, "Target chunk size in bytes (default 1 MiB)")
 	cmd.Flags().DurationVar(&scanInterval, "scan-interval", 60*time.Second, "Period between incremental scan passes")

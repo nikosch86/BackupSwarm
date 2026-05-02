@@ -615,7 +615,7 @@ func TestPurgeAll_PruneFailurePropagates(t *testing.T) {
 
 	serveCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = backup.Serve(serveCtx, listener, peerStore, nil, nil, nil) }()
+	go func() { _ = backup.Serve(serveCtx, listener, peerStore, nil, nil, nil, nil, nil) }()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer dialCancel()
@@ -685,7 +685,7 @@ func newImmediateDialRig(t *testing.T) *immediateDialRig {
 	}
 	serveCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = backup.Serve(serveCtx, listener, peerStore, nil, nil, obs) }()
+	go func() { _ = backup.Serve(serveCtx, listener, peerStore, nil, nil, nil, nil, obs) }()
 	return rig
 }
 
