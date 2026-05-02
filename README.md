@@ -196,20 +196,82 @@ plaintext hash is verified against the index's `PlaintextHash`; a
 mismatch aborts the restore. Restored files keep their original
 mtime so the daemon's incremental scan does not re-upload them.
 
-### Disaster recovery: rebuild a lost index
+## Disaster recovery
 
-The running daemon periodically encrypts and ships its local index to
-every storage peer (interval configurable via `--index-backup-interval`
-on `run`, default 5 min). On a fresh node that has its keys and a
-populated `peers.db` but no `index.db`, run:
+If the backup-source node is wiped — disk failure, lost laptop, ransomware
+— recovery hinges entirely on whether its **identity keys** survived.
+Storage peers hold ciphertext wrapped to the source node's public
+recipient key; only the matching private key can unwrap it. Everything
+else in the data dir is rebuildable from the surviving swarm.
 
-```bash
-./bin/backupswarm --data-dir /tmp/bs-b restore-index
-```
+### What to back up out-of-band
 
-`restore-index` dials each storage peer, fetches the encrypted snapshot,
-decrypts it with the local recipient key, and writes `index.db`. After
-that, a normal `restore <dest>` reassembles the tree.
+These files in `<data-dir>` are irreplaceable. Copy them somewhere
+offline (encrypted USB, password manager, paper) when you first stand
+up the node:
+
+| File | Role | If lost |
+|---|---|---|
+| `node.key` | Ed25519 private key — the node ID | Cannot re-attach as the same node; chunks become orphaned on storage peers |
+| `node.xkey` | X25519 private key — unwraps per-chunk symmetric keys | **All backed-up data is permanently unreadable** |
+| `node.pub` / `node.xpub` | Public halves of the above | Derivable from the private keys, but easier to copy alongside |
+
+Founder nodes additionally hold `ca.key` / `ca.crt` — back these up if
+you want to keep issuing new invites after a founder rebuild. Without
+them, existing peers keep working but no new joiners can be admitted.
+
+The rest is regenerable: `peers.db` (rebuilt by re-joining the swarm),
+`node.crt` (re-issued by the founder during re-join), and `index.db`
+(rebuilt by `restore-index`).
+
+### Recovery procedure
+
+Assuming `node.key` + `node.xkey` (and ideally their `.pub` siblings)
+were preserved out-of-band:
+
+1. **Restore the keys** into a fresh data dir with locked-down permissions:
+   ```bash
+   mkdir -p /new/data-dir && chmod 700 /new/data-dir
+   cp /offline-backup/node.key  /new/data-dir/
+   cp /offline-backup/node.xkey /new/data-dir/
+   cp /offline-backup/node.pub  /new/data-dir/   # optional; regenerable
+   cp /offline-backup/node.xpub /new/data-dir/   # optional; regenerable
+   chmod 600 /new/data-dir/node.key /new/data-dir/node.xkey
+   ```
+
+2. **Re-join the swarm** to rebuild `peers.db`. Issue a fresh invite from
+   any surviving storage peer:
+   ```bash
+   ./bin/backupswarm --data-dir /surviving/peer invite
+   ```
+   then redeem it on the recovering node:
+   ```bash
+   ./bin/backupswarm --data-dir /new/data-dir join <token>
+   ```
+   The identity public key is unchanged, so storage peers recognize the
+   recovering node as the original owner and continue serving its chunks.
+
+3. **Rebuild the index** from the encrypted snapshot a storage peer
+   already holds (the running daemon ships one every
+   `--index-backup-interval`, default 5 min):
+   ```bash
+   ./bin/backupswarm --data-dir /new/data-dir restore-index
+   ```
+   `restore-index` dials each storage peer, fetches the encrypted
+   snapshot, decrypts it with the local recipient key, and writes
+   `index.db`.
+
+4. **Reassemble the files** the same way as a normal restore:
+   ```bash
+   ./bin/backupswarm --data-dir /new/data-dir restore /restored/tree
+   ```
+
+### If the keys are gone
+
+There is no recovery path. Chunks on storage peers are wrapped to a
+public key whose private half no longer exists. This is the same
+property that prevents a compromised storage peer from reading any of
+the data it holds — the asymmetry cuts both ways.
 
 ## Makefile Targets
 
