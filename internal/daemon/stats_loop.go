@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -53,15 +54,13 @@ func runStatsLoop(ctx context.Context, opts statsLoopOptions) {
 
 // emitActivity logs a single INFO "activity" line summarising one tick.
 func emitActivity(ctx context.Context, snap metrics.Snapshot, elapsed time.Duration) {
-	upPerSec := bytesPerSec(snap.BytesUp, elapsed)
-	downPerSec := bytesPerSec(snap.BytesDown, elapsed)
 	slog.InfoContext(ctx, "activity",
 		"files_backed_up", snap.FilesBackedUp,
 		"chunks_stored", snap.ChunksStored,
-		"bytes_up", snap.BytesUp,
-		"bytes_down", snap.BytesDown,
-		"up_bytes_per_sec", upPerSec,
-		"down_bytes_per_sec", downPerSec,
+		"up", formatBytes(snap.BytesUp),
+		"down", formatBytes(snap.BytesDown),
+		"up_rate", formatBytesPerSec(bytesPerSec(snap.BytesUp, elapsed)),
+		"down_rate", formatBytesPerSec(bytesPerSec(snap.BytesDown, elapsed)),
 		"interval_seconds", elapsed.Round(time.Second).Seconds(),
 	)
 }
@@ -73,4 +72,25 @@ func bytesPerSec(bytes int64, elapsed time.Duration) int64 {
 		return 0
 	}
 	return int64(float64(bytes) / elapsed.Seconds())
+}
+
+// formatBytes returns n in 1024-based units. Sub-KB values render as
+// raw integer bytes ("823 B"); larger values use one decimal place
+// with a KB/MB/GB/TB/PB suffix.
+func formatBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for nn := n / unit; nn >= unit; nn /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTP"[exp])
+}
+
+// formatBytesPerSec is formatBytes with a "/s" suffix.
+func formatBytesPerSec(n int64) string {
+	return formatBytes(n) + "/s"
 }

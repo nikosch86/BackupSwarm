@@ -20,8 +20,8 @@ func TestRunStatsLoop_EmitsActivityWithDeltasAndResets(t *testing.T) {
 	c.AddFilesBackedUp()
 	c.AddFilesBackedUp()
 	c.AddChunksStored()
-	c.AddBytesUp(2_000_000)
-	c.AddBytesDown(500_000)
+	c.AddBytesUp(2 * 1024 * 1024) // 2.0 MB
+	c.AddBytesDown(512 * 1024)    // 512.0 KB
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -53,11 +53,11 @@ func TestRunStatsLoop_EmitsActivityWithDeltasAndResets(t *testing.T) {
 	if !strings.Contains(out, "chunks_stored=1") {
 		t.Errorf("slog capture missing 'chunks_stored=1'; got: %s", out)
 	}
-	if !strings.Contains(out, "bytes_up=2000000") {
-		t.Errorf("slog capture missing 'bytes_up=2000000'; got: %s", out)
+	if !strings.Contains(out, `up="2.0 MB"`) {
+		t.Errorf(`slog capture missing 'up="2.0 MB"'; got: %s`, out)
 	}
-	if !strings.Contains(out, "bytes_down=500000") {
-		t.Errorf("slog capture missing 'bytes_down=500000'; got: %s", out)
+	if !strings.Contains(out, `down="512.0 KB"`) {
+		t.Errorf(`slog capture missing 'down="512.0 KB"'; got: %s`, out)
 	}
 
 	if got := c.LoadAndReset(); got != (metrics.Snapshot{}) {
@@ -118,5 +118,82 @@ func TestEmitActivity_LogsRoundedInterval(t *testing.T) {
 	out := w.String()
 	if !strings.Contains(out, "interval_seconds=120") {
 		t.Errorf("slog capture missing 'interval_seconds=120'; got: %s", out)
+	}
+}
+
+// TestFormatBytes covers the 1024-based unit boundaries and the sub-KB
+// integer-byte branch. Values at exact KB/MB/... boundaries render as
+// "1.0 KB" etc.; sub-KB values render as raw "<n> B".
+func TestFormatBytes(t *testing.T) {
+	cases := []struct {
+		in   int64
+		want string
+	}{
+		{0, "0 B"},
+		{1, "1 B"},
+		{1023, "1023 B"},
+		{1024, "1.0 KB"},
+		{1536, "1.5 KB"},
+		{1024 * 1024, "1.0 MB"},
+		{2621440, "2.5 MB"},
+		{1024 * 1024 * 1024, "1.0 GB"},
+		{1024 * 1024 * 1024 * 1024, "1.0 TB"},
+		{1024 * 1024 * 1024 * 1024 * 1024, "1.0 PB"},
+	}
+	for _, tc := range cases {
+		if got := formatBytes(tc.in); got != tc.want {
+			t.Errorf("formatBytes(%d) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestFormatBytesPerSec asserts the rate formatter appends "/s" to the
+// byte-format result, including the sub-KB branch.
+func TestFormatBytesPerSec(t *testing.T) {
+	cases := []struct {
+		in   int64
+		want string
+	}{
+		{0, "0 B/s"},
+		{500, "500 B/s"},
+		{1024, "1.0 KB/s"},
+		{1024 * 1024, "1.0 MB/s"},
+	}
+	for _, tc := range cases {
+		if got := formatBytesPerSec(tc.in); got != tc.want {
+			t.Errorf("formatBytesPerSec(%d) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestEmitActivity_FormattedBandwidthAttrs asserts the slog line emits
+// human-readable up/down (totals) and up_rate/down_rate (per-second)
+// attrs derived from the snapshot, replacing the raw byte counters.
+func TestEmitActivity_FormattedBandwidthAttrs(t *testing.T) {
+	w := &syncWriter{}
+	captureSlog(t, w)
+
+	emitActivity(context.Background(), metrics.Snapshot{
+		FilesBackedUp: 1,
+		ChunksStored:  1,
+		BytesUp:       2 * 1024 * 1024, // 2.0 MB
+		BytesDown:     512 * 1024,      // 512.0 KB
+	}, 10*time.Second)
+
+	out := w.String()
+	for _, want := range []string{
+		`up="2.0 MB"`,
+		`down="512.0 KB"`,
+		`up_rate="204.8 KB/s"`,
+		`down_rate="51.2 KB/s"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("slog capture missing %q; got: %s", want, out)
+		}
+	}
+	for _, gone := range []string{"bytes_up=", "bytes_down=", "up_bytes_per_sec=", "down_bytes_per_sec="} {
+		if strings.Contains(out, gone) {
+			t.Errorf("slog capture still contains legacy attr %q; got: %s", gone, out)
+		}
 	}
 }
