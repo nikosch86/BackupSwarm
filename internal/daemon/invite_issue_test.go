@@ -135,7 +135,7 @@ func TestIssueInvite_RoundTrip(t *testing.T) {
 		t.Fatalf("ed25519: %v", err)
 	}
 	const addr = "127.0.0.1:1234"
-	tokStr, err := daemon.IssueInvite(dataDir, addr, "", pub, nil)
+	tokStr, err := daemon.IssueInvite(dataDir, addr, "", pub, nil, daemon.TURNCreds{})
 	if err != nil {
 		t.Fatalf("IssueInvite: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestIssueInvite_EmbedsCACert(t *testing.T) {
 		t.Fatalf("ed25519: %v", err)
 	}
 	caCertDER := []byte("fake-ca-cert-bytes")
-	tokStr, err := daemon.IssueInvite(dataDir, "127.0.0.1:1", "", pub, caCertDER)
+	tokStr, err := daemon.IssueInvite(dataDir, "127.0.0.1:1", "", pub, caCertDER, daemon.TURNCreds{})
 	if err != nil {
 		t.Fatalf("IssueInvite: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestIssueInvite_EmbedsRelayAddr(t *testing.T) {
 		t.Fatalf("ed25519: %v", err)
 	}
 	const relay = "203.0.113.7:54321"
-	tokStr, err := daemon.IssueInvite(dataDir, "127.0.0.1:1", relay, pub, nil)
+	tokStr, err := daemon.IssueInvite(dataDir, "127.0.0.1:1", relay, pub, nil, daemon.TURNCreds{})
 	if err != nil {
 		t.Fatalf("IssueInvite: %v", err)
 	}
@@ -206,5 +206,43 @@ func TestIssueInvite_EmbedsRelayAddr(t *testing.T) {
 	}
 	if tok.RelayAddr != relay {
 		t.Errorf("token RelayAddr = %q, want %q", tok.RelayAddr, relay)
+	}
+	if tok.TURNServer != "" || tok.TURNUser != "" || tok.TURNPass != "" || tok.TURNRealm != "" {
+		t.Errorf("expected empty TURN fields, got server=%q user=%q pass=%q realm=%q",
+			tok.TURNServer, tok.TURNUser, tok.TURNPass, tok.TURNRealm)
+	}
+}
+
+func TestIssueInvite_EmbedsTURNCreds(t *testing.T) {
+	dataDir := t.TempDir()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ed25519: %v", err)
+	}
+	creds := daemon.TURNCreds{
+		Server: "turn.example.org:3478",
+		User:   "swarm",
+		Pass:   "s3cret",
+		Realm:  "backupswarm.swarm",
+	}
+	tokStr, err := daemon.IssueInvite(dataDir, "127.0.0.1:1", "203.0.113.7:54321", pub, nil, creds)
+	if err != nil {
+		t.Fatalf("IssueInvite: %v", err)
+	}
+	tok, err := token.Decode(tokStr)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if tok.TURNServer != creds.Server {
+		t.Errorf("TURNServer = %q, want %q", tok.TURNServer, creds.Server)
+	}
+	if tok.TURNUser != creds.User {
+		t.Errorf("TURNUser = %q, want %q", tok.TURNUser, creds.User)
+	}
+	if tok.TURNPass != creds.Pass {
+		t.Errorf("TURNPass = %q, want %q", tok.TURNPass, creds.Pass)
+	}
+	if tok.TURNRealm != creds.Realm {
+		t.Errorf("TURNRealm = %q, want %q", tok.TURNRealm, creds.Realm)
 	}
 }

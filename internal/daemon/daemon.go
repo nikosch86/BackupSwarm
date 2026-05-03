@@ -207,6 +207,9 @@ type Options struct {
 	// TURN allocates a relay at startup and holds it for the daemon's
 	// lifetime; empty Server disables.
 	TURN TURNOptions
+	// NoShareTURNCreds suppresses embedding the daemon's TURN credentials
+	// in invite tokens.
+	NoShareTURNCreds bool
 	// UploadRateBytes caps outbound bytes/sec across all conns. 0 = unlimited.
 	UploadRateBytes int64
 	// DownloadRateBytes caps inbound bytes/sec across all conns. 0 = unlimited.
@@ -444,6 +447,7 @@ func Run(ctx context.Context, opts Options) error {
 
 	var turnAlloc *nat.Allocation
 	var relayAddr string
+	var sharedTURNCreds TURNCreds
 	if opts.TURN.Server != "" {
 		turnAlloc, err = turnAllocateFunc(ctx, nat.TURNConfig(opts.TURN))
 		if err != nil {
@@ -455,10 +459,32 @@ func Run(ctx context.Context, opts Options) error {
 			"relay_addr", relayAddr,
 		)
 		defer func() { _ = turnAlloc.Close() }()
+		serverIP, ipErr := resolveTURNServerIP(opts.TURN.Server)
+		if ipErr != nil {
+			return fmt.Errorf("resolve turn server ip: %w", ipErr)
+		}
+		if err := turnAddPermissionFunc(turnAlloc, serverIP); err != nil {
+			return fmt.Errorf("turn add permission: %w", err)
+		}
+		slog.DebugContext(ctx, "nat: turn permission installed",
+			"server_ip", serverIP.String(),
+		)
 		if err := WriteRelayAddr(opts.DataDir, relayAddr); err != nil {
 			return fmt.Errorf("write relay.addr: %w", err)
 		}
 		defer func() { _ = RemoveRelayAddr(opts.DataDir) }()
+		if !opts.NoShareTURNCreds {
+			sharedTURNCreds = TURNCreds{
+				Server: opts.TURN.Server,
+				User:   opts.TURN.Username,
+				Pass:   opts.TURN.Password,
+				Realm:  opts.TURN.Realm,
+			}
+			if err := WriteTURNCreds(opts.DataDir, sharedTURNCreds); err != nil {
+				return fmt.Errorf("write turn.creds: %w", err)
+			}
+			defer func() { _ = RemoveTURNCreds(opts.DataDir) }()
+		}
 	}
 
 	if opts.IssueInitialInvite {
@@ -470,7 +496,7 @@ func Run(ctx context.Context, opts Options) error {
 		if inviteAddr == "" {
 			inviteAddr = listener.Addr().String()
 		}
-		tokStr, issueErr := IssueInvite(opts.DataDir, inviteAddr, relayAddr, id.PublicKey, caCertDER)
+		tokStr, issueErr := IssueInvite(opts.DataDir, inviteAddr, relayAddr, id.PublicKey, caCertDER, sharedTURNCreds)
 		if issueErr != nil {
 			return fmt.Errorf("issue initial invite: %w", issueErr)
 		}

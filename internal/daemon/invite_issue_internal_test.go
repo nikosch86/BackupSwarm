@@ -214,7 +214,7 @@ func TestIssueInvite_OpenFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ed25519: %v", err)
 	}
-	_, err = IssueInvite(dir, "127.0.0.1:1", "", pub, nil)
+	_, err = IssueInvite(dir, "127.0.0.1:1", "", pub, nil, TURNCreds{})
 	if err == nil {
 		t.Fatal("IssueInvite succeeded against unwritable dir")
 	}
@@ -240,10 +240,10 @@ func TestIssueInvite_IssueCollision(t *testing.T) {
 		calls++
 		return len(p), nil
 	})
-	if _, err := IssueInvite(dir, "127.0.0.1:1", "", pub, nil); err != nil {
+	if _, err := IssueInvite(dir, "127.0.0.1:1", "", pub, nil, TURNCreds{}); err != nil {
 		t.Fatalf("first IssueInvite: %v", err)
 	}
-	_, err = IssueInvite(dir, "127.0.0.1:1", "", pub, nil)
+	_, err = IssueInvite(dir, "127.0.0.1:1", "", pub, nil, TURNCreds{})
 	if err == nil {
 		t.Fatal("second IssueInvite with pinned secret returned nil error")
 	}
@@ -262,7 +262,7 @@ func TestIssueInvite_RandFails(t *testing.T) {
 	}
 	sentinel := errors.New("forced rand failure")
 	withRandReadFunc(t, func(p []byte) (int, error) { return 0, sentinel })
-	_, err = IssueInvite(dir, "127.0.0.1:1", "", pub, nil)
+	_, err = IssueInvite(dir, "127.0.0.1:1", "", pub, nil, TURNCreds{})
 	if err == nil {
 		t.Fatal("IssueInvite succeeded despite rand failure")
 	}
@@ -275,7 +275,7 @@ func TestIssueInvite_RandFails(t *testing.T) {
 // rejects it; the error must surface with the encode-token wrap.
 func TestIssueInvite_EncodeFails(t *testing.T) {
 	dir := t.TempDir()
-	_, err := IssueInvite(dir, "127.0.0.1:1", "", ed25519.PublicKey{0x00}, nil)
+	_, err := IssueInvite(dir, "127.0.0.1:1", "", ed25519.PublicKey{0x00}, nil, TURNCreds{})
 	if err == nil {
 		t.Fatal("IssueInvite with malformed pubkey returned nil error")
 	}

@@ -1,28 +1,30 @@
 # Examples
 
-Compose-based templates for the three roles a `backupswarm` node can
-play. Each variant is self-contained — pick the one matching your role,
-set the env vars described in its `README.md`, and `docker compose up`.
+Compose-based templates for running a `backupswarm` node. Each variant
+is self-contained — pick the one matching your role, set the env vars
+described in its `README.md`, and `docker compose up`.
 
 | Variant | Backs up its own files? | Stores chunks for others? | Key flags |
 |---|---|---|---|
 | [`storage-peer/`](storage-peer/) | no | yes | `--max-storage 100g`, no `--backup-dir` |
 | [`backup-source/`](backup-source/) | yes | no | `--backup-dir`, `--max-storage 0` |
 | [`dual-role/`](dual-role/) | yes | yes | `--backup-dir`, `--max-storage 100g` |
+| [`turn/`](turn/) | yes | yes | dual-role + coturn sidecar; `--turn-server`, `--turn-user`, `--turn-pass`, `--turn-realm` |
 
 All variants pull the prebuilt image from GitHub Container Registry. See
 [Get the prebuilt image](../README.md#get-the-prebuilt-image) in the
 top-level README for tag conventions and the rolling/stable channels.
 
-All three compose files bind to `0.0.0.0:7777` via the `--port` flag's
-default — no `--listen` flag needed. To run several of these on one
-host, change the `ports:` host-side mapping or set `BACKUPSWARM_PORT`
+The first three compose files bind to `0.0.0.0:7777` via the `--port`
+flag's default — no `--listen` flag needed. To run several of these on
+one host, change the `ports:` host-side mapping or set `BACKUPSWARM_PORT`
 (or `--port`) per service. When the host-side port differs from the
 container-side port, set `BACKUPSWARM_PORT` to the container-side value
 and `BACKUPSWARM_ADVERTISE_ADDR` to the host:port pair the swarm
-should dial.
+should dial. The `turn/` template additionally requires UDP on the
+coturn control port (3478) and the relay range (49152-49200 by default).
 
-## The three roles
+## The four templates
 
 - **storage-peer**: donates disk + bandwidth to the swarm; has no local
   data it cares about. Set `--max-storage` to your donation size.
@@ -32,6 +34,9 @@ should dial.
   saturated so peers exclude this node from placement).
 - **dual-role**: both backs up its own data and stores chunks for
   others. The standard operator setup.
+- **turn**: a `dual-role` paired with a coturn sidecar so peers behind
+  symmetric NAT can bootstrap via cross-allocation forwarding. Pick
+  this when the host issuing invites is behind a non-full-cone NAT.
 
 ## Joining a swarm
 

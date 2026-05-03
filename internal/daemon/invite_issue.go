@@ -58,10 +58,19 @@ func writeAtomicFile(path, data string) error {
 	return nil
 }
 
+// TURNCreds are TURN-server long-term credentials. Zero-value means
+// no credentials are embedded in the issued token.
+type TURNCreds struct {
+	Server string
+	User   string
+	Pass   string
+	Realm  string
+}
+
 // IssueInvite persists a fresh (swarmID, secret) pair as pending and
-// returns the encoded token. An empty caCertDER produces a pin-mode
-// token; an empty relayAddr leaves the token's relay alternative blank.
-func IssueInvite(dataDir, listenAddr, relayAddr string, introPub ed25519.PublicKey, caCertDER []byte) (string, error) {
+// returns the encoded token. caCertDER, relayAddr, and turnCreds are
+// embedded when non-empty / non-zero.
+func IssueInvite(dataDir, listenAddr, relayAddr string, introPub ed25519.PublicKey, caCertDER []byte, turnCreds TURNCreds) (string, error) {
 	store, err := invites.Open(filepath.Join(dataDir, invites.DefaultFilename))
 	if err != nil {
 		return "", fmt.Errorf("open invites.db: %w", err)
@@ -79,12 +88,16 @@ func IssueInvite(dataDir, listenAddr, relayAddr string, introPub ed25519.PublicK
 		return "", fmt.Errorf("issue: %w", err)
 	}
 	tokStr, err := token.Encode(token.Token{
-		Addr:      listenAddr,
-		Pub:       introPub,
-		SwarmID:   swarmID,
-		Secret:    secret,
-		CACert:    caCertDER,
-		RelayAddr: relayAddr,
+		Addr:       listenAddr,
+		Pub:        introPub,
+		SwarmID:    swarmID,
+		Secret:     secret,
+		CACert:     caCertDER,
+		RelayAddr:  relayAddr,
+		TURNServer: turnCreds.Server,
+		TURNUser:   turnCreds.User,
+		TURNPass:   turnCreds.Pass,
+		TURNRealm:  turnCreds.Realm,
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode token: %w", err)

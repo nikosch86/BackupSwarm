@@ -181,9 +181,31 @@ docker run --rm \
 
 `--turn-server` requires the matching `--turn-user`, `--turn-pass`, and
 `--turn-realm` triple. The daemon allocates a relay at startup, logs
-`nat: turn relay allocated relay_addr=<host:port>`, and holds the
+`nat: turn relay allocated relay_addr=<host:port>`, pre-permits the
+TURN server's own IP on the allocation (enabling cross-allocation
+forwarding from peers on the same TURN server), and holds the
 allocation for its lifetime. Outbound dials use the relay as the third
 fallback step (see "Connection fallback chain" below).
+
+By default the daemon embeds its TURN credentials in every invite
+token it issues, letting a NATted joiner allocate against the same
+TURN server and reach the inviter via cross-allocation forwarding.
+Pass `--turn-cred-share=off` on `run` to suppress this. Joiners can
+also override via env vars: `BACKUPSWARM_TURN_SERVER`,
+`BACKUPSWARM_TURN_USER`, `BACKUPSWARM_TURN_PASS`, `BACKUPSWARM_TURN_REALM`
+(env takes precedence over token-embedded values).
+
+The bootstrap chain a joiner walks for the *initial* dial against an
+inviter is `direct → relay-direct → relay_via_joiner_turn`:
+
+| Method | What it does | Required for joiner |
+|---|---|---|
+| `direct` | dial the token's listen address | inviter is reachable |
+| `relay` | dial the token's RelayAddr (TURN-allocated address on the inviter's TURN server) | inviter has TURN, source IP pre-permitted |
+| `relay_via_joiner_turn` | joiner allocates its own binding on the same TURN server, sends to the inviter's RelayAddr through cross-allocation forwarding | both peers reach the same TURN server (token-embedded creds or env-var override) |
+
+The daemon emits `bootstrap dial: connected method=<name>` on whichever
+rung first succeeds.
 
 #### Connection fallback chain
 
@@ -417,6 +439,7 @@ All development operations go through the Makefile — never invoke `go` or `doc
 | `make docker-compose-up` | Spin up a local 3-node swarm for testing |
 | `make docker-compose-down` | Tear down the local swarm |
 | `make docker-compose-test` | Containerised end-to-end test: assert two joiners reach the founder, the joiner backs up the seeded tree, and the announcement reaches the third node |
+| `make docker-compose-test-turn` | Cross-allocation TURN smoke test against a real coturn container; isolates the inviter and joiner on separate networks so both `direct` and `relay-direct` rungs fail and the join completes via `relay_via_joiner_turn` |
 | `make publish-dryrun` | Multi-arch buildx build (`linux/amd64` + `linux/arm64`) without pushing — sanity-checks the release workflow's build command locally |
 
 ### Security

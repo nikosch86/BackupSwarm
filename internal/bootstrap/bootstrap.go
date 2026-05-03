@@ -12,13 +12,23 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 
 	"backupswarm/internal/ca"
 	"backupswarm/internal/invites"
+	"backupswarm/internal/nat"
 	"backupswarm/internal/peers"
 	"backupswarm/internal/protocol"
 	bsquic "backupswarm/internal/quic"
 	"backupswarm/pkg/token"
+)
+
+// Joiner-side TURN env vars take precedence over token-embedded credentials.
+const (
+	envJoinerTURNServer = "BACKUPSWARM_TURN_SERVER"
+	envJoinerTURNUser   = "BACKUPSWARM_TURN_USER"
+	envJoinerTURNPass   = "BACKUPSWARM_TURN_PASS"
+	envJoinerTURNRealm  = "BACKUPSWARM_TURN_REALM"
 )
 
 // Test seams.
@@ -28,12 +38,42 @@ var (
 	writePeerListFunc     = protocol.WritePeerListMessage
 	streamCloseFunc       = func(s io.Closer) error { return s.Close() }
 	dialIntroducerFunc    = bsquic.Dial
+	dialJoinerTURNFunc    = func(ctx context.Context, cfg nat.TURNConfig, addr string, priv ed25519.PrivateKey, expected ed25519.PublicKey) (*bsquic.Conn, func(), error) {
+		alloc, err := nat.Allocate(ctx, cfg)
+		if err != nil {
+			return nil, nil, fmt.Errorf("allocate joiner turn: %w", err)
+		}
+		conn, err := bsquic.DialOver(ctx, alloc.PacketConn(), addr, priv, expected, nil)
+		if err != nil {
+			_ = alloc.Close()
+			return nil, nil, fmt.Errorf("dial over joiner turn: %w", err)
+		}
+		return conn, func() { _ = alloc.Close() }, nil
+	}
 )
 
-// dialIntroducer tries the token's direct address first, then the relay
-// alternative if the direct rung fails and tok.RelayAddr is non-empty.
-// Emits method=direct|relay on success.
-func dialIntroducer(ctx context.Context, tok token.Token, myPriv ed25519.PrivateKey) (*bsquic.Conn, error) {
+// resolveJoinerTURN returns a TURNConfig assembled from env vars (taking
+// precedence) or token-embedded fields. Returns nil when neither source
+// has all four fields populated.
+func resolveJoinerTURN(tok token.Token) *nat.TURNConfig {
+	envServer := os.Getenv(envJoinerTURNServer)
+	envUser := os.Getenv(envJoinerTURNUser)
+	envPass := os.Getenv(envJoinerTURNPass)
+	envRealm := os.Getenv(envJoinerTURNRealm)
+	if envServer != "" && envUser != "" && envPass != "" && envRealm != "" {
+		return &nat.TURNConfig{Server: envServer, Username: envUser, Password: envPass, Realm: envRealm}
+	}
+	if tok.TURNServer != "" && tok.TURNUser != "" && tok.TURNPass != "" && tok.TURNRealm != "" {
+		return &nat.TURNConfig{Server: tok.TURNServer, Username: tok.TURNUser, Password: tok.TURNPass, Realm: tok.TURNRealm}
+	}
+	return nil
+}
+
+// dialIntroducer walks direct → relay → joiner-side TURN, returning the
+// first successful conn. Emits method=direct|relay|relay_via_joiner_turn
+// on success; cleanup releases the joiner allocation if the third rung wins.
+func dialIntroducer(ctx context.Context, tok token.Token, myPriv ed25519.PrivateKey, joinerTURN *nat.TURNConfig) (*bsquic.Conn, func(), error) {
+	noopCleanup := func() {}
 	var errs []error
 
 	slog.DebugContext(ctx, "bootstrap dial: direct attempt", "addr", tok.Addr)
@@ -43,7 +83,7 @@ func dialIntroducer(ctx context.Context, tok token.Token, myPriv ed25519.Private
 			"method", "direct",
 			"addr", tok.Addr,
 		)
-		return conn, nil
+		return conn, noopCleanup, nil
 	}
 	slog.DebugContext(ctx, "bootstrap dial: direct failed",
 		"addr", tok.Addr,
@@ -53,7 +93,7 @@ func dialIntroducer(ctx context.Context, tok token.Token, myPriv ed25519.Private
 
 	if tok.RelayAddr == "" {
 		slog.DebugContext(ctx, "bootstrap dial: relay skipped", "reason", "no_relay_addr")
-		return nil, errors.Join(errs...)
+		return nil, noopCleanup, errors.Join(errs...)
 	}
 
 	slog.DebugContext(ctx, "bootstrap dial: relay attempt", "addr", tok.RelayAddr)
@@ -63,14 +103,39 @@ func dialIntroducer(ctx context.Context, tok token.Token, myPriv ed25519.Private
 			"method", "relay",
 			"addr", tok.RelayAddr,
 		)
-		return conn, nil
+		return conn, noopCleanup, nil
 	}
 	slog.DebugContext(ctx, "bootstrap dial: relay failed",
 		"addr", tok.RelayAddr,
 		"err", err,
 	)
 	errs = append(errs, fmt.Errorf("relay: %w", err))
-	return nil, errors.Join(errs...)
+
+	if joinerTURN == nil {
+		slog.DebugContext(ctx, "bootstrap dial: joiner_turn skipped", "reason", "no_joiner_turn_config")
+		return nil, noopCleanup, errors.Join(errs...)
+	}
+
+	slog.DebugContext(ctx, "bootstrap dial: joiner_turn attempt",
+		"addr", tok.RelayAddr,
+		"server", joinerTURN.Server,
+	)
+	conn, cleanup, err := dialJoinerTURNFunc(ctx, *joinerTURN, tok.RelayAddr, myPriv, tok.Pub)
+	if err == nil {
+		slog.InfoContext(ctx, "bootstrap dial: connected",
+			"method", "relay_via_joiner_turn",
+			"addr", tok.RelayAddr,
+			"server", joinerTURN.Server,
+		)
+		return conn, cleanup, nil
+	}
+	slog.DebugContext(ctx, "bootstrap dial: joiner_turn failed",
+		"addr", tok.RelayAddr,
+		"server", joinerTURN.Server,
+		"err", err,
+	)
+	errs = append(errs, fmt.Errorf("relay_via_joiner_turn: %w", err))
+	return nil, noopCleanup, errors.Join(errs...)
 }
 
 // maxAdvertisedAddrLen caps incoming addresses at 1 KiB.
@@ -231,10 +296,12 @@ func DoJoin(ctx context.Context, tokenStr string, myPriv ed25519.PrivateKey, myL
 			return JoinResult{}, fmt.Errorf("create csr: %w", err)
 		}
 	}
-	conn, err := dialIntroducer(ctx, tok, myPriv)
+	joinerTURN := resolveJoinerTURN(tok)
+	conn, cleanup, err := dialIntroducer(ctx, tok, myPriv, joinerTURN)
 	if err != nil {
 		return JoinResult{}, fmt.Errorf("dial introducer: %w", err)
 	}
+	defer cleanup()
 	defer func() { _ = conn.Close() }()
 
 	stream, err := conn.OpenStream(ctx)

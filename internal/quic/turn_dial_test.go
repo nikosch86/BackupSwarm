@@ -243,6 +243,90 @@ func TestListener_DialPeer_RoundTripOverTURN(t *testing.T) {
 	}
 }
 
+// TestListenOver_CrossAllocationHandshake asserts two peers complete a
+// QUIC handshake when the listener pre-permits the TURN server's IP
+// and the dialer routes through its own allocation against the same server.
+func TestListenOver_CrossAllocationHandshake(t *testing.T) {
+	turnAddr := startTURNFixture(t)
+	turnHost, _, err := net.SplitHostPort(turnAddr)
+	if err != nil {
+		t.Fatalf("split turn addr: %v", err)
+	}
+	turnIP := net.ParseIP(turnHost)
+	if turnIP == nil {
+		t.Fatalf("parse turn ip %q", turnHost)
+	}
+
+	inviterPub, inviterPriv := newKeyPair(t)
+	joinerPub, joinerPriv := newKeyPair(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	inviterAlloc, err := nat.Allocate(ctx, nat.TURNConfig{
+		Server:   turnAddr,
+		Username: "user",
+		Password: "pass",
+		Realm:    "backupswarm.test",
+	})
+	if err != nil {
+		t.Fatalf("inviter allocate: %v", err)
+	}
+	defer func() { _ = inviterAlloc.Close() }()
+	if err := inviterAlloc.AddPermission(turnIP); err != nil {
+		t.Fatalf("inviter AddPermission: %v", err)
+	}
+
+	joinerAlloc, err := nat.Allocate(ctx, nat.TURNConfig{
+		Server:   turnAddr,
+		Username: "user",
+		Password: "pass",
+		Realm:    "backupswarm.test",
+	})
+	if err != nil {
+		t.Fatalf("joiner allocate: %v", err)
+	}
+	defer func() { _ = joinerAlloc.Close() }()
+
+	l, err := bsw.ListenOver(inviterAlloc.PacketConn(), inviterPriv, nil, nil)
+	if err != nil {
+		t.Fatalf("ListenOver inviter alloc: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	type accept struct {
+		pub ed25519.PublicKey
+		err error
+	}
+	done := make(chan accept, 1)
+	go func() {
+		conn, aerr := l.Accept(ctx)
+		if aerr != nil {
+			done <- accept{err: aerr}
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		done <- accept{pub: conn.RemotePub()}
+	}()
+
+	conn, err := bsw.DialOver(ctx, joinerAlloc.PacketConn(), inviterAlloc.RelayAddr().String(), joinerPriv, inviterPub, nil)
+	if err != nil {
+		t.Fatalf("DialOver inviter relay: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if !conn.RemotePub().Equal(inviterPub) {
+		t.Fatalf("dialer remote pub mismatch")
+	}
+	r := <-done
+	if r.err != nil {
+		t.Fatalf("accept: %v", r.err)
+	}
+	if !r.pub.Equal(joinerPub) {
+		t.Fatalf("inviter-side remote pub mismatch")
+	}
+}
+
 // TestDialOver_TURNRelayHandshake asserts a client that allocates a TURN
 // relay socket can complete a QUIC handshake with a directly-listening
 // peer when its outbound traffic is routed through the relay.

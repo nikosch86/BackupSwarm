@@ -1,0 +1,53 @@
+# Dual-role daemon paired with a coturn sidecar so inviter-behind-NAT
+# and joiner-behind-NAT scenarios resolve through cross-allocation
+# forwarding. See README.md for the deployment notes.
+
+services:
+  coturn:
+    image: coturn/coturn:4.6.2-r2-alpine
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - -n
+      - --listening-port=3478
+      - --realm=${BACKUPSWARM_TURN_REALM:?must be set; see README.md}
+      - --lt-cred-mech
+      - --user=${BACKUPSWARM_TURN_USER:?must be set; see README.md}:${BACKUPSWARM_TURN_PASS:?must be set; see README.md}
+      - --external-ip=${BACKUPSWARM_PUBLIC_IP:?must be set; see README.md}
+      - --min-port=49152
+      - --max-port=49200
+      - --no-tls
+      - --no-dtls
+      - --no-cli
+      - --no-multicast-peers
+
+  dual-role:
+    image: ghcr.io/nikosch86/backupswarm:main-dev
+    restart: unless-stopped
+    depends_on:
+      - coturn
+    environment:
+      BACKUPSWARM_INVITE_TOKEN: "${BACKUPSWARM_INVITE_TOKEN:-}"
+      BACKUPSWARM_ADVERTISE_ADDR: "${BACKUPSWARM_PUBLIC_IP}:7777"
+    volumes:
+      - data:/data
+      - ./backup:/backup:ro
+    ports:
+      - "7777:7777/udp"
+    command:
+      - run
+      - --backup-dir
+      - /backup
+      - --max-storage
+      - 100g
+      - --turn-server
+      - ${BACKUPSWARM_PUBLIC_IP}:3478
+      - --turn-user
+      - ${BACKUPSWARM_TURN_USER}
+      - --turn-pass
+      - ${BACKUPSWARM_TURN_PASS}
+      - --turn-realm
+      - ${BACKUPSWARM_TURN_REALM}
+
+volumes:
+  data:

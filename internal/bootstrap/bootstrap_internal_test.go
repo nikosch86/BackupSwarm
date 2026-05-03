@@ -15,6 +15,7 @@ import (
 
 	"backupswarm/internal/ca"
 	"backupswarm/internal/invites"
+	"backupswarm/internal/nat"
 	"backupswarm/internal/peers"
 	"backupswarm/internal/protocol"
 	bsquic "backupswarm/internal/quic"
@@ -436,6 +437,78 @@ func withDialIntroducerFunc(t *testing.T, fn func(ctx context.Context, addr stri
 	t.Cleanup(func() { dialIntroducerFunc = prev })
 }
 
+// withDialJoinerTURNFunc swaps dialJoinerTURNFunc for the duration of a
+// test, restoring the previous value via t.Cleanup.
+func withDialJoinerTURNFunc(t *testing.T, fn func(ctx context.Context, cfg nat.TURNConfig, addr string, priv ed25519.PrivateKey, expected ed25519.PublicKey) (*bsquic.Conn, func(), error)) {
+	t.Helper()
+	prev := dialJoinerTURNFunc
+	dialJoinerTURNFunc = fn
+	t.Cleanup(func() { dialJoinerTURNFunc = prev })
+}
+
+// TestValidatorWireCode_DefaultMapsToInternal asserts an unrecognized
+// validator error maps to the internal wire code.
+func TestValidatorWireCode_DefaultMapsToInternal(t *testing.T) {
+	got := validatorWireCode(errors.New("unknown validator failure"))
+	if got != wireErrInternal {
+		t.Errorf("validatorWireCode = %q, want %q", got, wireErrInternal)
+	}
+}
+
+// TestPeersToEntries_RejectsBadPubKeyLen feeds a record whose PubKey is
+// the wrong size; peersToEntries returns an error mentioning the index.
+func TestPeersToEntries_RejectsBadPubKeyLen(t *testing.T) {
+	in := []peers.Peer{{PubKey: ed25519.PublicKey{0x01, 0x02}, Role: peers.RolePeer, Addr: "x:1"}}
+	out, err := peersToEntries(in)
+	if err == nil {
+		t.Fatalf("peersToEntries accepted truncated pubkey; out=%v", out)
+	}
+	if !strings.Contains(err.Error(), "pubkey size") {
+		t.Errorf("err = %q, want 'pubkey size' substring", err)
+	}
+}
+
+// TestPeersToEntries_RejectsRoleUnspecified rejects a record with a zero
+// role byte.
+func TestPeersToEntries_RejectsRoleUnspecified(t *testing.T) {
+	pub := make(ed25519.PublicKey, ed25519.PublicKeySize)
+	in := []peers.Peer{{PubKey: pub, Role: peers.RoleUnspecified, Addr: "x:1"}}
+	out, err := peersToEntries(in)
+	if err == nil {
+		t.Fatalf("peersToEntries accepted unspecified role; out=%v", out)
+	}
+	if !strings.Contains(err.Error(), "role unspecified") {
+		t.Errorf("err = %q, want 'role unspecified' substring", err)
+	}
+}
+
+// TestDialJoinerTURNFunc_DefaultAllocateErrorPath drives the unmocked
+// default closure with an empty TURN server so nat.Allocate errors fast.
+// The success path needs a real TURN server and is left uncovered.
+func TestDialJoinerTURNFunc_DefaultAllocateErrorPath(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("genkey: %v", err)
+	}
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("genkey: %v", err)
+	}
+	conn, cleanup, err := dialJoinerTURNFunc(context.Background(), nat.TURNConfig{}, "127.0.0.1:1", priv, pub)
+	if err == nil {
+		t.Fatal("dialJoinerTURNFunc accepted empty TURN config")
+	}
+	if conn != nil {
+		t.Errorf("conn = %v, want nil on error", conn)
+	}
+	if cleanup != nil {
+		t.Error("cleanup non-nil on error, want nil")
+	}
+	if !strings.Contains(err.Error(), "allocate joiner turn") {
+		t.Errorf("err = %q, want 'allocate joiner turn' substring", err)
+	}
+}
+
 // TestDialIntroducer_DirectSucceeds_NeverTriesRelay asserts the relay
 // rung is skipped when direct dial returns a conn.
 func TestDialIntroducer_DirectSucceeds_NeverTriesRelay(t *testing.T) {
@@ -455,10 +528,11 @@ func TestDialIntroducer_DirectSucceeds_NeverTriesRelay(t *testing.T) {
 	})
 
 	tok := token.Token{Addr: "203.0.113.1:7000", RelayAddr: "relay.example.org:54321"}
-	conn, err := dialIntroducer(context.Background(), tok, ed25519.NewKeyFromSeed(make([]byte, 32)))
+	conn, cleanup, err := dialIntroducer(context.Background(), tok, ed25519.NewKeyFromSeed(make([]byte, 32)), nil)
 	if err != nil {
 		t.Fatalf("dialIntroducer: %v", err)
 	}
+	defer cleanup()
 	if conn != want {
 		t.Errorf("conn = %p, want %p", conn, want)
 	}
@@ -486,10 +560,11 @@ func TestDialIntroducer_DirectFails_RelaySucceeds(t *testing.T) {
 	})
 
 	tok := token.Token{Addr: "203.0.113.1:7000", RelayAddr: "relay.example.org:54321"}
-	conn, err := dialIntroducer(context.Background(), tok, ed25519.NewKeyFromSeed(make([]byte, 32)))
+	conn, cleanup, err := dialIntroducer(context.Background(), tok, ed25519.NewKeyFromSeed(make([]byte, 32)), nil)
 	if err != nil {
 		t.Fatalf("dialIntroducer: %v", err)
 	}
+	defer cleanup()
 	if conn != want {
 		t.Errorf("conn = %p, want %p", conn, want)
 	}
@@ -512,7 +587,10 @@ func TestDialIntroducer_NoRelay_DirectFails(t *testing.T) {
 	})
 
 	tok := token.Token{Addr: "203.0.113.1:7000"}
-	_, err := dialIntroducer(context.Background(), tok, ed25519.NewKeyFromSeed(make([]byte, 32)))
+	_, cleanup, err := dialIntroducer(context.Background(), tok, ed25519.NewKeyFromSeed(make([]byte, 32)), nil)
+	if cleanup != nil {
+		defer cleanup()
+	}
 	if err == nil {
 		t.Fatal("dialIntroducer returned nil error")
 	}
@@ -541,7 +619,10 @@ func TestDialIntroducer_BothFail_JoinedError(t *testing.T) {
 	})
 
 	tok := token.Token{Addr: "203.0.113.1:7000", RelayAddr: "relay.example.org:54321"}
-	_, err := dialIntroducer(context.Background(), tok, ed25519.NewKeyFromSeed(make([]byte, 32)))
+	_, cleanup, err := dialIntroducer(context.Background(), tok, ed25519.NewKeyFromSeed(make([]byte, 32)), nil)
+	if cleanup != nil {
+		defer cleanup()
+	}
 	if err == nil {
 		t.Fatal("dialIntroducer returned nil error")
 	}
@@ -556,5 +637,263 @@ func TestDialIntroducer_BothFail_JoinedError(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Errorf("err.Error() = %q, missing %q", msg, want)
 		}
+	}
+}
+
+// TestDialIntroducer_JoinerTURN_RunsAfterRelayFails asserts the
+// joiner-side TURN rung runs only after both direct and relay fail.
+func TestDialIntroducer_JoinerTURN_RunsAfterRelayFails(t *testing.T) {
+	want := &bsquic.Conn{}
+	var directCalls, relayCalls, joinerTURNCalls int
+	cleanupCalls := 0
+	withDialIntroducerFunc(t, func(_ context.Context, addr string, _ ed25519.PrivateKey, _ ed25519.PublicKey, _ *bsquic.TrustConfig) (*bsquic.Conn, error) {
+		switch addr {
+		case "203.0.113.1:7000":
+			directCalls++
+			return nil, errors.New("direct boom")
+		case "relay.example.org:54321":
+			relayCalls++
+			return nil, errors.New("relay boom")
+		default:
+			return nil, errors.New("unexpected addr")
+		}
+	})
+	withDialJoinerTURNFunc(t, func(_ context.Context, cfg nat.TURNConfig, addr string, _ ed25519.PrivateKey, _ ed25519.PublicKey) (*bsquic.Conn, func(), error) {
+		joinerTURNCalls++
+		if cfg.Server != "turn.example.org:3478" {
+			return nil, nil, errors.New("unexpected cfg server")
+		}
+		if addr != "relay.example.org:54321" {
+			return nil, nil, errors.New("unexpected addr")
+		}
+		return want, func() { cleanupCalls++ }, nil
+	})
+
+	tok := token.Token{
+		Addr:       "203.0.113.1:7000",
+		RelayAddr:  "relay.example.org:54321",
+		TURNServer: "turn.example.org:3478",
+		TURNUser:   "u",
+		TURNPass:   "p",
+		TURNRealm:  "r",
+	}
+	cfg := &nat.TURNConfig{Server: tok.TURNServer, Username: tok.TURNUser, Password: tok.TURNPass, Realm: tok.TURNRealm}
+	conn, cleanup, err := dialIntroducer(context.Background(), tok, ed25519.NewKeyFromSeed(make([]byte, 32)), cfg)
+	if err != nil {
+		t.Fatalf("dialIntroducer: %v", err)
+	}
+	if conn != want {
+		t.Errorf("conn = %p, want %p", conn, want)
+	}
+	cleanup()
+	if directCalls != 1 || relayCalls != 1 || joinerTURNCalls != 1 {
+		t.Errorf("direct=%d relay=%d joinerTURN=%d, want 1/1/1", directCalls, relayCalls, joinerTURNCalls)
+	}
+	if cleanupCalls != 1 {
+		t.Errorf("cleanup invoked %d times, want 1", cleanupCalls)
+	}
+}
+
+// TestDialIntroducer_NoJoinerTURN_BothFail asserts the joiner-TURN rung
+// is skipped when joinerTURN is nil.
+func TestDialIntroducer_NoJoinerTURN_BothFail(t *testing.T) {
+	directErr := errors.New("direct boom")
+	relayErr := errors.New("relay boom")
+	joinerCalls := 0
+	withDialIntroducerFunc(t, func(_ context.Context, addr string, _ ed25519.PrivateKey, _ ed25519.PublicKey, _ *bsquic.TrustConfig) (*bsquic.Conn, error) {
+		switch addr {
+		case "203.0.113.1:7000":
+			return nil, directErr
+		case "relay.example.org:54321":
+			return nil, relayErr
+		}
+		return nil, errors.New("unexpected addr")
+	})
+	withDialJoinerTURNFunc(t, func(context.Context, nat.TURNConfig, string, ed25519.PrivateKey, ed25519.PublicKey) (*bsquic.Conn, func(), error) {
+		joinerCalls++
+		return nil, nil, errors.New("joiner-TURN should not be tried")
+	})
+
+	tok := token.Token{Addr: "203.0.113.1:7000", RelayAddr: "relay.example.org:54321"}
+	_, cleanup, err := dialIntroducer(context.Background(), tok, ed25519.NewKeyFromSeed(make([]byte, 32)), nil)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err == nil {
+		t.Fatal("dialIntroducer returned nil error")
+	}
+	if joinerCalls != 0 {
+		t.Errorf("joiner-TURN called %d times despite nil cfg", joinerCalls)
+	}
+}
+
+// TestDialIntroducer_AllThreeFail_JoinedError asserts the returned error
+// covers all three rungs when each fails.
+func TestDialIntroducer_AllThreeFail_JoinedError(t *testing.T) {
+	directErr := errors.New("direct boom")
+	relayErr := errors.New("relay boom")
+	joinerErr := errors.New("joiner-TURN boom")
+	withDialIntroducerFunc(t, func(_ context.Context, addr string, _ ed25519.PrivateKey, _ ed25519.PublicKey, _ *bsquic.TrustConfig) (*bsquic.Conn, error) {
+		switch addr {
+		case "203.0.113.1:7000":
+			return nil, directErr
+		case "relay.example.org:54321":
+			return nil, relayErr
+		}
+		return nil, errors.New("unexpected addr")
+	})
+	withDialJoinerTURNFunc(t, func(context.Context, nat.TURNConfig, string, ed25519.PrivateKey, ed25519.PublicKey) (*bsquic.Conn, func(), error) {
+		return nil, nil, joinerErr
+	})
+
+	tok := token.Token{Addr: "203.0.113.1:7000", RelayAddr: "relay.example.org:54321"}
+	cfg := &nat.TURNConfig{Server: "turn.example.org:3478", Username: "u", Password: "p", Realm: "r"}
+	_, cleanup, err := dialIntroducer(context.Background(), tok, ed25519.NewKeyFromSeed(make([]byte, 32)), cfg)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err == nil {
+		t.Fatal("dialIntroducer returned nil error")
+	}
+	for _, sentinel := range []error{directErr, relayErr, joinerErr} {
+		if !errors.Is(err, sentinel) {
+			t.Errorf("err = %v, missing %v", err, sentinel)
+		}
+	}
+	for _, want := range []string{"direct", "relay", "relay_via_joiner_turn"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err.Error() = %q, missing %q", err.Error(), want)
+		}
+	}
+}
+
+// clearJoinerTURNEnv blanks the four BACKUPSWARM_TURN_* env vars so a
+// shell-side export does not leak into the test.
+func clearJoinerTURNEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv(envJoinerTURNServer, "")
+	t.Setenv(envJoinerTURNUser, "")
+	t.Setenv(envJoinerTURNPass, "")
+	t.Setenv(envJoinerTURNRealm, "")
+}
+
+// TestResolveJoinerTURN_EnvWinsOverToken asserts a complete env set
+// overrides token-embedded TURN fields.
+func TestResolveJoinerTURN_EnvWinsOverToken(t *testing.T) {
+	t.Setenv(envJoinerTURNServer, "env.example:3478")
+	t.Setenv(envJoinerTURNUser, "envU")
+	t.Setenv(envJoinerTURNPass, "envP")
+	t.Setenv(envJoinerTURNRealm, "envR")
+	tok := token.Token{
+		TURNServer: "tok.example:3478",
+		TURNUser:   "tokU",
+		TURNPass:   "tokP",
+		TURNRealm:  "tokR",
+	}
+	cfg := resolveJoinerTURN(tok)
+	if cfg == nil {
+		t.Fatal("resolveJoinerTURN returned nil with full env")
+	}
+	want := nat.TURNConfig{Server: "env.example:3478", Username: "envU", Password: "envP", Realm: "envR"}
+	if *cfg != want {
+		t.Errorf("cfg = %+v, want %+v", *cfg, want)
+	}
+}
+
+// TestResolveJoinerTURN_PartialEnvFallsThroughToToken asserts a
+// partially-set env (missing realm) is rejected and the token is used.
+func TestResolveJoinerTURN_PartialEnvFallsThroughToToken(t *testing.T) {
+	clearJoinerTURNEnv(t)
+	t.Setenv(envJoinerTURNServer, "env.example:3478")
+	t.Setenv(envJoinerTURNUser, "envU")
+	t.Setenv(envJoinerTURNPass, "envP")
+	tok := token.Token{
+		TURNServer: "tok.example:3478",
+		TURNUser:   "tokU",
+		TURNPass:   "tokP",
+		TURNRealm:  "tokR",
+	}
+	cfg := resolveJoinerTURN(tok)
+	if cfg == nil {
+		t.Fatal("resolveJoinerTURN returned nil with full token")
+	}
+	want := nat.TURNConfig{Server: "tok.example:3478", Username: "tokU", Password: "tokP", Realm: "tokR"}
+	if *cfg != want {
+		t.Errorf("cfg = %+v, want %+v", *cfg, want)
+	}
+}
+
+// TestResolveJoinerTURN_TokenOnly asserts a complete token set with no
+// env returns the token-embedded config.
+func TestResolveJoinerTURN_TokenOnly(t *testing.T) {
+	clearJoinerTURNEnv(t)
+	tok := token.Token{
+		TURNServer: "tok.example:3478",
+		TURNUser:   "tokU",
+		TURNPass:   "tokP",
+		TURNRealm:  "tokR",
+	}
+	cfg := resolveJoinerTURN(tok)
+	if cfg == nil {
+		t.Fatal("resolveJoinerTURN returned nil with full token")
+	}
+	want := nat.TURNConfig{Server: "tok.example:3478", Username: "tokU", Password: "tokP", Realm: "tokR"}
+	if *cfg != want {
+		t.Errorf("cfg = %+v, want %+v", *cfg, want)
+	}
+}
+
+// TestResolveJoinerTURN_PartialTokenReturnsNil asserts a token missing
+// any of the four fields is rejected and resolveJoinerTURN returns nil.
+func TestResolveJoinerTURN_PartialTokenReturnsNil(t *testing.T) {
+	clearJoinerTURNEnv(t)
+	tok := token.Token{
+		TURNServer: "tok.example:3478",
+		TURNUser:   "tokU",
+		TURNPass:   "tokP",
+		// TURNRealm intentionally empty.
+	}
+	if cfg := resolveJoinerTURN(tok); cfg != nil {
+		t.Errorf("cfg = %+v, want nil for partial token", *cfg)
+	}
+}
+
+// TestResolveJoinerTURN_NoEnvNoToken returns nil when neither source
+// supplies a complete set.
+func TestResolveJoinerTURN_NoEnvNoToken(t *testing.T) {
+	clearJoinerTURNEnv(t)
+	if cfg := resolveJoinerTURN(token.Token{}); cfg != nil {
+		t.Errorf("cfg = %+v, want nil with no env and empty token", *cfg)
+	}
+}
+
+// TestDialIntroducer_JoinerTURN_SkippedWhenNoRelayAddr asserts the rung
+// is skipped when RelayAddr is empty (no target to dial through joiner
+// allocation).
+func TestDialIntroducer_JoinerTURN_SkippedWhenNoRelayAddr(t *testing.T) {
+	directErr := errors.New("direct boom")
+	joinerCalls := 0
+	withDialIntroducerFunc(t, func(_ context.Context, addr string, _ ed25519.PrivateKey, _ ed25519.PublicKey, _ *bsquic.TrustConfig) (*bsquic.Conn, error) {
+		if addr == "203.0.113.1:7000" {
+			return nil, directErr
+		}
+		return nil, errors.New("unexpected addr")
+	})
+	withDialJoinerTURNFunc(t, func(context.Context, nat.TURNConfig, string, ed25519.PrivateKey, ed25519.PublicKey) (*bsquic.Conn, func(), error) {
+		joinerCalls++
+		return nil, nil, errors.New("joiner-TURN should not be tried")
+	})
+
+	tok := token.Token{Addr: "203.0.113.1:7000"}
+	cfg := &nat.TURNConfig{Server: "turn.example.org:3478", Username: "u", Password: "p", Realm: "r"}
+	_, cleanup, err := dialIntroducer(context.Background(), tok, ed25519.NewKeyFromSeed(make([]byte, 32)), cfg)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err == nil {
+		t.Fatal("dialIntroducer returned nil error")
+	}
+	if joinerCalls != 0 {
+		t.Errorf("joiner-TURN called %d times despite empty RelayAddr", joinerCalls)
 	}
 }

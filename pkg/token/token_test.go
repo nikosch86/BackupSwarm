@@ -141,6 +141,105 @@ func TestEncodeDecode_RoundTripCAAndRelay(t *testing.T) {
 	}
 }
 
+func TestEncodeDecode_RoundTripWithTURNCreds(t *testing.T) {
+	in := sample(t, nil)
+	in.RelayAddr = "relay.example.org:3478"
+	in.TURNServer = "turn.example.org:3478"
+	in.TURNUser = "swarm-user"
+	in.TURNPass = "s3cret-passphrase"
+	in.TURNRealm = "backupswarm.swarm"
+
+	encoded, err := token.Encode(in)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	out, err := token.Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if out.TURNServer != in.TURNServer {
+		t.Errorf("TURNServer = %q, want %q", out.TURNServer, in.TURNServer)
+	}
+	if out.TURNUser != in.TURNUser {
+		t.Errorf("TURNUser = %q, want %q", out.TURNUser, in.TURNUser)
+	}
+	if out.TURNPass != in.TURNPass {
+		t.Errorf("TURNPass = %q, want %q", out.TURNPass, in.TURNPass)
+	}
+	if out.TURNRealm != in.TURNRealm {
+		t.Errorf("TURNRealm = %q, want %q", out.TURNRealm, in.TURNRealm)
+	}
+	if out.RelayAddr != in.RelayAddr {
+		t.Errorf("RelayAddr = %q, want %q", out.RelayAddr, in.RelayAddr)
+	}
+}
+
+func TestEncodeDecode_RoundTripEmptyTURNCreds(t *testing.T) {
+	in := sample(t, nil)
+	encoded, err := token.Encode(in)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	out, err := token.Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if out.TURNServer != "" || out.TURNUser != "" || out.TURNPass != "" || out.TURNRealm != "" {
+		t.Errorf("expected all TURN fields empty, got server=%q user=%q pass=%q realm=%q",
+			out.TURNServer, out.TURNUser, out.TURNPass, out.TURNRealm)
+	}
+}
+
+func TestEncode_OversizedTURNFieldsRejected(t *testing.T) {
+	cases := []struct {
+		name  string
+		apply func(*token.Token)
+	}{
+		{"server", func(t *token.Token) { t.TURNServer = strings.Repeat("s", (1<<16)+1) }},
+		{"user", func(t *token.Token) { t.TURNUser = strings.Repeat("u", (1<<16)+1) }},
+		{"pass", func(t *token.Token) { t.TURNPass = strings.Repeat("p", (1<<16)+1) }},
+		{"realm", func(t *token.Token) { t.TURNRealm = strings.Repeat("r", (1<<16)+1) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := sample(t, nil)
+			tc.apply(&in)
+			if _, err := token.Encode(in); err == nil {
+				t.Errorf("Encode accepted over-sized %s", tc.name)
+			}
+		})
+	}
+}
+
+func TestDecode_TURNFieldLengthOverrun(t *testing.T) {
+	// Structurally valid prefix through ca_len=0, relay_len=0, server_len=1024
+	// while supplying only 4 server bytes.
+	pub := mustKey(t)
+	addr := "127.0.0.1:1"
+	raw := []byte{0x04}
+	var addrLen [2]byte
+	binary.BigEndian.PutUint16(addrLen[:], uint16(len(addr)))
+	raw = append(raw, addrLen[:]...)
+	raw = append(raw, addr...)
+	raw = append(raw, pub...)
+	raw = append(raw, bytes.Repeat([]byte{0x33}, 32)...) // swarm id
+	raw = append(raw, bytes.Repeat([]byte{0x44}, 32)...) // secret
+	var caLen [2]byte
+	binary.BigEndian.PutUint16(caLen[:], 0)
+	raw = append(raw, caLen[:]...)
+	var relayLen [2]byte
+	binary.BigEndian.PutUint16(relayLen[:], 0)
+	raw = append(raw, relayLen[:]...)
+	var serverLen [2]byte
+	binary.BigEndian.PutUint16(serverLen[:], 1024)
+	raw = append(raw, serverLen[:]...)
+	raw = append(raw, []byte{0xCC, 0xCC, 0xCC, 0xCC}...)
+
+	if _, err := token.Decode(token.EncodeRawForTest(raw)); err == nil {
+		t.Error("Decode accepted TURN server-length overrun")
+	}
+}
+
 func TestEncode_EmptyAddrRejected(t *testing.T) {
 	in := sample(t, nil)
 	in.Addr = ""
@@ -204,6 +303,7 @@ func TestDecode_UnknownVersionRejected(t *testing.T) {
 		{"future", 0xff},
 		{"legacy_v1", 0x01},
 		{"legacy_v2", 0x02},
+		{"legacy_v3", 0x03},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -241,7 +341,7 @@ func TestDecode_TruncatedAtBoundaries(t *testing.T) {
 
 func TestDecode_AddrLengthOverrun(t *testing.T) {
 	// addr_len declares 0x0400 but only "ab" follow + junk.
-	raw := []byte{0x03, 0x04, 0x00, 'a', 'b'}
+	raw := []byte{0x04, 0x04, 0x00, 'a', 'b'}
 	raw = append(raw, bytes.Repeat([]byte{0x11}, 32+32+32+2+2)...)
 	if _, err := token.Decode(token.EncodeRawForTest(raw)); err == nil {
 		t.Error("Decode accepted addr-length overrun")
@@ -253,7 +353,7 @@ func TestDecode_CALengthOverrun(t *testing.T) {
 	// bytes while supplying only 4.
 	pub := mustKey(t)
 	addr := "127.0.0.1:1"
-	raw := []byte{0x03}
+	raw := []byte{0x04}
 	var addrLen [2]byte
 	binary.BigEndian.PutUint16(addrLen[:], uint16(len(addr)))
 	raw = append(raw, addrLen[:]...)
@@ -276,7 +376,7 @@ func TestDecode_RelayLengthOverrun(t *testing.T) {
 	// bytes while supplying only 4.
 	pub := mustKey(t)
 	addr := "127.0.0.1:1"
-	raw := []byte{0x03}
+	raw := []byte{0x04}
 	var addrLen [2]byte
 	binary.BigEndian.PutUint16(addrLen[:], uint16(len(addr)))
 	raw = append(raw, addrLen[:]...)

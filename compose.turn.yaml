@@ -1,0 +1,134 @@
+# Two-node TURN cross-allocation smoke test.
+#
+# inviter-net (172.30.0.0/16): node-b only.
+# joiner-net  (172.31.0.0/16): node-a only.
+# coturn-net  (172.29.0.0/16): node-a, node-b, coturn (172.29.0.5).
+#
+# node-b binds on inviter-net so node-a cannot reach it directly. node-b
+# pre-permits the coturn IP on its allocation, so a direct dial to its
+# relay from node-a's coturn-net IP is dropped at coturn. node-a allocates
+# its own binding against the same coturn server; cross-allocation
+# forwarding presents the source as coturn's IP, the pre-permit matches,
+# and the QUIC handshake completes. Assertion target:
+# `method=relay_via_joiner_turn` in node-a's slog.
+
+services:
+  seeder:
+    image: busybox:1.37
+    volumes:
+      - shared-token-turn:/shared
+      - node-a-data:/data-a
+      - node-b-data:/data-b
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        chown -R 65532:65532 /shared /data-a /data-b
+        echo "prep done: chowned volumes to nonroot"
+    restart: "no"
+
+  coturn:
+    image: coturn/coturn:4.6.2-r2-alpine
+    networks:
+      coturn-net:
+        ipv4_address: 172.29.0.5
+    command:
+      - -n
+      - --listening-port=3478
+      - --listening-ip=172.29.0.5
+      - --realm=backupswarm.swarm
+      - --lt-cred-mech
+      - --user=swarm:s3cret
+      - --external-ip=172.29.0.5
+      - --relay-ip=172.29.0.5
+      - --min-port=49152
+      - --max-port=49200
+      - --no-tls
+      - --no-dtls
+      - --no-cli
+      - --no-multicast-peers
+
+  node-b:
+    build: .
+    image: backupswarm:dev
+    depends_on:
+      seeder:
+        condition: service_completed_successfully
+      coturn:
+        condition: service_started
+    volumes:
+      - node-b-data:/data
+      - shared-token-turn:/shared
+    networks:
+      inviter-net:
+        ipv4_address: 172.30.0.20
+      coturn-net:
+        ipv4_address: 172.29.0.20
+    command:
+      - --data-dir
+      - /data
+      - run
+      - --listen
+      - 172.30.0.20:7777
+      - --invite
+      - --token-out
+      - /shared/token-a.txt
+      - --turn-server
+      - 172.29.0.5:3478
+      - --turn-user
+      - swarm
+      - --turn-pass
+      - s3cret
+      - --turn-realm
+      - backupswarm.swarm
+
+  node-a:
+    build: .
+    image: backupswarm:dev
+    depends_on:
+      seeder:
+        condition: service_completed_successfully
+      node-b:
+        condition: service_started
+    volumes:
+      - node-a-data:/data
+      - shared-token-turn:/shared
+    networks:
+      joiner-net:
+        ipv4_address: 172.31.0.21
+      coturn-net:
+        ipv4_address: 172.29.0.21
+    command:
+      - --data-dir
+      - /data
+      - join
+      - --token-file
+      - /shared/token-a.txt
+      - --timeout
+      - 2m
+      - --then-run
+      - --listen
+      - 172.31.0.21:7778
+
+networks:
+  inviter-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16
+  joiner-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.0.0/16
+  coturn-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/16
+
+volumes:
+  node-a-data:
+  node-b-data:
+  shared-token-turn:

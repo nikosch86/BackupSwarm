@@ -96,7 +96,12 @@ func newInviteCmd(dataDir *string) *cobra.Command {
 				return fmt.Errorf("read relay.addr: %w", err)
 			}
 
-			tokStr, err := daemon.IssueInvite(dir, listenAddr, relayAddr, id.PublicKey, caCertDER)
+			turnCreds, err := daemon.ReadTURNCreds(dir)
+			if err != nil {
+				return fmt.Errorf("read turn.creds: %w", err)
+			}
+
+			tokStr, err := daemon.IssueInvite(dir, listenAddr, relayAddr, id.PublicKey, caCertDER, turnCreds)
 			if err != nil {
 				return fmt.Errorf("issue invite: %w", err)
 			}

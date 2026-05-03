@@ -1,7 +1,6 @@
 // Package token serializes shareable invite tokens carrying an introducer's
 // listen address, Ed25519 public key, swarm ID, single-use join secret,
-// optional swarm CA cert, and optional TURN-relayed fallback address.
-// Unknown version bytes Decode to ErrUnknownVersion.
+// and optional CA cert / relay address / TURN credentials.
 package token
 
 import (
@@ -13,14 +12,15 @@ import (
 )
 
 // wireVersion is the layout tag at the head of every encoded token.
-const wireVersion byte = 3
+const wireVersion byte = 4
 
-// maxAddrLen, maxCACertLen, and maxRelayAddrLen are the uint16 length-prefix
-// ceilings for each variable-width field.
+// maxAddrLen, maxCACertLen, maxRelayAddrLen, and maxTURNFieldLen are the
+// uint16 length-prefix ceilings for each variable-width field.
 const (
 	maxAddrLen      = 1<<16 - 1
 	maxCACertLen    = 1<<16 - 1
 	maxRelayAddrLen = 1<<16 - 1
+	maxTURNFieldLen = 1<<16 - 1
 )
 
 // SwarmIDSize and SecretSize are the fixed widths of the matching Token fields.
@@ -33,20 +33,26 @@ const (
 // does not match the layout this build understands.
 var ErrUnknownVersion = errors.New("unknown token version")
 
-// Token is the decoded shape of an invite. CACert and RelayAddr are
-// optional; all other fields are required.
+// Token is the decoded shape of an invite. CACert, RelayAddr, and the
+// TURN* fields are optional; all other fields are required.
 type Token struct {
-	Addr      string
-	Pub       ed25519.PublicKey
-	SwarmID   [SwarmIDSize]byte
-	Secret    [SecretSize]byte
-	CACert    []byte
-	RelayAddr string
+	Addr       string
+	Pub        ed25519.PublicKey
+	SwarmID    [SwarmIDSize]byte
+	Secret     [SecretSize]byte
+	CACert     []byte
+	RelayAddr  string
+	TURNServer string
+	TURNUser   string
+	TURNPass   string
+	TURNRealm  string
 }
 
 // Encode serializes t to a base64url string. Wire layout (pre-base64):
 // version(1) | addr_len(2) | addr | pub(32) | swarmID(32) | secret(32) |
-// ca_len(2) | ca | relay_len(2) | relay.
+// ca_len(2) | ca | relay_len(2) | relay |
+// turn_server_len(2) | turn_server | turn_user_len(2) | turn_user |
+// turn_pass_len(2) | turn_pass | turn_realm_len(2) | turn_realm.
 func Encode(t Token) (string, error) {
 	if t.Addr == "" {
 		return "", errors.New("token: addr is required")
@@ -63,8 +69,23 @@ func Encode(t Token) (string, error) {
 	if len(t.RelayAddr) > maxRelayAddrLen {
 		return "", fmt.Errorf("token: relay addr length %d exceeds max %d", len(t.RelayAddr), maxRelayAddrLen)
 	}
+	for _, f := range [...]struct {
+		name string
+		val  string
+	}{
+		{"turn server", t.TURNServer},
+		{"turn user", t.TURNUser},
+		{"turn pass", t.TURNPass},
+		{"turn realm", t.TURNRealm},
+	} {
+		if len(f.val) > maxTURNFieldLen {
+			return "", fmt.Errorf("token: %s length %d exceeds max %d", f.name, len(f.val), maxTURNFieldLen)
+		}
+	}
 
-	size := 1 + 2 + len(t.Addr) + ed25519.PublicKeySize + SwarmIDSize + SecretSize + 2 + len(t.CACert) + 2 + len(t.RelayAddr)
+	size := 1 + 2 + len(t.Addr) + ed25519.PublicKeySize + SwarmIDSize + SecretSize +
+		2 + len(t.CACert) + 2 + len(t.RelayAddr) +
+		2 + len(t.TURNServer) + 2 + len(t.TURNUser) + 2 + len(t.TURNPass) + 2 + len(t.TURNRealm)
 	raw := make([]byte, 0, size)
 	raw = append(raw, wireVersion)
 
@@ -83,6 +104,12 @@ func Encode(t Token) (string, error) {
 	binary.BigEndian.PutUint16(u16[:], uint16(len(t.RelayAddr)))
 	raw = append(raw, u16[:]...)
 	raw = append(raw, t.RelayAddr...)
+
+	for _, s := range [...]string{t.TURNServer, t.TURNUser, t.TURNPass, t.TURNRealm} {
+		binary.BigEndian.PutUint16(u16[:], uint16(len(s)))
+		raw = append(raw, u16[:]...)
+		raw = append(raw, s...)
+	}
 
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
@@ -165,6 +192,29 @@ func Decode(s string) (Token, error) {
 		t.RelayAddr = string(raw[:relayLen])
 	}
 	raw = raw[relayLen:]
+
+	for _, f := range [...]struct {
+		name string
+		dst  *string
+	}{
+		{"turn server", &t.TURNServer},
+		{"turn user", &t.TURNUser},
+		{"turn pass", &t.TURNPass},
+		{"turn realm", &t.TURNRealm},
+	} {
+		if len(raw) < 2 {
+			return Token{}, fmt.Errorf("token: truncated %s length", f.name)
+		}
+		fieldLen := binary.BigEndian.Uint16(raw[:2])
+		raw = raw[2:]
+		if int(fieldLen) > len(raw) {
+			return Token{}, fmt.Errorf("token: %s length %d exceeds remaining bytes %d", f.name, fieldLen, len(raw))
+		}
+		if fieldLen > 0 {
+			*f.dst = string(raw[:fieldLen])
+		}
+		raw = raw[fieldLen:]
+	}
 
 	if len(raw) != 0 {
 		return Token{}, fmt.Errorf("token: %d trailing bytes", len(raw))

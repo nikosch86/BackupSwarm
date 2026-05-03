@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/ed25519"
+	"fmt"
 	"log/slog"
 	"net"
 	"time"
@@ -18,6 +19,29 @@ var natDiscoverFunc = nat.Discover
 // turnAllocateFunc is the test seam for TURN relay allocation; production
 // wraps nat.Allocate.
 var turnAllocateFunc = nat.Allocate
+
+// turnAddPermissionFunc is the test seam for installing a TURN allocation
+// permission; production wraps (*nat.Allocation).AddPermission.
+var turnAddPermissionFunc = func(alloc *nat.Allocation, ip net.IP) error {
+	return alloc.AddPermission(ip)
+}
+
+// resolveTURNServerIP parses host:port and returns the host's IPv4 address,
+// using net.ParseIP for literal IPs and falling back to DNS for hostnames.
+func resolveTURNServerIP(server string) (net.IP, error) {
+	host, _, err := net.SplitHostPort(server)
+	if err != nil {
+		return nil, fmt.Errorf("split host:port %q: %w", server, err)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip, nil
+	}
+	addr, err := net.ResolveIPAddr("ip4", host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %q: %w", host, err)
+	}
+	return addr.IP, nil
+}
 
 // broadcastAddressChangedFunc is the test seam for AddressChanged emission.
 var broadcastAddressChangedFunc = swarm.BroadcastAddressChanged

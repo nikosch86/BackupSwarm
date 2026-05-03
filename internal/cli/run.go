@@ -126,6 +126,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		turnUser            string
 		turnPass            string
 		turnRealm           string
+		turnCredShare       string
 		uploadRate          string
 		downloadRate        string
 		statsInterval       time.Duration
@@ -235,6 +236,14 @@ func newRunCmd(dataDir *string) *cobra.Command {
 					return fmt.Errorf("--turn-server requires --turn-user, --turn-pass, and --turn-realm")
 				}
 			}
+			noShareTURNCreds := false
+			switch turnCredShare {
+			case "on", "":
+			case "off":
+				noShareTURNCreds = true
+			default:
+				return fmt.Errorf("--turn-cred-share must be 'on' or 'off', got %q", turnCredShare)
+			}
 			return daemon.Run(cmd.Context(), daemon.Options{
 				DataDir:             dir,
 				BackupDir:           backupDir,
@@ -276,6 +285,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 					Password: turnPass,
 					Realm:    turnRealm,
 				},
+				NoShareTURNCreds: noShareTURNCreds,
 			})
 		},
 	}
@@ -311,6 +321,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&turnUser, "turn-user", "", "Username for the TURN long-term credential (required with --turn-server)")
 	cmd.Flags().StringVar(&turnPass, "turn-pass", "", "Password for the TURN long-term credential (required with --turn-server)")
 	cmd.Flags().StringVar(&turnRealm, "turn-realm", "", "Realm for the TURN long-term credential (required with --turn-server)")
+	cmd.Flags().StringVar(&turnCredShare, "turn-cred-share", "on", "Whether the daemon embeds its TURN credentials in issued invite tokens. 'on' (default) shares; 'off' suppresses.")
 	cmd.Flags().StringVar(&uploadRate, "upload-rate", "unlimited", "Cap node-wide outbound bytes/sec across every conn; accepts k/m/g/t suffixes (e.g. 5m). 'unlimited' (default) places no cap.")
 	cmd.Flags().StringVar(&downloadRate, "download-rate", "unlimited", "Cap node-wide inbound bytes/sec across every conn; accepts k/m/g/t suffixes (e.g. 5m). 'unlimited' (default) places no cap.")
 	cmd.Flags().DurationVar(&statsInterval, "stats-interval", 2*time.Minute, "Cadence for the periodic INFO 'activity' log line (files backed up, chunks stored, average bandwidth). 0 disables.")

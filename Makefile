@@ -24,6 +24,7 @@ GOFLAGS      ?=
 
 .PHONY: all build test coverage coverage-report coverage-gaps lint fmt fmt-fix vet check clean \
         docker-build docker-run docker-compose-up docker-compose-down docker-compose-test \
+        docker-compose-test-turn \
         publish-dryrun \
         trivy-deps trivy-image security-scan story-done help \
         mod-get mod-tidy
@@ -205,6 +206,25 @@ docker-compose-test:
 	fi
 	@echo "docker-compose-test: 4-node swarm formed; node-a backed up the seeded tree, node-b shipped its own payload, both saw forwarded announcements, node-a dialed each announced peer, and env-default-check bound via the --port default"
 	docker compose down -v
+
+## docker-compose-test-turn: cross-allocation TURN smoke test against a real
+# coturn container. Asserts node-a connects via the joiner-side TURN
+# allocation (`method=relay_via_joiner_turn`).
+docker-compose-test-turn:
+	docker compose -f compose.turn.yaml up -d --build
+	@echo "waiting for node-a to bootstrap via cross-allocation TURN..."
+	@for i in $$(seq 1 90); do \
+		if docker compose -f compose.turn.yaml logs node-a 2>/dev/null | grep -q '"method":"relay_via_joiner_turn"'; then break; fi; \
+		sleep 1; \
+	done
+	@docker compose -f compose.turn.yaml logs node-a 2>/dev/null | grep -q '"method":"relay_via_joiner_turn"' || \
+		{ echo "node-a did not connect via relay_via_joiner_turn"; \
+		  docker compose -f compose.turn.yaml logs node-a; \
+		  docker compose -f compose.turn.yaml logs node-b; \
+		  docker compose -f compose.turn.yaml logs coturn; \
+		  docker compose -f compose.turn.yaml down -v; exit 1; }
+	@echo "docker-compose-test-turn: node-a joined node-b via joiner-side TURN cross-allocation"
+	docker compose -f compose.turn.yaml down -v
 
 ## trivy-deps: scan source tree for vulnerable deps, secrets, and misconfigs (HIGH+CRITICAL)
 # Misconfig scanners restricted to dockerfile — cloud/terraform checks don't apply here

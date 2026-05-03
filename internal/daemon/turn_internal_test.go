@@ -163,6 +163,68 @@ func TestRun_TURNAllocation_PublishesAndRemovesRelayAddr(t *testing.T) {
 	}
 }
 
+// TestRun_TURNAllocation_PrePermitsServerIP asserts the daemon resolves
+// opts.TURN.Server to an IP and calls AddPermission on the allocation
+// immediately after Allocate.
+func TestRun_TURNAllocation_PrePermitsServerIP(t *testing.T) {
+	turnAddr := startTURNServerForDaemonTest(t)
+	turnHost, _, err := net.SplitHostPort(turnAddr)
+	if err != nil {
+		t.Fatalf("split turn addr: %v", err)
+	}
+
+	prev := turnAddPermissionFunc
+	t.Cleanup(func() { turnAddPermissionFunc = prev })
+	var seenIP atomic.Value
+	called := make(chan struct{}, 1)
+	turnAddPermissionFunc = func(alloc *nat.Allocation, ip net.IP) error {
+		seenIP.Store(ip.String())
+		select {
+		case called <- struct{}{}:
+		default:
+		}
+		return prev(alloc, ip)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			DataDir:    t.TempDir(),
+			ListenAddr: "127.0.0.1:0",
+			TURN: TURNOptions{
+				Server:   turnAddr,
+				Username: "u",
+				Password: "p",
+				Realm:    "backupswarm.test",
+			},
+		})
+	}()
+
+	select {
+	case <-called:
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("turnAddPermissionFunc not called within 5s")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not exit within 3s of cancel")
+	}
+
+	got, _ := seenIP.Load().(string)
+	if got != turnHost {
+		t.Errorf("AddPermission ip = %q, want %q", got, turnHost)
+	}
+}
+
 // TestRun_TURNAllocationLogsRelayAddr asserts the relay address is emitted
 // at Info level when the daemon allocates against a real TURN server.
 func TestRun_TURNAllocationLogsRelayAddr(t *testing.T) {
