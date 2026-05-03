@@ -39,6 +39,18 @@ var cliDiscoverFunc = nat.Discover
 // listenFunc is the test seam for pre-binding the QUIC listener in the CLI.
 var listenFunc = bsquic.Listen
 
+// cliPortMapDiscoverFunc is the test seam for UPnP/NAT-PMP discovery.
+var cliPortMapDiscoverFunc = nat.DiscoverPortMapper
+
+// cliPortMapDiscoverTimeout caps the SSDP/NAT-PMP probe at startup.
+// goupnp's IGDv2 + IGDv1 SSDP probes each wait the full M-SEARCH MX time
+// (~2 s on most networks) before returning collected responses, so the
+// budget needs to absorb both plus the NAT-PMP fallthrough probe.
+var cliPortMapDiscoverTimeout = 8 * time.Second
+
+// cliPortMapAttemptTimeout caps the initial Map call.
+var cliPortMapAttemptTimeout = 5 * time.Second
+
 // envInviteToken is the env var read by `run` to auto-join an unjoined node.
 const envInviteToken = "BACKUPSWARM_INVITE_TOKEN"
 
@@ -52,6 +64,15 @@ const envListenAddr = "BACKUPSWARM_LISTEN"
 
 // envPort is the env var read by `run` as a fallback when --port is omitted.
 const envPort = "BACKUPSWARM_PORT"
+
+// envPortMapping is the env var read by `run` when --port-mapping is omitted.
+const envPortMapping = "BACKUPSWARM_PORT_MAPPING"
+
+// portMappingAuto and portMappingOff are the accepted --port-mapping values.
+const (
+	portMappingAuto = "auto"
+	portMappingOff  = "off"
+)
 
 // defaultPort is the default UDP port for both listen and advertise when
 // neither --listen nor --advertise-addr carries an explicit port.
@@ -133,6 +154,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		backoffBase         time.Duration
 		backoffMax          time.Duration
 		backoffJitter       bool
+		portMapping         string
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -212,17 +234,32 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				return err
 			}
 
+			if !cmd.Flags().Changed("port-mapping") {
+				if envVal := os.Getenv(envPortMapping); envVal != "" {
+					portMapping = envVal
+				}
+			}
+			switch portMapping {
+			case portMappingAuto, portMappingOff:
+			default:
+				return fmt.Errorf("--port-mapping must be %q or %q, got %q", portMappingAuto, portMappingOff, portMapping)
+			}
+
 			var preBoundListener *bsquic.Listener
 			daemonSTUNServer := ""
+			var portMapResult *nat.Mapping
+			var portMapper nat.PortMapper
 			if isAuto {
-				resolved, listener, err := resolveAutoAdvertise(cmd.Context(), dir, listenAddr, stunServer)
+				result, err := resolveAutoAdvertise(cmd.Context(), dir, listenAddr, stunServer, portMapping)
 				if err != nil {
 					return err
 				}
-				advertiseAddr = resolved
-				listenAddr = listener.Addr().String()
-				preBoundListener = listener
+				advertiseAddr = result.advertise
+				listenAddr = result.listener.Addr().String()
+				preBoundListener = result.listener
 				daemonSTUNServer = stunServer
+				portMapResult = result.mapping
+				portMapper = result.mapper
 			}
 
 			if tok := os.Getenv(envInviteToken); tok != "" {
@@ -292,6 +329,8 @@ func newRunCmd(dataDir *string) *cobra.Command {
 					Realm:    turnRealm,
 				},
 				NoShareTURNCreds: noShareTURNCreds,
+				PortMapping:      portMapResult,
+				PortMapper:       portMapper,
 			})
 		},
 	}
@@ -334,42 +373,106 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().DurationVar(&backoffBase, "backoff-base", time.Second, "Initial delay applied to a peer after a failed dial before the redial sweep retries. Subsequent failures double the delay up to --backoff-max. 0 disables the gate.")
 	cmd.Flags().DurationVar(&backoffMax, "backoff-max", 30*time.Minute, "Per-peer cap on the exponential redial backoff. Must be >= --backoff-base when both are set.")
 	cmd.Flags().BoolVar(&backoffJitter, "backoff-jitter", true, "Scale each backoff delay by a random factor in [0.5, 1.0] to avoid synchronized retry storms.")
+	cmd.Flags().StringVar(&portMapping, "port-mapping", portMappingAuto, "Acquire a UPnP / NAT-PMP port mapping for the bound port at startup; 'auto' (default) tries the local gateway and refreshes the lease, 'off' disables. The mapped external IP:port is preferred over STUN when --advertise-addr=auto.")
 	return cmd
 }
 
-// resolveAutoAdvertise pre-binds the QUIC listener at listenAddr, queries
-// stunServer for the externally-routable host, and combines the result
-// with the bound port.
-func resolveAutoAdvertise(ctx context.Context, dataDir, listenAddr, stunServer string) (string, *bsquic.Listener, error) {
-	if stunServer == "" {
-		return "", nil, fmt.Errorf("--advertise-addr=auto requires --stun-server")
-	}
+// autoAdvertiseResult bundles the resolved advertise address with the
+// pre-bound listener and (optional) port mapping owned by the daemon.
+type autoAdvertiseResult struct {
+	advertise string
+	listener  *bsquic.Listener
+	mapping   *nat.Mapping
+	mapper    nat.PortMapper
+}
+
+// resolveAutoAdvertise pre-binds the QUIC listener at listenAddr and
+// resolves the externally-routable host:port via UPnP/NAT-PMP first
+// (when portMapping is "auto"), falling back to STUN (when stunServer
+// is set). Returns the resolved address plus the pre-bound listener and
+// — if port mapping succeeded — a Mapping/PortMapper pair the daemon
+// owns for refresh + Unmap.
+func resolveAutoAdvertise(ctx context.Context, dataDir, listenAddr, stunServer, portMapping string) (autoAdvertiseResult, error) {
 	id, _, err := node.Ensure(dataDir)
 	if err != nil {
-		return "", nil, fmt.Errorf("ensure identity: %w", err)
+		return autoAdvertiseResult{}, fmt.Errorf("ensure identity: %w", err)
 	}
 	listener, err := listenFunc(listenAddr, id.PrivateKey, nil, nil)
 	if err != nil {
-		return "", nil, fmt.Errorf("listen: %w", err)
+		return autoAdvertiseResult{}, fmt.Errorf("listen: %w", err)
 	}
-	_, port, splitErr := net.SplitHostPort(listener.Addr().String())
+	_, portStr, splitErr := net.SplitHostPort(listener.Addr().String())
 	if splitErr != nil {
 		_ = listener.Close()
-		return "", nil, fmt.Errorf("split listen addr: %w", splitErr)
+		return autoAdvertiseResult{}, fmt.Errorf("split listen addr: %w", splitErr)
+	}
+	port, convErr := strconv.Atoi(portStr)
+	if convErr != nil {
+		_ = listener.Close()
+		return autoAdvertiseResult{}, fmt.Errorf("parse listen port %q: %w", portStr, convErr)
+	}
+
+	if portMapping == portMappingAuto {
+		if mapping, mapper, err := tryAcquirePortMapping(ctx, port); err == nil {
+			advertise := net.JoinHostPort(mapping.ExternalIP.String(), strconv.Itoa(mapping.ExternalPort))
+			slog.InfoContext(ctx, "nat: discovered external advertise address",
+				"host", mapping.ExternalIP.String(),
+				"port", mapping.ExternalPort,
+				"protocol", mapping.Protocol,
+				"source", "port-mapping",
+			)
+			return autoAdvertiseResult{
+				advertise: advertise,
+				listener:  listener,
+				mapping:   &mapping,
+				mapper:    mapper,
+			}, nil
+		} else {
+			slog.InfoContext(ctx, "nat: port mapping unavailable; falling back to STUN",
+				"err", err,
+			)
+		}
+	}
+
+	if stunServer == "" {
+		_ = listener.Close()
+		return autoAdvertiseResult{}, fmt.Errorf("--advertise-addr=auto requires --stun-server (or a working UPnP/NAT-PMP gateway via --port-mapping=auto)")
 	}
 	dctx, cancel := context.WithTimeout(ctx, stunResolveTimeout)
 	defer cancel()
 	host, err := cliDiscoverFunc(dctx, stunServer)
 	if err != nil {
 		_ = listener.Close()
-		return "", nil, fmt.Errorf("nat: resolve auto advertise: %w", err)
+		return autoAdvertiseResult{}, fmt.Errorf("nat: resolve auto advertise: %w", err)
 	}
 	slog.InfoContext(ctx, "nat: discovered external advertise address",
 		"host", host,
 		"server", stunServer,
-		"port", port,
+		"port", portStr,
+		"source", "stun",
 	)
-	return net.JoinHostPort(host, port), listener, nil
+	return autoAdvertiseResult{
+		advertise: net.JoinHostPort(host, portStr),
+		listener:  listener,
+	}, nil
+}
+
+// tryAcquirePortMapping discovers a UPnP / NAT-PMP gateway and acquires a
+// Mapping for internalPort. Used by resolveAutoAdvertise.
+func tryAcquirePortMapping(ctx context.Context, internalPort int) (nat.Mapping, nat.PortMapper, error) {
+	dctx, cancel := context.WithTimeout(ctx, cliPortMapDiscoverTimeout)
+	defer cancel()
+	mapper, err := cliPortMapDiscoverFunc(dctx)
+	if err != nil {
+		return nat.Mapping{}, nil, fmt.Errorf("discover: %w", err)
+	}
+	mctx, mcancel := context.WithTimeout(ctx, cliPortMapAttemptTimeout)
+	defer mcancel()
+	mapping, err := mapper.Map(mctx, internalPort)
+	if err != nil {
+		return nat.Mapping{}, nil, fmt.Errorf("map: %w", err)
+	}
+	return mapping, mapper, nil
 }
 
 // peerListContainsPub reports whether any peer in list has pubkey pub.

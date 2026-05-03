@@ -144,24 +144,37 @@ docker run --rm \
     run --invite
 ```
 
-#### Auto-discovered public IP via STUN
+#### Auto-discovered public IP via UPnP / NAT-PMP / STUN
 
 Pass `--advertise-addr auto` (or `BACKUPSWARM_ADVERTISE_ADDR=auto`) to
-`run` or `invite` to resolve the externally-routable host via a STUN
-binding request and combine it with the bound listener port.
-`--stun-server <host:port>` selects the server (default
-`stun.l.google.com:19302`). When `auto` is in effect on `run`, the daemon
-also re-queries STUN periodically (default 5 minutes) and broadcasts an
-`AddressChanged` announcement to live peers when the public IP changes.
+`run` or `invite` to resolve the externally-routable host without an
+explicit address. With the default `--port-mapping=auto`, the daemon
+first asks the local gateway for a UPnP / NAT-PMP port mapping; on
+success the mapped external IP and port go into the invite token,
+opening the firewall pinhole at the same time. If no UPnP / NAT-PMP
+gateway responds, it falls back to a STUN binding request against
+`--stun-server <host:port>` (default `stun.l.google.com:19302`) and
+combines that host with the bound listener port. The daemon also
+re-queries STUN periodically (default 5 minutes) and refreshes the
+port mapping at lease/2 cadence; either change broadcasts an
+`AddressChanged` announcement to live peers.
 
 ```bash
-# Founder discovers its public IP via STUN at startup and on every refresh.
+# Founder lets the daemon pick its public address: UPnP first, STUN as fallback.
 docker run --rm \
     -v bsw-data:/data \
     -p 7777:7777/udp \
     ghcr.io/nikosch86/backupswarm:latest \
     run --invite --advertise-addr auto
 ```
+
+`--port-mapping=off` (or `BACKUPSWARM_PORT_MAPPING=off`) skips the
+UPnP / NAT-PMP probe, which is useful on networks that treat
+unsolicited gateway control traffic as suspicious. UPnP / NAT-PMP is
+also unhelpful behind carrier-grade NAT (the home router maps
+successfully but its "public" IP is itself behind the carrier's NAT)
+— in that case `--port-mapping=auto` falls through to STUN, and TURN
+(below) is needed for steady-state connectivity.
 
 #### TURN relay (symmetric NAT fallback)
 

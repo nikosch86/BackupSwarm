@@ -1,8 +1,11 @@
 module backupswarm
 
-go 1.25.0
+go 1.26.2
 
 require (
+	github.com/huin/goupnp v1.3.0
+	github.com/jackpal/gateway v1.2.0
+	github.com/jackpal/go-nat-pmp v1.0.2
 	github.com/pion/logging v0.2.4
 	github.com/pion/stun/v3 v3.1.2
 	github.com/pion/turn/v4 v4.1.4
@@ -21,5 +24,6 @@ require (
 	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/net v0.52.0 // indirect
+	golang.org/x/sync v0.16.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 )

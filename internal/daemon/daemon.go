@@ -16,6 +16,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -228,6 +229,13 @@ type Options struct {
 	// BackoffJitter, when true, scales each computed delay by a random
 	// factor in [0.5, 1.0] to avoid synchronized retry storms.
 	BackoffJitter bool
+	// PortMapping is the externally-mapped UDP port acquired via UPnP /
+	// NAT-PMP at startup; nil disables the refresh loop and on-shutdown
+	// Unmap.
+	PortMapping *nat.Mapping
+	// PortMapper opens and refreshes PortMapping; required when
+	// PortMapping is non-nil.
+	PortMapper nat.PortMapper
 }
 
 // TURNOptions configures the TURN client. All four fields are required
@@ -763,6 +771,42 @@ func Run(ctx context.Context, opts Options) error {
 				connsFn:     connSet.Snapshot,
 			})
 		}()
+	}
+
+	if opts.PortMapping != nil && opts.PortMapper != nil {
+		listenPort, err := portFromListenerAddr(listener.Addr().String())
+		if err != nil {
+			return fmt.Errorf("portmap: %w", err)
+		}
+		mapper := opts.PortMapper
+		mapping := *opts.PortMapping
+		defer func() {
+			uctx, ucancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer ucancel()
+			if err := mapper.Unmap(uctx, mapping); err != nil {
+				slog.WarnContext(ctx, "nat: port mapping unmap failed",
+					"protocol", mapping.Protocol,
+					"err", err,
+				)
+			}
+		}()
+		natWG.Add(1)
+		go func() {
+			defer natWG.Done()
+			runPortMapLoop(natCtx, portmapLoopOptions{
+				mapper:       mapper,
+				initial:      mapping,
+				internalPort: listenPort,
+				pub:          id.PublicKey,
+				connsFn:      connSet.Snapshot,
+			})
+		}()
+		slog.InfoContext(ctx, "nat: port mapping established",
+			"protocol", mapping.Protocol,
+			"external_addr", net.JoinHostPort(mapping.ExternalIP.String(), strconv.Itoa(mapping.ExternalPort)),
+			"internal_port", listenPort,
+			"lease_seconds", mapping.LeaseSeconds,
+		)
 	}
 
 	if opts.BackupDir == "" {
