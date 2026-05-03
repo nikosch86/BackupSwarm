@@ -20,7 +20,16 @@ import (
 	"time"
 
 	qgo "github.com/quic-go/quic-go"
+	"golang.org/x/time/rate"
 )
+
+// Limiters carries the upload/download token-bucket limiters propagated
+// to every Stream a Conn opens or accepts. nil on either side = no
+// throttle.
+type Limiters struct {
+	Up   *rate.Limiter
+	Down *rate.Limiter
+}
 
 // randReader is the package-level random source; tests swap it via white-box.
 var randReader io.Reader = rand.Reader
@@ -81,7 +90,12 @@ type Listener struct {
 	tr         *qgo.Transport
 	conn       net.PacketConn
 	verifyPeer atomic.Pointer[VerifyPeerFunc]
+	limiters   Limiters
 }
+
+// SetLimiters installs the rate limiters every Conn returned from a
+// subsequent Accept inherits. nil fields = no throttle on that side.
+func (l *Listener) SetLimiters(lim Limiters) { l.limiters = lim }
 
 // Listen binds a QUIC listener on addr. nil trust = pin-mode (self-signed
 // from priv); non-nil = CA-mode (trust.Cert as leaf, peer chain-verified
@@ -160,7 +174,7 @@ func (l *Listener) Accept(ctx context.Context) (*Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Conn{inner: qc, remotePub: connRemotePub(qc)}, nil
+	return &Conn{inner: qc, remotePub: connRemotePub(qc), limiters: l.limiters}, nil
 }
 
 // Close shuts down the listener, tears down all accepted connections, and
@@ -278,19 +292,44 @@ func ListenOver(pc net.PacketConn, priv ed25519.PrivateKey, verifyPeer VerifyPee
 type Conn struct {
 	inner     *qgo.Conn
 	remotePub ed25519.PublicKey
+	limiters  Limiters
 }
 
 // RemotePub returns the verified Ed25519 public key of the remote peer.
 func (c *Conn) RemotePub() ed25519.PublicKey { return c.remotePub }
 
+// SetLimiters swaps the rate limiters this Conn applies to subsequently
+// opened or accepted Streams. Already-returned Streams keep their original
+// limiters.
+func (c *Conn) SetLimiters(lim Limiters) { c.limiters = lim }
+
 // OpenStream opens a new bidirectional stream initiated by this side.
-func (c *Conn) OpenStream(ctx context.Context) (*qgo.Stream, error) {
-	return c.inner.OpenStreamSync(ctx)
+// The returned Stream inherits the Conn's limiters.
+func (c *Conn) OpenStream(ctx context.Context) (*Stream, error) {
+	qs, err := c.inner.OpenStreamSync(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.wrapStream(qs), nil
 }
 
 // AcceptStream blocks until the peer opens a new bidirectional stream.
-func (c *Conn) AcceptStream(ctx context.Context) (*qgo.Stream, error) {
-	return c.inner.AcceptStream(ctx)
+// The returned Stream inherits the Conn's limiters.
+func (c *Conn) AcceptStream(ctx context.Context) (*Stream, error) {
+	qs, err := c.inner.AcceptStream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.wrapStream(qs), nil
+}
+
+func (c *Conn) wrapStream(qs *qgo.Stream) *Stream {
+	return &Stream{
+		Stream: qs,
+		up:     c.limiters.Up,
+		down:   c.limiters.Down,
+		ctx:    qs.Context(),
+	}
 }
 
 // Close terminates the connection.

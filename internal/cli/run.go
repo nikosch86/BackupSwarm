@@ -126,6 +126,8 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		turnUser            string
 		turnPass            string
 		turnRealm           string
+		uploadRate          string
+		downloadRate        string
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -191,6 +193,14 @@ func newRunCmd(dataDir *string) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("--max-storage: %w", err)
 			}
+			uploadRateBytes, err := parseRate(uploadRate)
+			if err != nil {
+				return fmt.Errorf("--upload-rate: %w", err)
+			}
+			downloadRateBytes, err := parseRate(downloadRate)
+			if err != nil {
+				return fmt.Errorf("--download-rate: %w", err)
+			}
 
 			dir, err := resolveDataDir(*dataDir)
 			if err != nil {
@@ -254,6 +264,8 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				NoCA:                noCA,
 				MaxStorageBytes:     maxBytes,
 				NoStorage:           noStorage,
+				UploadRateBytes:     uploadRateBytes,
+				DownloadRateBytes:   downloadRateBytes,
 				Redundancy:          redundancy,
 				Progress:            cmd.OutOrStdout(),
 				TURN: daemon.TURNOptions{
@@ -297,6 +309,8 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&turnUser, "turn-user", "", "Username for the TURN long-term credential (required with --turn-server)")
 	cmd.Flags().StringVar(&turnPass, "turn-pass", "", "Password for the TURN long-term credential (required with --turn-server)")
 	cmd.Flags().StringVar(&turnRealm, "turn-realm", "", "Realm for the TURN long-term credential (required with --turn-server)")
+	cmd.Flags().StringVar(&uploadRate, "upload-rate", "unlimited", "Cap node-wide outbound bytes/sec across every conn; accepts k/m/g/t suffixes (e.g. 5m). 'unlimited' (default) places no cap.")
+	cmd.Flags().StringVar(&downloadRate, "download-rate", "unlimited", "Cap node-wide inbound bytes/sec across every conn; accepts k/m/g/t suffixes (e.g. 5m). 'unlimited' (default) places no cap.")
 	return cmd
 }
 

@@ -210,6 +210,10 @@ type Options struct {
 	// TURN allocates a relay at startup and holds it for the daemon's
 	// lifetime; empty Server disables.
 	TURN TURNOptions
+	// UploadRateBytes caps outbound bytes/sec across all conns. 0 = unlimited.
+	UploadRateBytes int64
+	// DownloadRateBytes caps inbound bytes/sec across all conns. 0 = unlimited.
+	DownloadRateBytes int64
 }
 
 // TURNOptions configures the TURN client. All four fields are required
@@ -390,6 +394,14 @@ func Run(ctx context.Context, opts Options) error {
 	pendingInvites := &pendingCache{}
 	verifyMember := makeVerifyPeer(peerStore, pendingInvites)
 
+	if opts.UploadRateBytes < 0 {
+		return fmt.Errorf("upload rate must be non-negative, got %d", opts.UploadRateBytes)
+	}
+	if opts.DownloadRateBytes < 0 {
+		return fmt.Errorf("download rate must be non-negative, got %d", opts.DownloadRateBytes)
+	}
+	limiters := buildLimiters(opts.UploadRateBytes, opts.DownloadRateBytes)
+
 	listener := opts.Listener
 	if listener == nil {
 		listener, err = bsquic.Listen(opts.ListenAddr, id.PrivateKey, verifyMember, nil)
@@ -399,6 +411,7 @@ func Run(ctx context.Context, opts Options) error {
 	} else {
 		listener.SetVerifyPeer(verifyMember)
 	}
+	listener.SetLimiters(limiters)
 	defer func() { _ = listener.Close() }()
 
 	if err := WriteListenAddr(opts.DataDir, listener.Addr().String()); err != nil {
@@ -470,6 +483,7 @@ func Run(ctx context.Context, opts Options) error {
 		annHandler:   router.HandleStream,
 		connSet:      connSet,
 		reach:        reach,
+		limiters:     limiters,
 	}
 	defer dialer.CloseAll()
 	joinHandler := makeJoinHandler(opts.DataDir, peerStore, swarmCA, connSet, dialer)
@@ -786,6 +800,7 @@ type outboundDialer struct {
 	joinHandler backup.JoinHandler
 	connSet     *swarm.ConnSet
 	reach       *swarm.ReachabilityMap
+	limiters    bsquic.Limiters
 
 	// punchTimeout / turnTimeout bound the hole-punch and TURN steps of
 	// the fallback chain; punchOrch / turnPC enable each step. Set
@@ -801,6 +816,7 @@ type outboundDialer struct {
 
 // register wires conn into connSet+reach and spawns AcceptStreams.
 func (d *outboundDialer) register(conn *bsquic.Conn, p peers.Peer, method chainMethod) {
+	conn.SetLimiters(d.limiters)
 	d.connSet.Add(conn)
 	d.reach.MarkConn(conn, swarm.StateReachable)
 	go backup.AcceptStreams(d.ctx, conn, d.st, d.annHandler, d.joinHandler, nil, nil)

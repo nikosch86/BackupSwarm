@@ -852,6 +852,27 @@ func TestRun_RejectsNegativeDurationOptions(t *testing.T) {
 	}
 }
 
+func TestRun_RejectsNegativeRateOptions(t *testing.T) {
+	cases := []struct {
+		name string
+		opts Options
+		want string
+	}{
+		{"upload rate", Options{UploadRateBytes: -1}, "upload rate"},
+		{"download rate", Options{DownloadRateBytes: -1}, "download rate"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.opts.DataDir = t.TempDir()
+			tc.opts.ListenAddr = "127.0.0.1:0"
+			err := Run(context.Background(), tc.opts)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestRun_STUNServerSpawnsLoopWithAdvertiseAddrPort(t *testing.T) {
 	prevDiscover := natDiscoverFunc
 	t.Cleanup(func() { natDiscoverFunc = prevDiscover })

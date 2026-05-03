@@ -203,6 +203,26 @@ sudo sysctl -w net.core.wmem_max=7500000
 apparmor/seccomp profiles on many distros, so the host-level fix is the
 reliable path.
 
+### Bandwidth throttling
+
+Node-wide token-bucket caps on `run`, shared across every QUIC stream
+the daemon opens or accepts:
+
+| Flag | Default | Bounds |
+|---|---|---|
+| `--upload-rate` | `unlimited` | outbound bytes/sec |
+| `--download-rate` | `unlimited` | inbound bytes/sec |
+
+Values accept `k`/`m`/`g`/`t` suffixes (e.g. `--upload-rate 5m` for
+5 MiB/s). The up and down limiters are independent.
+
+```bash
+docker run … backupswarm run \
+    --backup-dir /data/src \
+    --upload-rate 10m \
+    --download-rate 50m
+```
+
 ## Two-node swarm (local smoke test)
 
 ```bash
