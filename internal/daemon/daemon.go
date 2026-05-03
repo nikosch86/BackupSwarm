@@ -818,6 +818,11 @@ func (d *outboundDialer) register(conn *bsquic.Conn, p peers.Peer, method chainM
 // dial runs the direct → hole-punch → TURN fallback chain, marks
 // reachability, and registers the resulting conn.
 func (d *outboundDialer) dial(ctx context.Context, p peers.Peer) (*bsquic.Conn, error) {
+	slog.DebugContext(ctx, "outbound dial: enter",
+		"peer_pub", hex.EncodeToString(p.PubKey),
+		"peer_addr", p.Addr,
+		"role", p.Role,
+	)
 	conn, method, err := chainDial(ctx, chainDialOptions{
 		target:        p,
 		priv:          d.priv,
@@ -830,6 +835,11 @@ func (d *outboundDialer) dial(ctx context.Context, p peers.Peer) (*bsquic.Conn, 
 	})
 	if err != nil {
 		d.reach.Mark(p.PubKey, swarm.StateUnreachable)
+		slog.DebugContext(ctx, "outbound dial: chain failed",
+			"peer_pub", hex.EncodeToString(p.PubKey),
+			"peer_addr", p.Addr,
+			"err", err,
+		)
 		return nil, err
 	}
 	d.register(conn, p, method)

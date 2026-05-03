@@ -181,6 +181,7 @@ func (po *punchOrchestrator) handleSignal(ctx context.Context, rw io.ReadWriter,
 // signal to `targetPub`, then fire local punch packets and dial through
 // the punched mapping. Returns the established conn or an error.
 func (po *punchOrchestrator) RequestPunch(ctx context.Context, targetPub ed25519.PublicKey, rendezvous *bsquic.Conn) (*bsquic.Conn, error) {
+	targetPubHex := hex.EncodeToString(targetPub)
 	target, err := po.peerStore.Get(targetPub)
 	if err != nil {
 		return nil, fmt.Errorf("punch: unknown target: %w", err)
@@ -197,9 +198,20 @@ func (po *punchOrchestrator) RequestPunch(ctx context.Context, targetPub ed25519
 		PeerPub: targetPubArr,
 		Addr:    po.advertiseAddr,
 	}
+	slog.DebugContext(ctx, "nat_punch: sending request",
+		"role", "initiator",
+		"target_pub", targetPubHex,
+		"own_advertise_addr", po.advertiseAddr)
 	if err := punchSendRequestFn(ctx, rendezvous, req); err != nil {
+		slog.DebugContext(ctx, "nat_punch: send request failed",
+			"role", "initiator",
+			"target_pub", targetPubHex,
+			"err", err)
 		return nil, fmt.Errorf("punch: send request: %w", err)
 	}
+	slog.DebugContext(ctx, "nat_punch: rendezvous accepted request",
+		"role", "initiator",
+		"target_pub", targetPubHex)
 	targetUDP, err := net.ResolveUDPAddr("udp", target.Addr)
 	if err != nil {
 		return nil, fmt.Errorf("punch: resolve target: %w", err)
@@ -207,7 +219,7 @@ func (po *punchOrchestrator) RequestPunch(ctx context.Context, targetPub ed25519
 	slog.InfoContext(ctx, "nat_punch firing",
 		"method", "hole_punch",
 		"role", "initiator",
-		"target_pub", hex.EncodeToString(targetPub),
+		"target_pub", targetPubHex,
 		"target_addr", targetUDP.String(),
 		"attempts", po.attempts)
 	if err := punchFireFn(ctx, po.listener.PacketConn(), targetUDP, po.attempts, po.interval); err != nil {
@@ -217,13 +229,21 @@ func (po *punchOrchestrator) RequestPunch(ctx context.Context, targetPub ed25519
 			"err", err)
 		return nil, fmt.Errorf("punch: %w", err)
 	}
+	slog.DebugContext(ctx, "nat_punch: dialing punched target",
+		"role", "initiator",
+		"target_pub", targetPubHex,
+		"target_addr", target.Addr)
 	conn, err := punchDialFn(ctx, target.Addr, po.priv, targetPub, nil)
 	if err != nil {
 		slog.WarnContext(ctx, "peer dial after punch failed",
-			"peer_pub", hex.EncodeToString(targetPub),
+			"peer_pub", targetPubHex,
 			"addr", target.Addr,
 			"err", err)
 		return nil, fmt.Errorf("punch: dial after punch: %w", err)
 	}
+	slog.DebugContext(ctx, "nat_punch: dial after punch succeeded",
+		"role", "initiator",
+		"target_pub", targetPubHex,
+		"target_addr", target.Addr)
 	return conn, nil
 }

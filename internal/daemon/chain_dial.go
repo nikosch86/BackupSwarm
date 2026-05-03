@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"time"
 
@@ -51,38 +53,92 @@ type chainDialOptions struct {
 // returns the first success. Skipped steps (absent prerequisites) do not
 // contribute to the joined error returned on full failure.
 func chainDial(ctx context.Context, opts chainDialOptions) (*bsquic.Conn, chainMethod, error) {
+	targetPubHex := hex.EncodeToString(opts.target.PubKey)
+	slog.DebugContext(ctx, "chain_dial: start",
+		"target_pub", targetPubHex,
+		"target_addr", opts.target.Addr,
+		"punch_enabled", opts.punchOrch != nil,
+		"turn_enabled", opts.turnPC != nil,
+		"direct_timeout", opts.directTimeout,
+		"punch_timeout", opts.punchTimeout,
+		"turn_timeout", opts.turnTimeout,
+	)
 	var errs []error
 
+	slog.DebugContext(ctx, "chain_dial: direct attempt",
+		"target_pub", targetPubHex,
+		"target_addr", opts.target.Addr,
+		"timeout", opts.directTimeout)
 	dctx, dcancel := context.WithTimeout(ctx, opts.directTimeout)
 	conn, err := chainDirectDialFn(dctx, opts.target.Addr, opts.priv, opts.target.PubKey, nil)
 	dcancel()
 	if err == nil {
+		slog.DebugContext(ctx, "chain_dial: direct succeeded", "target_pub", targetPubHex)
 		return conn, chainMethodDirect, nil
 	}
+	slog.DebugContext(ctx, "chain_dial: direct failed",
+		"target_pub", targetPubHex,
+		"err", err)
 	errs = append(errs, fmt.Errorf("direct: %w", err))
 
-	if opts.punchOrch != nil {
-		if rdv, ok := pickRendezvous(opts.connSet, opts.target.PubKey); ok {
+	if opts.punchOrch == nil {
+		slog.DebugContext(ctx, "chain_dial: hole_punch skipped",
+			"target_pub", targetPubHex,
+			"reason", "no_orchestrator")
+	} else {
+		rdv, ok := pickRendezvous(opts.connSet, opts.target.PubKey)
+		if !ok {
+			slog.DebugContext(ctx, "chain_dial: hole_punch skipped",
+				"target_pub", targetPubHex,
+				"reason", "no_rendezvous")
+		} else {
+			rdvPubHex := hex.EncodeToString(rdv.RemotePub())
+			slog.DebugContext(ctx, "chain_dial: hole_punch attempt",
+				"target_pub", targetPubHex,
+				"rendezvous_pub", rdvPubHex,
+				"timeout", opts.punchTimeout)
 			pctx, pcancel := context.WithTimeout(ctx, opts.punchTimeout)
 			conn, err := chainPunchFn(pctx, opts.punchOrch, opts.target.PubKey, rdv)
 			pcancel()
 			if err == nil {
+				slog.DebugContext(ctx, "chain_dial: hole_punch succeeded",
+					"target_pub", targetPubHex,
+					"rendezvous_pub", rdvPubHex)
 				return conn, chainMethodHolePunch, nil
 			}
+			slog.DebugContext(ctx, "chain_dial: hole_punch failed",
+				"target_pub", targetPubHex,
+				"rendezvous_pub", rdvPubHex,
+				"err", err)
 			errs = append(errs, fmt.Errorf("hole_punch: %w", err))
 		}
 	}
 
-	if opts.turnPC != nil {
+	if opts.turnPC == nil {
+		slog.DebugContext(ctx, "chain_dial: turn skipped",
+			"target_pub", targetPubHex,
+			"reason", "no_allocation")
+	} else {
+		slog.DebugContext(ctx, "chain_dial: turn attempt",
+			"target_pub", targetPubHex,
+			"target_addr", opts.target.Addr,
+			"timeout", opts.turnTimeout)
 		tctx, tcancel := context.WithTimeout(ctx, opts.turnTimeout)
 		conn, err := chainTURNDialFn(tctx, opts.turnPC, opts.target.Addr, opts.priv, opts.target.PubKey, nil)
 		tcancel()
 		if err == nil {
+			slog.DebugContext(ctx, "chain_dial: turn succeeded", "target_pub", targetPubHex)
 			return conn, chainMethodTURN, nil
 		}
+		slog.DebugContext(ctx, "chain_dial: turn failed",
+			"target_pub", targetPubHex,
+			"err", err)
 		errs = append(errs, fmt.Errorf("turn: %w", err))
 	}
 
+	slog.DebugContext(ctx, "chain_dial: all steps failed",
+		"target_pub", targetPubHex,
+		"steps_attempted", len(errs))
 	return nil, "", errors.Join(errs...)
 }
 

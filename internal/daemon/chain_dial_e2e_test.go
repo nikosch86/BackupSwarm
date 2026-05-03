@@ -103,6 +103,17 @@ func TestChainDial_E2E_DirectFailsFallsThroughToPunch(t *testing.T) {
 	if !strings.Contains(logged, "peer_pub="+hex.EncodeToString(b.pub)) {
 		t.Errorf("log line missing target peer_pub; buffer:\n%s", logged)
 	}
+	for _, want := range []string{
+		"chain_dial: start",
+		"chain_dial: direct attempt",
+		"chain_dial: direct failed",
+		"chain_dial: hole_punch attempt",
+		"chain_dial: hole_punch succeeded",
+	} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("missing debug breadcrumb %q; buffer:\n%s", want, logged)
+		}
+	}
 
 	stream, err := conn.OpenStream(ctx)
 	if err != nil {
