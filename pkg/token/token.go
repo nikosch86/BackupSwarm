@@ -1,6 +1,7 @@
 // Package token serializes shareable invite tokens carrying an introducer's
-// listen address, Ed25519 public key, swarm ID, single-use join secret, and
-// optional swarm CA cert. Unknown version bytes Decode to ErrUnknownVersion.
+// listen address, Ed25519 public key, swarm ID, single-use join secret,
+// optional swarm CA cert, and optional TURN-relayed fallback address.
+// Unknown version bytes Decode to ErrUnknownVersion.
 package token
 
 import (
@@ -12,12 +13,14 @@ import (
 )
 
 // wireVersion is the layout tag at the head of every encoded token.
-const wireVersion byte = 2
+const wireVersion byte = 3
 
-// maxAddrLen and maxCACertLen are the uint16 length-prefix ceilings.
+// maxAddrLen, maxCACertLen, and maxRelayAddrLen are the uint16 length-prefix
+// ceilings for each variable-width field.
 const (
-	maxAddrLen   = 1<<16 - 1
-	maxCACertLen = 1<<16 - 1
+	maxAddrLen      = 1<<16 - 1
+	maxCACertLen    = 1<<16 - 1
+	maxRelayAddrLen = 1<<16 - 1
 )
 
 // SwarmIDSize and SecretSize are the fixed widths of the matching Token fields.
@@ -30,19 +33,20 @@ const (
 // does not match the layout this build understands.
 var ErrUnknownVersion = errors.New("unknown token version")
 
-// Token is the decoded shape of an invite. CACert is optional; all other
-// fields are required.
+// Token is the decoded shape of an invite. CACert and RelayAddr are
+// optional; all other fields are required.
 type Token struct {
-	Addr    string
-	Pub     ed25519.PublicKey
-	SwarmID [SwarmIDSize]byte
-	Secret  [SecretSize]byte
-	CACert  []byte
+	Addr      string
+	Pub       ed25519.PublicKey
+	SwarmID   [SwarmIDSize]byte
+	Secret    [SecretSize]byte
+	CACert    []byte
+	RelayAddr string
 }
 
 // Encode serializes t to a base64url string. Wire layout (pre-base64):
 // version(1) | addr_len(2) | addr | pub(32) | swarmID(32) | secret(32) |
-// ca_len(2) | ca.
+// ca_len(2) | ca | relay_len(2) | relay.
 func Encode(t Token) (string, error) {
 	if t.Addr == "" {
 		return "", errors.New("token: addr is required")
@@ -56,8 +60,11 @@ func Encode(t Token) (string, error) {
 	if len(t.CACert) > maxCACertLen {
 		return "", fmt.Errorf("token: ca cert length %d exceeds max %d", len(t.CACert), maxCACertLen)
 	}
+	if len(t.RelayAddr) > maxRelayAddrLen {
+		return "", fmt.Errorf("token: relay addr length %d exceeds max %d", len(t.RelayAddr), maxRelayAddrLen)
+	}
 
-	size := 1 + 2 + len(t.Addr) + ed25519.PublicKeySize + SwarmIDSize + SecretSize + 2 + len(t.CACert)
+	size := 1 + 2 + len(t.Addr) + ed25519.PublicKeySize + SwarmIDSize + SecretSize + 2 + len(t.CACert) + 2 + len(t.RelayAddr)
 	raw := make([]byte, 0, size)
 	raw = append(raw, wireVersion)
 
@@ -72,6 +79,10 @@ func Encode(t Token) (string, error) {
 	binary.BigEndian.PutUint16(u16[:], uint16(len(t.CACert)))
 	raw = append(raw, u16[:]...)
 	raw = append(raw, t.CACert...)
+
+	binary.BigEndian.PutUint16(u16[:], uint16(len(t.RelayAddr)))
+	raw = append(raw, u16[:]...)
+	raw = append(raw, t.RelayAddr...)
 
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
@@ -141,6 +152,19 @@ func Decode(s string) (Token, error) {
 		copy(t.CACert, raw[:caLen])
 	}
 	raw = raw[caLen:]
+
+	if len(raw) < 2 {
+		return Token{}, errors.New("token: truncated relay addr length")
+	}
+	relayLen := binary.BigEndian.Uint16(raw[:2])
+	raw = raw[2:]
+	if int(relayLen) > len(raw) {
+		return Token{}, fmt.Errorf("token: relay addr length %d exceeds remaining bytes %d", relayLen, len(raw))
+	}
+	if relayLen > 0 {
+		t.RelayAddr = string(raw[:relayLen])
+	}
+	raw = raw[relayLen:]
 
 	if len(raw) != 0 {
 		return Token{}, fmt.Errorf("token: %d trailing bytes", len(raw))

@@ -59,8 +59,9 @@ func writeAtomicFile(path, data string) error {
 }
 
 // IssueInvite persists a fresh (swarmID, secret) pair as pending and
-// returns the encoded token. An empty caCertDER produces a pin-mode token.
-func IssueInvite(dataDir, listenAddr string, introPub ed25519.PublicKey, caCertDER []byte) (string, error) {
+// returns the encoded token. An empty caCertDER produces a pin-mode
+// token; an empty relayAddr leaves the token's relay alternative blank.
+func IssueInvite(dataDir, listenAddr, relayAddr string, introPub ed25519.PublicKey, caCertDER []byte) (string, error) {
 	store, err := invites.Open(filepath.Join(dataDir, invites.DefaultFilename))
 	if err != nil {
 		return "", fmt.Errorf("open invites.db: %w", err)
@@ -78,11 +79,12 @@ func IssueInvite(dataDir, listenAddr string, introPub ed25519.PublicKey, caCertD
 		return "", fmt.Errorf("issue: %w", err)
 	}
 	tokStr, err := token.Encode(token.Token{
-		Addr:    listenAddr,
-		Pub:     introPub,
-		SwarmID: swarmID,
-		Secret:  secret,
-		CACert:  caCertDER,
+		Addr:      listenAddr,
+		Pub:       introPub,
+		SwarmID:   swarmID,
+		Secret:    secret,
+		CACert:    caCertDER,
+		RelayAddr: relayAddr,
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode token: %w", err)

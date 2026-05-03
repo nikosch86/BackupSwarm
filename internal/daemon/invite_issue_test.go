@@ -135,7 +135,7 @@ func TestIssueInvite_RoundTrip(t *testing.T) {
 		t.Fatalf("ed25519: %v", err)
 	}
 	const addr = "127.0.0.1:1234"
-	tokStr, err := daemon.IssueInvite(dataDir, addr, pub, nil)
+	tokStr, err := daemon.IssueInvite(dataDir, addr, "", pub, nil)
 	if err != nil {
 		t.Fatalf("IssueInvite: %v", err)
 	}
@@ -148,6 +148,9 @@ func TestIssueInvite_RoundTrip(t *testing.T) {
 	}
 	if !tok.Pub.Equal(pub) {
 		t.Error("token pub mismatch")
+	}
+	if tok.RelayAddr != "" {
+		t.Errorf("token RelayAddr = %q, want empty", tok.RelayAddr)
 	}
 
 	// The freshly-issued secret must be Consume'able from a separate
@@ -173,7 +176,7 @@ func TestIssueInvite_EmbedsCACert(t *testing.T) {
 		t.Fatalf("ed25519: %v", err)
 	}
 	caCertDER := []byte("fake-ca-cert-bytes")
-	tokStr, err := daemon.IssueInvite(dataDir, "127.0.0.1:1", pub, caCertDER)
+	tokStr, err := daemon.IssueInvite(dataDir, "127.0.0.1:1", "", pub, caCertDER)
 	if err != nil {
 		t.Fatalf("IssueInvite: %v", err)
 	}
@@ -183,5 +186,25 @@ func TestIssueInvite_EmbedsCACert(t *testing.T) {
 	}
 	if string(tok.CACert) != string(caCertDER) {
 		t.Errorf("token CACert = %x, want %x", tok.CACert, caCertDER)
+	}
+}
+
+func TestIssueInvite_EmbedsRelayAddr(t *testing.T) {
+	dataDir := t.TempDir()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ed25519: %v", err)
+	}
+	const relay = "203.0.113.7:54321"
+	tokStr, err := daemon.IssueInvite(dataDir, "127.0.0.1:1", relay, pub, nil)
+	if err != nil {
+		t.Fatalf("IssueInvite: %v", err)
+	}
+	tok, err := token.Decode(tokStr)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if tok.RelayAddr != relay {
+		t.Errorf("token RelayAddr = %q, want %q", tok.RelayAddr, relay)
 	}
 }

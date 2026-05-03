@@ -177,6 +177,53 @@ func (l *Listener) Accept(ctx context.Context) (*Conn, error) {
 	return &Conn{inner: qc, remotePub: connRemotePub(qc), limiters: l.limiters}, nil
 }
 
+// DialPeer opens an outbound QUIC connection to addr through this
+// listener's underlying transport, so a single packet conn (e.g. a
+// TURN-allocated relay) can serve both directions without spawning a
+// second qgo.Transport read loop on the same socket.
+func (l *Listener) DialPeer(ctx context.Context, addr string, priv ed25519.PrivateKey, expectedPeerPub ed25519.PublicKey, trust *TrustConfig) (*Conn, error) {
+	if err := validateTrust(trust); err != nil {
+		return nil, err
+	}
+	cert, err := leafCert(priv, trust)
+	if err != nil {
+		return nil, fmt.Errorf("build client cert: %w", err)
+	}
+	tlsConf := &tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		InsecureSkipVerify: true,
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if trust != nil {
+				if err := verifyChain(rawCerts, trust.Pool); err != nil {
+					return err
+				}
+			}
+			pub, err := peerEd25519Pub(rawCerts)
+			if err != nil {
+				return err
+			}
+			if !pub.Equal(expectedPeerPub) {
+				return fmt.Errorf("%w: got %s, want %s",
+					ErrPeerPubkeyMismatch,
+					hex.EncodeToString(pub),
+					hex.EncodeToString(expectedPeerPub))
+			}
+			return nil
+		},
+		MinVersion: tls.VersionTLS13,
+		NextProtos: []string{NextProtocol},
+	}
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("resolve udp %q: %w", addr, err)
+	}
+	qc, err := l.tr.Dial(ctx, udpAddr, tlsConf, newQUICConfig())
+	if err != nil {
+		return nil, fmt.Errorf("quic dial %q: %w", addr, err)
+	}
+	return &Conn{inner: qc, remotePub: connRemotePub(qc)}, nil
+}
+
 // Close shuts down the listener, tears down all accepted connections, and
 // releases the UDP port.
 func (l *Listener) Close() error {

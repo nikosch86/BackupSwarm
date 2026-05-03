@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"time"
 
 	"backupswarm/internal/peers"
@@ -16,12 +15,21 @@ import (
 	"backupswarm/internal/swarm"
 )
 
+// turnRelayDialer is the surface chainDial drives for the TURN step.
+// *bsquic.Listener satisfies it via DialPeer; sharing the listener's
+// transport keeps inbound and outbound on the same allocation.
+type turnRelayDialer interface {
+	DialPeer(ctx context.Context, addr string, priv ed25519.PrivateKey, expected ed25519.PublicKey, trust *bsquic.TrustConfig) (*bsquic.Conn, error)
+}
+
 // chainDial step seams: one var per fallback rung (direct, hole-punch,
 // TURN). Tests swap them.
 var (
 	chainDirectDialFn = bsquic.Dial
-	chainTURNDialFn   = bsquic.DialOver
-	chainPunchFn      = func(ctx context.Context, po *punchOrchestrator, target ed25519.PublicKey, rdv *bsquic.Conn) (*bsquic.Conn, error) {
+	chainTURNDialFn   = func(ctx context.Context, l turnRelayDialer, addr string, priv ed25519.PrivateKey, expected ed25519.PublicKey, trust *bsquic.TrustConfig) (*bsquic.Conn, error) {
+		return l.DialPeer(ctx, addr, priv, expected, trust)
+	}
+	chainPunchFn = func(ctx context.Context, po *punchOrchestrator, target ed25519.PublicKey, rdv *bsquic.Conn) (*bsquic.Conn, error) {
 		return po.RequestPunch(ctx, target, rdv)
 	}
 )
@@ -36,8 +44,8 @@ const (
 )
 
 // chainDialOptions configures one fallback-chain dial. Nil punchOrch
-// disables the hole-punch step; nil turnPC disables the TURN step.
-// Each timeout bounds only its own step.
+// disables the hole-punch step; nil turnListener disables the TURN
+// step. Each timeout bounds only its own step.
 type chainDialOptions struct {
 	target        peers.Peer
 	priv          ed25519.PrivateKey
@@ -45,7 +53,7 @@ type chainDialOptions struct {
 	punchTimeout  time.Duration
 	turnTimeout   time.Duration
 	punchOrch     *punchOrchestrator
-	turnPC        net.PacketConn
+	turnListener  turnRelayDialer
 	connSet       *swarm.ConnSet
 }
 
@@ -58,7 +66,7 @@ func chainDial(ctx context.Context, opts chainDialOptions) (*bsquic.Conn, chainM
 		"target_pub", targetPubHex,
 		"target_addr", opts.target.Addr,
 		"punch_enabled", opts.punchOrch != nil,
-		"turn_enabled", opts.turnPC != nil,
+		"turn_enabled", opts.turnListener != nil,
 		"direct_timeout", opts.directTimeout,
 		"punch_timeout", opts.punchTimeout,
 		"turn_timeout", opts.turnTimeout,
@@ -114,7 +122,7 @@ func chainDial(ctx context.Context, opts chainDialOptions) (*bsquic.Conn, chainM
 		}
 	}
 
-	if opts.turnPC == nil {
+	if opts.turnListener == nil {
 		slog.DebugContext(ctx, "chain_dial: turn skipped",
 			"target_pub", targetPubHex,
 			"reason", "no_allocation")
@@ -124,7 +132,7 @@ func chainDial(ctx context.Context, opts chainDialOptions) (*bsquic.Conn, chainM
 			"target_addr", opts.target.Addr,
 			"timeout", opts.turnTimeout)
 		tctx, tcancel := context.WithTimeout(ctx, opts.turnTimeout)
-		conn, err := chainTURNDialFn(tctx, opts.turnPC, opts.target.Addr, opts.priv, opts.target.PubKey, nil)
+		conn, err := chainTURNDialFn(tctx, opts.turnListener, opts.target.Addr, opts.priv, opts.target.PubKey, nil)
 		tcancel()
 		if err == nil {
 			slog.DebugContext(ctx, "chain_dial: turn succeeded", "target_pub", targetPubHex)

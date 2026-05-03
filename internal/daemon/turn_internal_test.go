@@ -103,6 +103,69 @@ func startTURNServerForDaemonTest(t *testing.T) string {
 	return listener.LocalAddr().String()
 }
 
+// TestRun_TURNAllocation_PublishesAndRemovesRelayAddr drives daemon.Run
+// with TURN configured and asserts <data-dir>/relay.addr appears with the
+// allocated relay address while the daemon is alive and is removed on
+// shutdown — the file is what the `invite` oneshot reads to embed in
+// outbound tokens.
+func TestRun_TURNAllocation_PublishesAndRemovesRelayAddr(t *testing.T) {
+	turnAddr := startTURNServerForDaemonTest(t)
+	dataDir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			DataDir:    dataDir,
+			ListenAddr: "127.0.0.1:0",
+			Progress:   io.Discard,
+			TURN: TURNOptions{
+				Server:   turnAddr,
+				Username: "u",
+				Password: "p",
+				Realm:    "backupswarm.test",
+			},
+		})
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	var relayAddr string
+	for {
+		var readErr error
+		relayAddr, readErr = ReadRelayAddr(dataDir)
+		if readErr == nil && relayAddr != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatalf("relay.addr never appeared (last err: %v)", readErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.HasPrefix(relayAddr, "127.0.0.1:") {
+		t.Errorf("relay.addr = %q, want 127.0.0.1:<port> prefix", relayAddr)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return within 3s of cancel")
+	}
+
+	if _, err := ReadRelayAddr(dataDir); err != nil {
+		t.Fatalf("post-shutdown ReadRelayAddr: %v", err)
+	}
+	got, _ := ReadRelayAddr(dataDir)
+	if got != "" {
+		t.Errorf("relay.addr still present after shutdown: %q", got)
+	}
+}
+
 // TestRun_TURNAllocationLogsRelayAddr asserts the relay address is emitted
 // at Info level when the daemon allocates against a real TURN server.
 func TestRun_TURNAllocationLogsRelayAddr(t *testing.T) {

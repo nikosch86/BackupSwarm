@@ -27,7 +27,51 @@ var (
 	writeJoinRequestFunc  = protocol.WriteJoinRequest
 	writePeerListFunc     = protocol.WritePeerListMessage
 	streamCloseFunc       = func(s io.Closer) error { return s.Close() }
+	dialIntroducerFunc    = bsquic.Dial
 )
+
+// dialIntroducer tries the token's direct address first, then the relay
+// alternative if the direct rung fails and tok.RelayAddr is non-empty.
+// Emits method=direct|relay on success.
+func dialIntroducer(ctx context.Context, tok token.Token, myPriv ed25519.PrivateKey) (*bsquic.Conn, error) {
+	var errs []error
+
+	slog.DebugContext(ctx, "bootstrap dial: direct attempt", "addr", tok.Addr)
+	conn, err := dialIntroducerFunc(ctx, tok.Addr, myPriv, tok.Pub, nil)
+	if err == nil {
+		slog.InfoContext(ctx, "bootstrap dial: connected",
+			"method", "direct",
+			"addr", tok.Addr,
+		)
+		return conn, nil
+	}
+	slog.DebugContext(ctx, "bootstrap dial: direct failed",
+		"addr", tok.Addr,
+		"err", err,
+	)
+	errs = append(errs, fmt.Errorf("direct: %w", err))
+
+	if tok.RelayAddr == "" {
+		slog.DebugContext(ctx, "bootstrap dial: relay skipped", "reason", "no_relay_addr")
+		return nil, errors.Join(errs...)
+	}
+
+	slog.DebugContext(ctx, "bootstrap dial: relay attempt", "addr", tok.RelayAddr)
+	conn, err = dialIntroducerFunc(ctx, tok.RelayAddr, myPriv, tok.Pub, nil)
+	if err == nil {
+		slog.InfoContext(ctx, "bootstrap dial: connected",
+			"method", "relay",
+			"addr", tok.RelayAddr,
+		)
+		return conn, nil
+	}
+	slog.DebugContext(ctx, "bootstrap dial: relay failed",
+		"addr", tok.RelayAddr,
+		"err", err,
+	)
+	errs = append(errs, fmt.Errorf("relay: %w", err))
+	return nil, errors.Join(errs...)
+}
 
 // maxAdvertisedAddrLen caps incoming addresses at 1 KiB.
 const maxAdvertisedAddrLen = 1 << 10
@@ -187,7 +231,7 @@ func DoJoin(ctx context.Context, tokenStr string, myPriv ed25519.PrivateKey, myL
 			return JoinResult{}, fmt.Errorf("create csr: %w", err)
 		}
 	}
-	conn, err := bsquic.Dial(ctx, tok.Addr, myPriv, tok.Pub, nil)
+	conn, err := dialIntroducer(ctx, tok, myPriv)
 	if err != nil {
 		return JoinResult{}, fmt.Errorf("dial introducer: %w", err)
 	}

@@ -106,6 +106,143 @@ func TestListenOver_RoundTripOverPacketConn(t *testing.T) {
 	}
 }
 
+// TestListenOver_TURNRelayInboundHandshake asserts a directly-dialing
+// client can reach a server that listens on a TURN-allocated packet
+// conn by dialing the allocation's relay address — once the allocator
+// has installed a permission for the client's source IP. Establishes
+// that inviter-behind-NAT bootstrap is feasible at the bsquic layer
+// given a pre-installed permission (standard TURN has no permissive
+// inbound auto-permit; real deployments need a coordinator or a
+// permissive TURN server).
+func TestListenOver_TURNRelayInboundHandshake(t *testing.T) {
+	turnAddr := startTURNFixture(t)
+	serverPub, serverPriv := newKeyPair(t)
+	clientPub, clientPriv := newKeyPair(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	alloc, err := nat.Allocate(ctx, nat.TURNConfig{
+		Server:   turnAddr,
+		Username: "user",
+		Password: "pass",
+		Realm:    "backupswarm.test",
+	})
+	if err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	if err := alloc.AddPermission(net.ParseIP("127.0.0.1")); err != nil {
+		_ = alloc.Close()
+		t.Fatalf("AddPermission: %v", err)
+	}
+
+	l, err := bsw.ListenOver(alloc.PacketConn(), serverPriv, nil, nil)
+	if err != nil {
+		_ = alloc.Close()
+		t.Fatalf("ListenOver alloc: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	type accept struct {
+		pub ed25519.PublicKey
+		err error
+	}
+	done := make(chan accept, 1)
+	go func() {
+		conn, aerr := l.Accept(ctx)
+		if aerr != nil {
+			done <- accept{err: aerr}
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		done <- accept{pub: conn.RemotePub()}
+	}()
+
+	conn, err := bsw.Dial(ctx, alloc.RelayAddr().String(), clientPriv, serverPub, nil)
+	if err != nil {
+		t.Fatalf("Dial relay addr: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if !conn.RemotePub().Equal(serverPub) {
+		t.Fatalf("dialer remote pub mismatch")
+	}
+	r := <-done
+	if r.err != nil {
+		t.Fatalf("accept: %v", r.err)
+	}
+	if !r.pub.Equal(clientPub) {
+		t.Fatalf("server remote pub mismatch")
+	}
+}
+
+// TestListener_DialPeer_RoundTripOverTURN asserts that DialPeer reuses
+// the listener's transport so both inbound listen and outbound dial work
+// on the same TURN-allocated packet conn — a single allocation serves
+// both directions for the inviter daemon.
+func TestListener_DialPeer_RoundTripOverTURN(t *testing.T) {
+	turnAddr := startTURNFixture(t)
+	inviterPub, inviterPriv := newKeyPair(t)
+	peerPub, peerPriv := newKeyPair(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	alloc, err := nat.Allocate(ctx, nat.TURNConfig{
+		Server:   turnAddr,
+		Username: "user",
+		Password: "pass",
+		Realm:    "backupswarm.test",
+	})
+	if err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	relayListener, err := bsw.ListenOver(alloc.PacketConn(), inviterPriv, nil, nil)
+	if err != nil {
+		_ = alloc.Close()
+		t.Fatalf("ListenOver alloc: %v", err)
+	}
+	defer func() { _ = relayListener.Close() }()
+
+	directListener, err := bsw.Listen("127.0.0.1:0", peerPriv, nil, nil)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = directListener.Close() }()
+
+	type accept struct {
+		pub ed25519.PublicKey
+		err error
+	}
+	done := make(chan accept, 1)
+	go func() {
+		conn, aerr := directListener.Accept(ctx)
+		if aerr != nil {
+			done <- accept{err: aerr}
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		done <- accept{pub: conn.RemotePub()}
+	}()
+
+	conn, err := relayListener.DialPeer(ctx, directListener.Addr().String(), inviterPriv, peerPub, nil)
+	if err != nil {
+		t.Fatalf("DialPeer: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if !conn.RemotePub().Equal(peerPub) {
+		t.Fatalf("dialer remote pub mismatch")
+	}
+	r := <-done
+	if r.err != nil {
+		t.Fatalf("accept: %v", r.err)
+	}
+	if !r.pub.Equal(inviterPub) {
+		t.Fatalf("direct-listener remote pub mismatch")
+	}
+}
+
 // TestDialOver_TURNRelayHandshake asserts a client that allocates a TURN
 // relay socket can complete a QUIC handshake with a directly-listening
 // peer when its outbound traffic is routed through the relay.

@@ -109,6 +109,18 @@ func (a *Allocation) RelayAddr() net.Addr { return a.relay.LocalAddr() }
 // writes route via the TURN server.
 func (a *Allocation) PacketConn() net.PacketConn { return a.relay }
 
+// AddPermission instructs the TURN server to forward inbound datagrams
+// from peerIP to this allocation. Required before any peer can reach
+// the relay address: standard TURN has no permissive-by-default mode,
+// and outbound-first WriteTo only auto-permits destinations the
+// allocator has already addressed.
+func (a *Allocation) AddPermission(peerIP net.IP) error {
+	if peerIP == nil {
+		return errors.New("nat: AddPermission requires non-nil peer ip")
+	}
+	return a.client.CreatePermission(&net.UDPAddr{IP: peerIP})
+}
+
 // Close releases the relay reservation and the underlying socket. Idempotent.
 func (a *Allocation) Close() error {
 	a.closeOnce.Do(func() {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
-	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -20,18 +19,14 @@ import (
 // pointer suffices — no test ever dereferences it.
 func fakeChainConn() *bsquic.Conn { return &bsquic.Conn{} }
 
-// fakePacketConn is a no-op net.PacketConn used to enable the TURN step
-// without standing up a real socket. The chain never reads from it; the
-// chainTURNDialFn seam is what tests actually exercise.
-type fakePacketConn struct{}
+// stubTurnDialer enables the TURN step without standing up a real
+// allocation. The chain never invokes DialPeer directly — the
+// chainTURNDialFn seam intercepts before reaching the receiver.
+type stubTurnDialer struct{}
 
-func (f *fakePacketConn) ReadFrom([]byte) (int, net.Addr, error) { return 0, nil, errors.New("noop") }
-func (f *fakePacketConn) WriteTo([]byte, net.Addr) (int, error)  { return 0, nil }
-func (f *fakePacketConn) Close() error                           { return nil }
-func (f *fakePacketConn) LocalAddr() net.Addr                    { return &net.UDPAddr{} }
-func (f *fakePacketConn) SetDeadline(time.Time) error            { return nil }
-func (f *fakePacketConn) SetReadDeadline(time.Time) error        { return nil }
-func (f *fakePacketConn) SetWriteDeadline(time.Time) error       { return nil }
+func (stubTurnDialer) DialPeer(context.Context, string, ed25519.PrivateKey, ed25519.PublicKey, *bsquic.TrustConfig) (*bsquic.Conn, error) {
+	return nil, errors.New("stubTurnDialer: DialPeer should be intercepted by chainTURNDialFn seam")
+}
 
 // stubChainSeams swaps chainDirectDialFn, chainPunchFn, and
 // chainTURNDialFn for the duration of the test. Each fn closes over
@@ -45,7 +40,7 @@ type chainSeamCounts struct {
 func swapChainSeams(t *testing.T,
 	direct func(ctx context.Context, addr string, priv ed25519.PrivateKey, expected ed25519.PublicKey, trust *bsquic.TrustConfig) (*bsquic.Conn, error),
 	punchFn func(ctx context.Context, po *punchOrchestrator, target ed25519.PublicKey, rdv *bsquic.Conn) (*bsquic.Conn, error),
-	turn func(ctx context.Context, pc net.PacketConn, addr string, priv ed25519.PrivateKey, expected ed25519.PublicKey, trust *bsquic.TrustConfig) (*bsquic.Conn, error),
+	turn func(ctx context.Context, l turnRelayDialer, addr string, priv ed25519.PrivateKey, expected ed25519.PublicKey, trust *bsquic.TrustConfig) (*bsquic.Conn, error),
 ) *chainSeamCounts {
 	t.Helper()
 	cnt := &chainSeamCounts{}
@@ -64,12 +59,12 @@ func swapChainSeams(t *testing.T,
 		}
 		return punchFn(ctx, po, target, rdv)
 	}
-	chainTURNDialFn = func(ctx context.Context, pc net.PacketConn, addr string, priv ed25519.PrivateKey, expected ed25519.PublicKey, trust *bsquic.TrustConfig) (*bsquic.Conn, error) {
+	chainTURNDialFn = func(ctx context.Context, l turnRelayDialer, addr string, priv ed25519.PrivateKey, expected ed25519.PublicKey, trust *bsquic.TrustConfig) (*bsquic.Conn, error) {
 		cnt.turn.Add(1)
 		if turn == nil {
 			return nil, errors.New("turn: no seam")
 		}
-		return turn(ctx, pc, addr, priv, expected, trust)
+		return turn(ctx, l, addr, priv, expected, trust)
 	}
 	t.Cleanup(func() {
 		chainDirectDialFn, chainPunchFn, chainTURNDialFn = prevDirect, prevPunch, prevTURN
@@ -165,7 +160,7 @@ func TestChainDial_DirectFails_NoRendezvous_TURNSucceeds(t *testing.T) {
 			return nil, errors.New("direct boom")
 		},
 		nil,
-		func(context.Context, net.PacketConn, string, ed25519.PrivateKey, ed25519.PublicKey, *bsquic.TrustConfig) (*bsquic.Conn, error) {
+		func(context.Context, turnRelayDialer, string, ed25519.PrivateKey, ed25519.PublicKey, *bsquic.TrustConfig) (*bsquic.Conn, error) {
 			return want, nil
 		})
 
@@ -173,7 +168,7 @@ func TestChainDial_DirectFails_NoRendezvous_TURNSucceeds(t *testing.T) {
 	opts := chainTestOpts(target)
 	opts.punchOrch = &punchOrchestrator{}
 	opts.connSet = swarm.NewConnSet() // empty → no rendezvous
-	opts.turnPC = &fakePacketConn{}
+	opts.turnListener = stubTurnDialer{}
 
 	conn, method, err := chainDial(context.Background(), opts)
 	if err != nil {
@@ -200,7 +195,7 @@ func TestChainDial_FallthroughToTURN(t *testing.T) {
 		func(context.Context, *punchOrchestrator, ed25519.PublicKey, *bsquic.Conn) (*bsquic.Conn, error) {
 			return nil, errors.New("punch boom")
 		},
-		func(context.Context, net.PacketConn, string, ed25519.PrivateKey, ed25519.PublicKey, *bsquic.TrustConfig) (*bsquic.Conn, error) {
+		func(context.Context, turnRelayDialer, string, ed25519.PrivateKey, ed25519.PublicKey, *bsquic.TrustConfig) (*bsquic.Conn, error) {
 			return want, nil
 		})
 
@@ -209,7 +204,7 @@ func TestChainDial_FallthroughToTURN(t *testing.T) {
 	opts.punchOrch = &punchOrchestrator{}
 	opts.connSet = swarm.NewConnSet()
 	stubRendezvousConn(t, opts.connSet)
-	opts.turnPC = &fakePacketConn{}
+	opts.turnListener = stubTurnDialer{}
 
 	conn, method, err := chainDial(context.Background(), opts)
 	if err != nil {
@@ -235,7 +230,7 @@ func TestChainDial_AllFail(t *testing.T) {
 		func(context.Context, *punchOrchestrator, ed25519.PublicKey, *bsquic.Conn) (*bsquic.Conn, error) {
 			return nil, punchErr
 		},
-		func(context.Context, net.PacketConn, string, ed25519.PrivateKey, ed25519.PublicKey, *bsquic.TrustConfig) (*bsquic.Conn, error) {
+		func(context.Context, turnRelayDialer, string, ed25519.PrivateKey, ed25519.PublicKey, *bsquic.TrustConfig) (*bsquic.Conn, error) {
 			return nil, turnErr
 		})
 
@@ -244,7 +239,7 @@ func TestChainDial_AllFail(t *testing.T) {
 	opts.punchOrch = &punchOrchestrator{}
 	opts.connSet = swarm.NewConnSet()
 	stubRendezvousConn(t, opts.connSet)
-	opts.turnPC = &fakePacketConn{}
+	opts.turnListener = stubTurnDialer{}
 
 	conn, method, err := chainDial(context.Background(), opts)
 	if err == nil {
@@ -281,7 +276,7 @@ func TestChainDial_NilPunchOrch_SkipsPunchStep(t *testing.T) {
 			return nil, errors.New("direct boom")
 		},
 		nil,
-		func(context.Context, net.PacketConn, string, ed25519.PrivateKey, ed25519.PublicKey, *bsquic.TrustConfig) (*bsquic.Conn, error) {
+		func(context.Context, turnRelayDialer, string, ed25519.PrivateKey, ed25519.PublicKey, *bsquic.TrustConfig) (*bsquic.Conn, error) {
 			return want, nil
 		})
 
@@ -290,7 +285,7 @@ func TestChainDial_NilPunchOrch_SkipsPunchStep(t *testing.T) {
 	opts.punchOrch = nil // disabled
 	opts.connSet = swarm.NewConnSet()
 	stubRendezvousConn(t, opts.connSet)
-	opts.turnPC = &fakePacketConn{}
+	opts.turnListener = stubTurnDialer{}
 
 	conn, method, err := chainDial(context.Background(), opts)
 	if err != nil {
@@ -322,14 +317,14 @@ func TestChainDial_NilTURNPC_SkipsTURNStep(t *testing.T) {
 	opts.punchOrch = &punchOrchestrator{}
 	opts.connSet = swarm.NewConnSet()
 	stubRendezvousConn(t, opts.connSet)
-	opts.turnPC = nil
+	opts.turnListener = nil
 
 	_, _, err := chainDial(context.Background(), opts)
 	if err == nil {
 		t.Fatal("chainDial err = nil, want non-nil")
 	}
 	if cnt.turn.Load() != 0 {
-		t.Errorf("turn called %d times despite nil turnPC", cnt.turn.Load())
+		t.Errorf("turn called %d times despite nil turnListener", cnt.turn.Load())
 	}
 }
 

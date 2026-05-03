@@ -426,3 +426,135 @@ func TestDoJoin_StreamCloseFailure(t *testing.T) {
 	cancel()
 	wg.Wait()
 }
+
+// withDialIntroducerFunc swaps dialIntroducerFunc for the duration of a
+// test, restoring the previous value via t.Cleanup.
+func withDialIntroducerFunc(t *testing.T, fn func(ctx context.Context, addr string, priv ed25519.PrivateKey, expected ed25519.PublicKey, trust *bsquic.TrustConfig) (*bsquic.Conn, error)) {
+	t.Helper()
+	prev := dialIntroducerFunc
+	dialIntroducerFunc = fn
+	t.Cleanup(func() { dialIntroducerFunc = prev })
+}
+
+// TestDialIntroducer_DirectSucceeds_NeverTriesRelay asserts the relay
+// rung is skipped when direct dial returns a conn.
+func TestDialIntroducer_DirectSucceeds_NeverTriesRelay(t *testing.T) {
+	want := &bsquic.Conn{}
+	var directCalls, relayCalls int
+	withDialIntroducerFunc(t, func(_ context.Context, addr string, _ ed25519.PrivateKey, _ ed25519.PublicKey, _ *bsquic.TrustConfig) (*bsquic.Conn, error) {
+		switch addr {
+		case "203.0.113.1:7000":
+			directCalls++
+			return want, nil
+		case "relay.example.org:54321":
+			relayCalls++
+			return nil, errors.New("relay should not be tried")
+		default:
+			return nil, errors.New("unexpected addr")
+		}
+	})
+
+	tok := token.Token{Addr: "203.0.113.1:7000", RelayAddr: "relay.example.org:54321"}
+	conn, err := dialIntroducer(context.Background(), tok, ed25519.NewKeyFromSeed(make([]byte, 32)))
+	if err != nil {
+		t.Fatalf("dialIntroducer: %v", err)
+	}
+	if conn != want {
+		t.Errorf("conn = %p, want %p", conn, want)
+	}
+	if directCalls != 1 || relayCalls != 0 {
+		t.Errorf("direct=%d relay=%d, want 1/0", directCalls, relayCalls)
+	}
+}
+
+// TestDialIntroducer_DirectFails_RelaySucceeds asserts the relay rung
+// runs after direct fails when the token carries a RelayAddr.
+func TestDialIntroducer_DirectFails_RelaySucceeds(t *testing.T) {
+	want := &bsquic.Conn{}
+	var directCalls, relayCalls int
+	withDialIntroducerFunc(t, func(_ context.Context, addr string, _ ed25519.PrivateKey, _ ed25519.PublicKey, _ *bsquic.TrustConfig) (*bsquic.Conn, error) {
+		switch addr {
+		case "203.0.113.1:7000":
+			directCalls++
+			return nil, errors.New("direct boom")
+		case "relay.example.org:54321":
+			relayCalls++
+			return want, nil
+		default:
+			return nil, errors.New("unexpected addr")
+		}
+	})
+
+	tok := token.Token{Addr: "203.0.113.1:7000", RelayAddr: "relay.example.org:54321"}
+	conn, err := dialIntroducer(context.Background(), tok, ed25519.NewKeyFromSeed(make([]byte, 32)))
+	if err != nil {
+		t.Fatalf("dialIntroducer: %v", err)
+	}
+	if conn != want {
+		t.Errorf("conn = %p, want %p", conn, want)
+	}
+	if directCalls != 1 || relayCalls != 1 {
+		t.Errorf("direct=%d relay=%d, want 1/1", directCalls, relayCalls)
+	}
+}
+
+// TestDialIntroducer_NoRelay_DirectFails asserts the relay rung is
+// skipped when the token's RelayAddr is empty.
+func TestDialIntroducer_NoRelay_DirectFails(t *testing.T) {
+	directErr := errors.New("direct boom")
+	var relayCalls int
+	withDialIntroducerFunc(t, func(_ context.Context, addr string, _ ed25519.PrivateKey, _ ed25519.PublicKey, _ *bsquic.TrustConfig) (*bsquic.Conn, error) {
+		if addr == "203.0.113.1:7000" {
+			return nil, directErr
+		}
+		relayCalls++
+		return nil, errors.New("unexpected relay attempt")
+	})
+
+	tok := token.Token{Addr: "203.0.113.1:7000"}
+	_, err := dialIntroducer(context.Background(), tok, ed25519.NewKeyFromSeed(make([]byte, 32)))
+	if err == nil {
+		t.Fatal("dialIntroducer returned nil error")
+	}
+	if !errors.Is(err, directErr) {
+		t.Errorf("err = %v, want wraps directErr", err)
+	}
+	if relayCalls != 0 {
+		t.Errorf("relay called %d times despite empty RelayAddr", relayCalls)
+	}
+}
+
+// TestDialIntroducer_BothFail_JoinedError asserts the returned error
+// covers both rungs when direct and relay each fail.
+func TestDialIntroducer_BothFail_JoinedError(t *testing.T) {
+	directErr := errors.New("direct boom")
+	relayErr := errors.New("relay boom")
+	withDialIntroducerFunc(t, func(_ context.Context, addr string, _ ed25519.PrivateKey, _ ed25519.PublicKey, _ *bsquic.TrustConfig) (*bsquic.Conn, error) {
+		switch addr {
+		case "203.0.113.1:7000":
+			return nil, directErr
+		case "relay.example.org:54321":
+			return nil, relayErr
+		default:
+			return nil, errors.New("unexpected addr")
+		}
+	})
+
+	tok := token.Token{Addr: "203.0.113.1:7000", RelayAddr: "relay.example.org:54321"}
+	_, err := dialIntroducer(context.Background(), tok, ed25519.NewKeyFromSeed(make([]byte, 32)))
+	if err == nil {
+		t.Fatal("dialIntroducer returned nil error")
+	}
+	if !errors.Is(err, directErr) {
+		t.Errorf("err = %v, missing directErr", err)
+	}
+	if !errors.Is(err, relayErr) {
+		t.Errorf("err = %v, missing relayErr", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{"direct", "relay"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("err.Error() = %q, missing %q", msg, want)
+		}
+	}
+}

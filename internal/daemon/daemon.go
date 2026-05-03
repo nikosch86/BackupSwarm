@@ -432,6 +432,25 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
+	var turnAlloc *nat.Allocation
+	var relayAddr string
+	if opts.TURN.Server != "" {
+		turnAlloc, err = turnAllocateFunc(ctx, nat.TURNConfig(opts.TURN))
+		if err != nil {
+			return fmt.Errorf("turn allocate: %w", err)
+		}
+		relayAddr = turnAlloc.RelayAddr().String()
+		slog.InfoContext(ctx, "nat: turn relay allocated",
+			"server", opts.TURN.Server,
+			"relay_addr", relayAddr,
+		)
+		defer func() { _ = turnAlloc.Close() }()
+		if err := WriteRelayAddr(opts.DataDir, relayAddr); err != nil {
+			return fmt.Errorf("write relay.addr: %w", err)
+		}
+		defer func() { _ = RemoveRelayAddr(opts.DataDir) }()
+	}
+
 	if opts.IssueInitialInvite {
 		var caCertDER []byte
 		if swarmCA != nil {
@@ -441,7 +460,7 @@ func Run(ctx context.Context, opts Options) error {
 		if inviteAddr == "" {
 			inviteAddr = listener.Addr().String()
 		}
-		tokStr, issueErr := IssueInvite(opts.DataDir, inviteAddr, id.PublicKey, caCertDER)
+		tokStr, issueErr := IssueInvite(opts.DataDir, inviteAddr, relayAddr, id.PublicKey, caCertDER)
 		if issueErr != nil {
 			return fmt.Errorf("issue initial invite: %w", issueErr)
 		}
@@ -632,17 +651,19 @@ func Run(ctx context.Context, opts Options) error {
 	defer natCancel()
 	var natWG sync.WaitGroup
 	defer natWG.Wait()
-	if opts.TURN.Server != "" {
-		alloc, err := turnAllocateFunc(ctx, nat.TURNConfig(opts.TURN))
+	if turnAlloc != nil {
+		relayListener, err := bsquic.ListenOver(turnAlloc.PacketConn(), id.PrivateKey, verifyMember, nil)
 		if err != nil {
-			return fmt.Errorf("turn allocate: %w", err)
+			return fmt.Errorf("listen on turn relay: %w", err)
 		}
-		slog.InfoContext(ctx, "nat: turn relay allocated",
-			"server", opts.TURN.Server,
-			"relay_addr", alloc.RelayAddr().String(),
-		)
-		defer func() { _ = alloc.Close() }()
-		dialer.turnPC = alloc.PacketConn()
+		relayListener.SetLimiters(limiters)
+		defer func() { _ = relayListener.Close() }()
+		go func() {
+			if err := backup.Serve(ctx, relayListener, st, router.HandleStream, joinHandler, punchOrch.handleRequest, punchOrch.handleSignal, obs); err != nil && !errors.Is(err, context.Canceled) {
+				slog.WarnContext(ctx, "nat: turn relay serve exited", "err", err)
+			}
+		}()
+		dialer.turnListener = relayListener
 	}
 
 	if opts.STUNServer != "" {
@@ -803,12 +824,12 @@ type outboundDialer struct {
 	limiters    bsquic.Limiters
 
 	// punchTimeout / turnTimeout bound the hole-punch and TURN steps of
-	// the fallback chain; punchOrch / turnPC enable each step. Set
+	// the fallback chain; punchOrch / turnListener enable each step. Set
 	// post-construction by the daemon once those subsystems are ready.
 	punchTimeout time.Duration
 	turnTimeout  time.Duration
 	punchOrch    *punchOrchestrator
-	turnPC       net.PacketConn
+	turnListener turnRelayDialer
 
 	mu    sync.Mutex
 	conns []*bsquic.Conn
@@ -846,7 +867,7 @@ func (d *outboundDialer) dial(ctx context.Context, p peers.Peer) (*bsquic.Conn, 
 		punchTimeout:  d.punchTimeout,
 		turnTimeout:   d.turnTimeout,
 		punchOrch:     d.punchOrch,
-		turnPC:        d.turnPC,
+		turnListener:  d.turnListener,
 		connSet:       d.connSet,
 	})
 	if err != nil {

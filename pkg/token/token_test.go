@@ -73,6 +73,9 @@ func TestEncodeDecode_RoundTripWithCA(t *testing.T) {
 	if !bytes.Equal(out.CACert, in.CACert) {
 		t.Error("CACert round-trip mismatch")
 	}
+	if out.RelayAddr != "" {
+		t.Errorf("RelayAddr = %q, want empty", out.RelayAddr)
+	}
 }
 
 func TestEncodeDecode_RoundTripNoCA(t *testing.T) {
@@ -92,6 +95,49 @@ func TestEncodeDecode_RoundTripNoCA(t *testing.T) {
 	if out.Addr != in.Addr || !bytes.Equal(out.Pub, in.Pub) ||
 		out.SwarmID != in.SwarmID || out.Secret != in.Secret {
 		t.Error("non-CA fields round-trip mismatch")
+	}
+	if out.RelayAddr != "" {
+		t.Errorf("RelayAddr = %q, want empty", out.RelayAddr)
+	}
+}
+
+func TestEncodeDecode_RoundTripWithRelay(t *testing.T) {
+	in := sample(t, nil)
+	in.RelayAddr = "turn-relay.example.org:54321"
+
+	encoded, err := token.Encode(in)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	out, err := token.Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if out.RelayAddr != in.RelayAddr {
+		t.Errorf("RelayAddr = %q, want %q", out.RelayAddr, in.RelayAddr)
+	}
+	if out.Addr != in.Addr {
+		t.Errorf("Addr = %q, want %q", out.Addr, in.Addr)
+	}
+}
+
+func TestEncodeDecode_RoundTripCAAndRelay(t *testing.T) {
+	in := sample(t, bytes.Repeat([]byte{0xBB}, 256))
+	in.RelayAddr = "relay.example.org:3478"
+
+	encoded, err := token.Encode(in)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	out, err := token.Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !bytes.Equal(out.CACert, in.CACert) {
+		t.Error("CACert round-trip mismatch")
+	}
+	if out.RelayAddr != in.RelayAddr {
+		t.Errorf("RelayAddr = %q, want %q", out.RelayAddr, in.RelayAddr)
 	}
 }
 
@@ -130,6 +176,14 @@ func TestEncode_OversizedCACertRejected(t *testing.T) {
 	}
 }
 
+func TestEncode_OversizedRelayAddrRejected(t *testing.T) {
+	in := sample(t, nil)
+	in.RelayAddr = strings.Repeat("r", (1<<16)+1)
+	if _, err := token.Encode(in); err == nil {
+		t.Error("Encode accepted over-sized relay addr")
+	}
+}
+
 func TestDecode_EmptyStringRejected(t *testing.T) {
 	if _, err := token.Decode(""); err == nil {
 		t.Error("Decode accepted empty string")
@@ -149,6 +203,7 @@ func TestDecode_UnknownVersionRejected(t *testing.T) {
 	}{
 		{"future", 0xff},
 		{"legacy_v1", 0x01},
+		{"legacy_v2", 0x02},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -185,9 +240,9 @@ func TestDecode_TruncatedAtBoundaries(t *testing.T) {
 }
 
 func TestDecode_AddrLengthOverrun(t *testing.T) {
-	// version=2, addr_len declares 0x0400 but only "ab" follow + junk.
-	raw := []byte{0x02, 0x04, 0x00, 'a', 'b'}
-	raw = append(raw, bytes.Repeat([]byte{0x11}, 32+32+32+2)...)
+	// addr_len declares 0x0400 but only "ab" follow + junk.
+	raw := []byte{0x03, 0x04, 0x00, 'a', 'b'}
+	raw = append(raw, bytes.Repeat([]byte{0x11}, 32+32+32+2+2)...)
 	if _, err := token.Decode(token.EncodeRawForTest(raw)); err == nil {
 		t.Error("Decode accepted addr-length overrun")
 	}
@@ -198,7 +253,7 @@ func TestDecode_CALengthOverrun(t *testing.T) {
 	// bytes while supplying only 4.
 	pub := mustKey(t)
 	addr := "127.0.0.1:1"
-	raw := []byte{0x02}
+	raw := []byte{0x03}
 	var addrLen [2]byte
 	binary.BigEndian.PutUint16(addrLen[:], uint16(len(addr)))
 	raw = append(raw, addrLen[:]...)
@@ -213,6 +268,32 @@ func TestDecode_CALengthOverrun(t *testing.T) {
 
 	if _, err := token.Decode(token.EncodeRawForTest(raw)); err == nil {
 		t.Error("Decode accepted CA-length overrun")
+	}
+}
+
+func TestDecode_RelayLengthOverrun(t *testing.T) {
+	// Structurally valid prefix through ca_len=0, then claim 1024 relay
+	// bytes while supplying only 4.
+	pub := mustKey(t)
+	addr := "127.0.0.1:1"
+	raw := []byte{0x03}
+	var addrLen [2]byte
+	binary.BigEndian.PutUint16(addrLen[:], uint16(len(addr)))
+	raw = append(raw, addrLen[:]...)
+	raw = append(raw, addr...)
+	raw = append(raw, pub...)
+	raw = append(raw, bytes.Repeat([]byte{0x33}, 32)...) // swarm id
+	raw = append(raw, bytes.Repeat([]byte{0x44}, 32)...) // secret
+	var caLen [2]byte
+	binary.BigEndian.PutUint16(caLen[:], 0)
+	raw = append(raw, caLen[:]...)
+	var relayLen [2]byte
+	binary.BigEndian.PutUint16(relayLen[:], 1024)
+	raw = append(raw, relayLen[:]...)
+	raw = append(raw, []byte{0xCC, 0xCC, 0xCC, 0xCC}...)
+
+	if _, err := token.Decode(token.EncodeRawForTest(raw)); err == nil {
+		t.Error("Decode accepted relay-length overrun")
 	}
 }
 
