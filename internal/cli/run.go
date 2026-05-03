@@ -130,6 +130,9 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		uploadRate          string
 		downloadRate        string
 		statsInterval       time.Duration
+		backoffBase         time.Duration
+		backoffMax          time.Duration
+		backoffJitter       bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -277,6 +280,9 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				UploadRateBytes:     uploadRateBytes,
 				DownloadRateBytes:   downloadRateBytes,
 				StatsInterval:       statsInterval,
+				BackoffBase:         backoffBase,
+				BackoffMax:          backoffMax,
+				BackoffJitter:       backoffJitter,
 				Redundancy:          redundancy,
 				Progress:            cmd.OutOrStdout(),
 				TURN: daemon.TURNOptions{
@@ -325,6 +331,9 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&uploadRate, "upload-rate", "unlimited", "Cap node-wide outbound bytes/sec across every conn; accepts k/m/g/t suffixes (e.g. 5m). 'unlimited' (default) places no cap.")
 	cmd.Flags().StringVar(&downloadRate, "download-rate", "unlimited", "Cap node-wide inbound bytes/sec across every conn; accepts k/m/g/t suffixes (e.g. 5m). 'unlimited' (default) places no cap.")
 	cmd.Flags().DurationVar(&statsInterval, "stats-interval", 2*time.Minute, "Cadence for the periodic INFO 'activity' log line (files backed up, chunks stored, average bandwidth). 0 disables.")
+	cmd.Flags().DurationVar(&backoffBase, "backoff-base", time.Second, "Initial delay applied to a peer after a failed dial before the redial sweep retries. Subsequent failures double the delay up to --backoff-max. 0 disables the gate.")
+	cmd.Flags().DurationVar(&backoffMax, "backoff-max", 30*time.Minute, "Per-peer cap on the exponential redial backoff. Must be >= --backoff-base when both are set.")
+	cmd.Flags().BoolVar(&backoffJitter, "backoff-jitter", true, "Scale each backoff delay by a random factor in [0.5, 1.0] to avoid synchronized retry storms.")
 	return cmd
 }
 

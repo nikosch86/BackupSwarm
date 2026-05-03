@@ -229,6 +229,21 @@ The per-step bounds are configurable on `run`:
 Each timeout is a sub-context of the parent dial context — a step
 hitting its limit moves the chain on without cancelling the rest.
 
+#### Reconnection backoff
+
+The daemon's redial sweep tracks consecutive failures per peer and
+applies an exponential delay before the next eligible retry. Successful
+reconnections (whether via sweep, announcement, or startup) clear the
+state. Signal-driven dials — startup `dialAllPeers` and the
+announcement-on-PeerJoined immediate-dial — bypass the gate; only the
+periodic sweep (`--scan-interval`) consults it.
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--backoff-base` | 1s | initial post-failure delay; doubles each subsequent failure; `0` disables the gate |
+| `--backoff-max` | 30m | cap on the per-peer delay |
+| `--backoff-jitter` | true | scale each delay by a random factor in `[0.5, 1.0]` |
+
 #### UDP buffer warning (optional)
 
 quic-go logs `failed to sufficiently increase receive buffer size` on

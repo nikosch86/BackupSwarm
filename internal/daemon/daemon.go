@@ -218,6 +218,16 @@ type Options struct {
 	// (files backed up, chunks stored, average bandwidth). Zero defaults
 	// to 2 minutes; negative is rejected.
 	StatsInterval time.Duration
+	// BackoffBase is the first delay applied after a failed dial before
+	// the redial-sweep is allowed to retry. 0 disables the backoff gate
+	// (every sweep tick re-attempts every missing peer).
+	BackoffBase time.Duration
+	// BackoffMax caps the per-peer delay. Subsequent failures double the
+	// delay up to this ceiling. Must be >= BackoffBase when both are set.
+	BackoffMax time.Duration
+	// BackoffJitter, when true, scales each computed delay by a random
+	// factor in [0.5, 1.0] to avoid synchronized retry storms.
+	BackoffJitter bool
 }
 
 // TURNOptions configures the TURN client. All four fields are required
@@ -241,6 +251,8 @@ const (
 	defaultChunkTTL            = 30 * 24 * time.Hour
 	defaultExpireInterval      = 1 * time.Hour
 	defaultNATRefreshInterval  = 5 * time.Minute
+	defaultBackoffBase         = 1 * time.Second
+	defaultBackoffMax          = 30 * time.Minute
 
 	indexFileName = "index.db"
 	storeDirName  = "chunks"
@@ -318,6 +330,19 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	if opts.StatsInterval < 0 {
 		return fmt.Errorf("stats interval must be non-negative, got %v", opts.StatsInterval)
+	}
+	if opts.BackoffBase < 0 {
+		return fmt.Errorf("backoff base must be non-negative, got %v", opts.BackoffBase)
+	}
+	if opts.BackoffMax < 0 {
+		return fmt.Errorf("backoff max must be non-negative, got %v", opts.BackoffMax)
+	}
+	if opts.BackoffBase == 0 && opts.BackoffMax == 0 {
+		opts.BackoffBase = defaultBackoffBase
+		opts.BackoffMax = defaultBackoffMax
+	}
+	if opts.BackoffBase > 0 && opts.BackoffMax < opts.BackoffBase {
+		return fmt.Errorf("backoff max %v must be >= backoff base %v", opts.BackoffMax, opts.BackoffBase)
 	}
 	counters := &metrics.Counters{}
 
@@ -539,6 +564,7 @@ func Run(ctx context.Context, opts Options) error {
 		connSet:      connSet,
 		reach:        reach,
 		limiters:     limiters,
+		backoff:      newPeerBackoff(opts.BackoffBase, opts.BackoffMax, opts.BackoffJitter, nil, nil),
 	}
 	defer dialer.CloseAll()
 	joinHandler := makeJoinHandler(opts.DataDir, peerStore, swarmCA, connSet, dialer)
@@ -876,16 +902,25 @@ type outboundDialer struct {
 	punchOrch    *punchOrchestrator
 	turnListener turnRelayDialer
 
+	// backoff gates redial-sweep retries on consecutive dial failures.
+	// Nil disables the gate; signal-driven dials (immediate-on-announce)
+	// always pass through dial() and update the state.
+	backoff *peerBackoff
+
 	mu    sync.Mutex
 	conns []*bsquic.Conn
 }
+
+// dialerAcceptStreamsFn is the test seam for the goroutine register
+// spawns to consume inbound streams on the new conn.
+var dialerAcceptStreamsFn = backup.AcceptStreams
 
 // register wires conn into connSet+reach and spawns AcceptStreams.
 func (d *outboundDialer) register(conn *bsquic.Conn, p peers.Peer, method chainMethod) {
 	conn.SetLimiters(d.limiters)
 	d.connSet.Add(conn)
 	d.reach.MarkConn(conn, swarm.StateReachable)
-	go backup.AcceptStreams(d.ctx, conn, d.st, d.annHandler, d.joinHandler, nil, nil)
+	go dialerAcceptStreamsFn(d.ctx, conn, d.st, d.annHandler, d.joinHandler, nil, nil)
 	d.mu.Lock()
 	d.conns = append(d.conns, conn)
 	d.mu.Unlock()
@@ -916,6 +951,7 @@ func (d *outboundDialer) dial(ctx context.Context, p peers.Peer) (*bsquic.Conn, 
 		connSet:       d.connSet,
 	})
 	if err != nil {
+		d.backoff.MarkFailure(p.PubKey)
 		d.reach.Mark(p.PubKey, swarm.StateUnreachable)
 		slog.DebugContext(ctx, "outbound dial: chain failed",
 			"peer_pub", hex.EncodeToString(p.PubKey),
@@ -924,6 +960,7 @@ func (d *outboundDialer) dial(ctx context.Context, p peers.Peer) (*bsquic.Conn, 
 		)
 		return nil, err
 	}
+	d.backoff.MarkSuccess(p.PubKey)
 	d.register(conn, p, method)
 	return conn, nil
 }
@@ -1054,6 +1091,12 @@ func redialMissingPeers(ctx context.Context, peerStore *peers.Store, dialer *out
 			continue
 		}
 		if dialer.hasConn(p.PubKey) {
+			continue
+		}
+		if !dialer.backoff.Allow(p.PubKey) {
+			slog.DebugContext(ctx, "redial sweep: skip peer in backoff",
+				"peer_addr", p.Addr,
+				"peer_pub", hex.EncodeToString(p.PubKey))
 			continue
 		}
 		if _, err := dialer.dial(ctx, p); err != nil {

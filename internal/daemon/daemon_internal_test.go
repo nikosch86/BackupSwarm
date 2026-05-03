@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -933,6 +935,274 @@ func TestRun_STUNServerFallsBackToListenAddrWhenAdvertiseEmpty(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run did not exit within 3s of cancel")
+	}
+}
+
+// TestRun_RejectsNegativeBackoffBase: Run validates BackoffBase >= 0.
+func TestRun_RejectsNegativeBackoffBase(t *testing.T) {
+	t.Parallel()
+	err := Run(context.Background(), Options{
+		DataDir:     t.TempDir(),
+		ListenAddr:  "127.0.0.1:0",
+		BackoffBase: -1 * time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "backoff base must be non-negative") {
+		t.Fatalf("Run err = %v, want backoff-base validation error", err)
+	}
+}
+
+// TestRun_RejectsNegativeBackoffMax: Run validates BackoffMax >= 0.
+func TestRun_RejectsNegativeBackoffMax(t *testing.T) {
+	t.Parallel()
+	err := Run(context.Background(), Options{
+		DataDir:    t.TempDir(),
+		ListenAddr: "127.0.0.1:0",
+		BackoffMax: -1 * time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "backoff max must be non-negative") {
+		t.Fatalf("Run err = %v, want backoff-max validation error", err)
+	}
+}
+
+// TestRun_RejectsBackoffMaxBelowBase: Run validates BackoffMax >= BackoffBase
+// when BackoffBase is positive.
+func TestRun_RejectsBackoffMaxBelowBase(t *testing.T) {
+	t.Parallel()
+	err := Run(context.Background(), Options{
+		DataDir:     t.TempDir(),
+		ListenAddr:  "127.0.0.1:0",
+		BackoffBase: 5 * time.Second,
+		BackoffMax:  1 * time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "backoff max") {
+		t.Fatalf("Run err = %v, want backoff-max < base validation error", err)
+	}
+}
+
+// TestRedialMissingPeers_SkipsPeerInBackoff asserts a peer with an
+// active backoff window is skipped (DEBUG-logged) and no dial fires.
+func TestRedialMissingPeers_SkipsPeerInBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	_, dialerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("dialer key: %v", err)
+	}
+	ps := openPickStoragePeerStore(t)
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("peer key: %v", err)
+	}
+	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:1", PubKey: pub, Role: peers.RoleStorage}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now, _ := makeClock(time.Unix(0, 0))
+	bo := newPeerBackoff(time.Second, time.Minute, false, now, func() float64 { return 1 })
+	bo.MarkFailure(pub)
+	prevAttempts := bo.attempts[hex.EncodeToString(pub)]
+
+	dialer := &outboundDialer{
+		ctx:     ctx,
+		priv:    dialerPriv,
+		timeout: 200 * time.Millisecond,
+		st:      st,
+		connSet: swarm.NewConnSet(),
+		reach:   swarm.NewReachabilityMap(),
+		backoff: bo,
+	}
+	t.Cleanup(dialer.CloseAll)
+
+	w := &syncWriter{}
+	captureSlog(t, w)
+
+	redialMissingPeers(ctx, ps, dialer, swarm.NewConnSet())
+
+	got := w.String()
+	if !strings.Contains(got, "redial sweep: skip peer in backoff") {
+		t.Fatalf("expected skip log, got:\n%s", got)
+	}
+	if strings.Contains(got, "redial sweep: dial peer failed") {
+		t.Fatalf("dial must not fire on a peer in backoff, got:\n%s", got)
+	}
+	if got := bo.attempts[hex.EncodeToString(pub)]; got != prevAttempts {
+		t.Fatalf("attempts grew during skip: %d -> %d", prevAttempts, got)
+	}
+}
+
+// TestRedialMissingPeers_FailedDialMarksBackoff asserts a chain failure
+// inside the sweep increments the per-peer attempt count and arms the
+// backoff window.
+func TestRedialMissingPeers_FailedDialMarksBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	_, dialerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("dialer key: %v", err)
+	}
+	ps := openPickStoragePeerStore(t)
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("peer key: %v", err)
+	}
+	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:1", PubKey: pub, Role: peers.RoleStorage}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now, _ := makeClock(time.Unix(0, 0))
+	bo := newPeerBackoff(time.Second, time.Minute, false, now, func() float64 { return 1 })
+
+	dialer := &outboundDialer{
+		ctx:     ctx,
+		priv:    dialerPriv,
+		timeout: 200 * time.Millisecond,
+		st:      st,
+		connSet: swarm.NewConnSet(),
+		reach:   swarm.NewReachabilityMap(),
+		backoff: bo,
+	}
+	t.Cleanup(dialer.CloseAll)
+
+	redialMissingPeers(ctx, ps, dialer, swarm.NewConnSet())
+
+	if got := bo.attempts[hex.EncodeToString(pub)]; got != 1 {
+		t.Fatalf("attempts after failed dial = %d, want 1", got)
+	}
+	if bo.Allow(pub) {
+		t.Fatal("peer must be in backoff after failed dial")
+	}
+}
+
+// TestOutboundDialer_NilBackoffSafe asserts a nil backoff field is a
+// no-op in dial(): no panic, no allocation, sweep still calls dial.
+func TestOutboundDialer_NilBackoffSafe(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	_, dialerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("dialer key: %v", err)
+	}
+	ps := openPickStoragePeerStore(t)
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("peer key: %v", err)
+	}
+	if err := ps.Add(peers.Peer{Addr: "127.0.0.1:1", PubKey: pub, Role: peers.RoleStorage}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	st, err := store.New(filepath.Join(t.TempDir(), "chunks"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	dialer := &outboundDialer{
+		ctx:     ctx,
+		priv:    dialerPriv,
+		timeout: 100 * time.Millisecond,
+		st:      st,
+		connSet: swarm.NewConnSet(),
+		reach:   swarm.NewReachabilityMap(),
+		// backoff intentionally nil
+	}
+	t.Cleanup(dialer.CloseAll)
+
+	redialMissingPeers(ctx, ps, dialer, swarm.NewConnSet())
+}
+
+// TestOutboundDialer_SuccessClearsBackoff asserts a successful chain
+// dial via dialer.dial() resets the per-peer backoff state, so a peer
+// that just recovered is dialable on the next sweep.
+func TestOutboundDialer_SuccessClearsBackoff(t *testing.T) {
+	prevDirect := chainDirectDialFn
+	chainDirectDialFn = func(context.Context, string, ed25519.PrivateKey, ed25519.PublicKey, *bsquic.TrustConfig) (*bsquic.Conn, error) {
+		return &bsquic.Conn{}, nil
+	}
+	t.Cleanup(func() { chainDirectDialFn = prevDirect })
+
+	prevAccept := dialerAcceptStreamsFn
+	dialerAcceptStreamsFn = func(context.Context, *bsquic.Conn, *store.Store, backup.AnnouncementHandler, backup.JoinHandler, backup.PunchHandler, backup.PunchHandler) {
+	}
+	t.Cleanup(func() { dialerAcceptStreamsFn = prevAccept })
+
+	priv := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	now, _ := makeClock(time.Unix(0, 0))
+	bo := newPeerBackoff(time.Second, time.Minute, false, now, func() float64 { return 1 })
+	pub := mustGenPub(t)
+	bo.MarkFailure(pub)
+	if got := bo.attempts[hex.EncodeToString(pub)]; got != 1 {
+		t.Fatalf("seed attempts = %d, want 1", got)
+	}
+
+	d := &outboundDialer{
+		ctx:     context.Background(),
+		priv:    priv,
+		timeout: 100 * time.Millisecond,
+		connSet: swarm.NewConnSet(),
+		reach:   swarm.NewReachabilityMap(),
+		backoff: bo,
+	}
+
+	target := peers.Peer{PubKey: pub, Role: peers.RoleStorage, Addr: "127.0.0.1:1"}
+	if _, err := d.dial(context.Background(), target); err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if got := bo.attempts[hex.EncodeToString(pub)]; got != 0 {
+		t.Fatalf("attempts after success = %d, want 0 (cleared)", got)
+	}
+	if !bo.Allow(pub) {
+		t.Fatal("Allow must return true after MarkSuccess")
+	}
+}
+
+// TestOutboundDialer_FailureMarksBackoff asserts dialer.dial() invokes
+// MarkFailure on chain failure, so the next sweep tick gates the peer.
+func TestOutboundDialer_FailureMarksBackoff(t *testing.T) {
+	prevDirect := chainDirectDialFn
+	chainDirectDialFn = func(context.Context, string, ed25519.PrivateKey, ed25519.PublicKey, *bsquic.TrustConfig) (*bsquic.Conn, error) {
+		return nil, errors.New("direct: stubbed")
+	}
+	t.Cleanup(func() { chainDirectDialFn = prevDirect })
+
+	priv := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	now, _ := makeClock(time.Unix(0, 0))
+	bo := newPeerBackoff(time.Second, time.Minute, false, now, func() float64 { return 1 })
+	pub := mustGenPub(t)
+
+	d := &outboundDialer{
+		ctx:     context.Background(),
+		priv:    priv,
+		timeout: 100 * time.Millisecond,
+		connSet: swarm.NewConnSet(),
+		reach:   swarm.NewReachabilityMap(),
+		backoff: bo,
+	}
+
+	target := peers.Peer{PubKey: pub, Role: peers.RoleStorage, Addr: "127.0.0.1:1"}
+	if _, err := d.dial(context.Background(), target); err == nil {
+		t.Fatal("dial returned nil err; want error from stubbed chain")
+	}
+	if got := bo.attempts[hex.EncodeToString(pub)]; got != 1 {
+		t.Fatalf("attempts after failure = %d, want 1", got)
+	}
+	if bo.Allow(pub) {
+		t.Fatal("peer must be in backoff after failed dial")
 	}
 }
 

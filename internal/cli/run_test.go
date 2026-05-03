@@ -188,6 +188,42 @@ func TestRunCmd_IdleStorageOnly_ExitsOnCancel(t *testing.T) {
 	}
 }
 
+// TestRunCmd_RegistersBackoffFlags asserts the redial-backoff knobs are
+// exposed on `run` with the documented defaults.
+func TestRunCmd_RegistersBackoffFlags(t *testing.T) {
+	root := NewRootCmd()
+	var run *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Name() == "run" {
+			run = c
+			break
+		}
+	}
+	if run == nil {
+		t.Fatal("run subcommand missing")
+	}
+	for _, want := range []struct {
+		name    string
+		defVal  string
+		typeStr string
+	}{
+		{"backoff-base", "1s", "duration"},
+		{"backoff-max", "30m0s", "duration"},
+		{"backoff-jitter", "true", "bool"},
+	} {
+		f := run.Flags().Lookup(want.name)
+		if f == nil {
+			t.Fatalf("run is missing --%s flag", want.name)
+		}
+		if f.DefValue != want.defVal {
+			t.Errorf("--%s default = %q, want %q", want.name, f.DefValue, want.defVal)
+		}
+		if f.Value.Type() != want.typeStr {
+			t.Errorf("--%s type = %q, want %q", want.name, f.Value.Type(), want.typeStr)
+		}
+	}
+}
+
 // TestRunCmd_RegistersMaxStorageFlag asserts the --max-storage flag is
 // exposed on the run subcommand so users can cap the local store.
 func TestRunCmd_RegistersMaxStorageFlag(t *testing.T) {
