@@ -9,14 +9,16 @@ import (
 )
 
 // Stream wraps a QUIC bidirectional stream with optional upload/download
-// rate limiters. nil limiter on either side = pass-through. Embedded
-// *qgo.Stream promotes transport-level methods; Read/Write are overridden.
+// rate limiters and an optional byte meter. nil limiter on either side =
+// pass-through; nil meter = no byte counting. Embedded *qgo.Stream
+// promotes transport-level methods; Read/Write are overridden.
 type Stream struct {
 	*qgo.Stream
-	rwc  io.ReadWriteCloser
-	up   *rate.Limiter
-	down *rate.Limiter
-	ctx  context.Context
+	rwc   io.ReadWriteCloser
+	up    *rate.Limiter
+	down  *rate.Limiter
+	meter ByteMeter
+	ctx   context.Context
 }
 
 // Read reads from the underlying stream, then waits for download tokens
@@ -24,9 +26,14 @@ type Stream struct {
 // canceled error in place of any read-side success.
 func (s *Stream) Read(p []byte) (int, error) {
 	n, err := s.readInner(p)
-	if n > 0 && s.down != nil {
-		if werr := waitTokens(s.streamCtx(), s.down, n); werr != nil {
-			return n, werr
+	if n > 0 {
+		if s.meter != nil {
+			s.meter.AddBytesDown(n)
+		}
+		if s.down != nil {
+			if werr := waitTokens(s.streamCtx(), s.down, n); werr != nil {
+				return n, werr
+			}
 		}
 	}
 	return n, err
@@ -36,11 +43,19 @@ func (s *Stream) Read(p []byte) (int, error) {
 // WaitN never asks for more than the limiter permits.
 func (s *Stream) Write(p []byte) (int, error) {
 	if s.up == nil {
-		return s.writeInner(p)
+		n, err := s.writeInner(p)
+		if n > 0 && s.meter != nil {
+			s.meter.AddBytesUp(n)
+		}
+		return n, err
 	}
 	burst := s.up.Burst()
 	if burst <= 0 {
-		return s.writeInner(p)
+		n, err := s.writeInner(p)
+		if n > 0 && s.meter != nil {
+			s.meter.AddBytesUp(n)
+		}
+		return n, err
 	}
 	ctx := s.streamCtx()
 	off := 0
@@ -54,6 +69,9 @@ func (s *Stream) Write(p []byte) (int, error) {
 		}
 		n, err := s.writeInner(p[off : off+chunk])
 		off += n
+		if n > 0 && s.meter != nil {
+			s.meter.AddBytesUp(n)
+		}
 		if err != nil {
 			return off, err
 		}

@@ -78,6 +78,7 @@ func TestE2E_RestoreIndex_DisasterRecovery(t *testing.T) {
 	aDone := make(chan error, 1)
 	aRunCmd := NewRootCmd()
 	aStdout := &syncBuffer{}
+	redirectSlogTo(t, aStdout)
 	aRunCmd.SetOut(aStdout)
 	aRunCmd.SetErr(io.Discard)
 	aRunCmd.SetArgs([]string{
@@ -93,7 +94,7 @@ func TestE2E_RestoreIndex_DisasterRecovery(t *testing.T) {
 	// Wait for chunk uploads to land at B.
 	waitForBlobs(t, filepath.Join(dataB, "chunks"), expectedBlobs, 20*time.Second)
 	for _, f := range fixtures {
-		waitForSubstring(t, aStdout, "backed up "+f.rel, 20*time.Second)
+		waitForSubstring(t, aStdout, "path="+f.rel, 20*time.Second)
 	}
 	// Wait for the index snapshot file to appear, then for its mtime
 	// to advance past the post-backup wall clock so we know the

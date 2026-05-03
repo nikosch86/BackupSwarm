@@ -6,7 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
-	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,7 +111,6 @@ func (r *restoreRig) backupFile(root, rel string, data []byte) string {
 		RecipientPub: r.recipientPub,
 		Index:        r.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	if err := backup.Run(context.Background(), opts); err != nil {
 		r.t.Fatalf("backup seed: %v", err)
@@ -136,7 +135,6 @@ func TestRun_PreservesModTime(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	}); err != nil {
 		t.Fatalf("restore.Run: %v", err)
 	}
@@ -164,7 +162,6 @@ func TestRun_RestoresSingleFile(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	}
 	if err := restore.Run(context.Background(), opts); err != nil {
 		t.Fatalf("restore.Run: %v", err)
@@ -201,7 +198,6 @@ func TestRun_RestoresDirectoryTree(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	}); err != nil {
 		t.Fatalf("restore.Run: %v", err)
 	}
@@ -240,7 +236,6 @@ func TestRun_RestoreVerifiesPlaintextHash(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	})
 	if err == nil {
 		t.Fatal("restore.Run accepted mismatched PlaintextHash")
@@ -273,7 +268,6 @@ func TestRun_PeerMissingBlob(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	})
 	if err == nil {
 		t.Fatal("restore.Run returned nil despite orphaned chunk")
@@ -290,7 +284,6 @@ func TestRun_EmptyIndex(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	}); err != nil {
 		t.Fatalf("restore.Run on empty index: %v", err)
 	}
@@ -303,33 +296,17 @@ func TestRun_EmptyIndex(t *testing.T) {
 	}
 }
 
-// TestRun_ProgressOutput asserts per-file progress notes reach the writer.
-func TestRun_ProgressOutput(t *testing.T) {
+// TestRun_LogsRestoredFile asserts each restored file emits a slog INFO
+// "restored file" line with the structured key/value attrs.
+func TestRun_LogsRestoredFile(t *testing.T) {
 	rig := newRestoreRig(t)
 	srcRoot := t.TempDir()
 	rig.backupFile(srcRoot, "logged.bin", []byte("logged payload"))
 
-	var out bytes.Buffer
-	if err := restore.Run(context.Background(), restore.Options{
-		Dest:          t.TempDir(),
-		Conns:         []*bsquic.Conn{rig.ownerConn},
-		Index:         rig.ownerIndex,
-		RecipientPub:  rig.recipientPub,
-		RecipientPriv: rig.recipientPriv,
-		Progress:      &out,
-	}); err != nil {
-		t.Fatalf("restore.Run: %v", err)
-	}
-	if !bytes.Contains(out.Bytes(), []byte("restored")) {
-		t.Errorf("progress output = %q, want mention of 'restored'", out.String())
-	}
-}
-
-// TestRun_NilProgress asserts a nil Progress writer doesn't panic.
-func TestRun_NilProgress(t *testing.T) {
-	rig := newRestoreRig(t)
-	srcRoot := t.TempDir()
-	rig.backupFile(srcRoot, "f.bin", []byte("n"))
+	var captured bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&captured, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	if err := restore.Run(context.Background(), restore.Options{
 		Dest:          t.TempDir(),
@@ -339,6 +316,13 @@ func TestRun_NilProgress(t *testing.T) {
 		RecipientPriv: rig.recipientPriv,
 	}); err != nil {
 		t.Fatalf("restore.Run: %v", err)
+	}
+	out := captured.String()
+	if !strings.Contains(out, "restored file") {
+		t.Errorf("slog capture missing 'restored file'; got: %s", out)
+	}
+	if !strings.Contains(out, "path=logged.bin") {
+		t.Errorf("slog capture missing path attr; got: %s", out)
 	}
 }
 
@@ -356,7 +340,6 @@ func TestRun_ContextCancellation(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	})
 	if err == nil {
 		t.Error("restore.Run with pre-cancelled ctx returned nil error")
@@ -372,7 +355,6 @@ func TestRun_RequiresAbsoluteDest(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	})
 	if err == nil {
 		t.Fatal("restore.Run accepted relative Dest")
@@ -391,7 +373,6 @@ func TestRun_IndexListError(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	})
 	if err == nil {
 		t.Fatal("restore.Run returned nil on closed index")
@@ -424,7 +405,6 @@ func TestRun_UnmarshalError(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	})
 	if err == nil {
 		t.Fatal("restore.Run accepted unmarshalable blob")
@@ -451,7 +431,6 @@ func TestRun_DecryptError(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  wrongPub,
 		RecipientPriv: wrongPriv,
-		Progress:      io.Discard,
 	})
 	if err == nil {
 		t.Fatal("restore.Run accepted wrong recipient keys")
@@ -484,7 +463,6 @@ func TestRun_DestCreateError(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	})
 	if err == nil {
 		t.Fatal("restore.Run accepted Dest under read-only parent")
@@ -515,7 +493,6 @@ func TestRun_MkdirError(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	})
 	if err == nil {
 		t.Fatal("restore.Run accepted read-only Dest")
@@ -548,7 +525,6 @@ func TestRun_RefusesSymlinkAtTarget(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	})
 	if err == nil {
 		t.Fatal("restore.Run followed pre-planted symlink")
@@ -572,7 +548,6 @@ func TestRun_NoConns(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	})
 	if err == nil {
 		t.Fatal("restore.Run returned nil with no conns")
@@ -618,7 +593,6 @@ func TestRun_RejectsDotDotInEntryPath(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	})
 	if err == nil {
 		t.Fatal("restore.Run accepted entry.Path with '..' segments")
@@ -669,7 +643,6 @@ func TestRun_RejectsParentSymlinkRedirect(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	})
 	if err == nil {
 		t.Fatal("restore.Run followed parent symlink to write outside Dest")
@@ -715,7 +688,6 @@ func TestRun_RejectsAbsoluteEntryPath(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	})
 	if err == nil {
 		t.Fatal("restore.Run accepted absolute entry.Path")
@@ -743,7 +715,6 @@ func TestRun_GetChunkError(t *testing.T) {
 		Index:         rig.ownerIndex,
 		RecipientPub:  rig.recipientPub,
 		RecipientPriv: rig.recipientPriv,
-		Progress:      io.Discard,
 	})
 	if err == nil {
 		t.Fatal("restore.Run returned nil despite closed conn")

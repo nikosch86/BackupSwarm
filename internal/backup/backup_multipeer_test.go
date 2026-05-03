@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
-	"io"
 	mrand "math/rand/v2"
 	"os"
 	"path/filepath"
@@ -135,7 +134,6 @@ func TestRun_MultiPeer_RedundancyEqualsPoolSize_AllPeersGetChunk(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -170,7 +168,6 @@ func TestRun_MultiPeer_RedundancyOne_OnePeerHoldsChunk(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -202,7 +199,6 @@ func TestRun_MultiPeer_DefaultRedundancyIsOne(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -225,7 +221,6 @@ func TestRun_MultiPeer_RedundancyExceedsPool(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	})
 	if err == nil {
 		t.Fatal("Run with redundancy > peers returned nil")
@@ -256,7 +251,6 @@ func TestRun_MultiPeer_NoConns(t *testing.T) {
 		RecipientPub: rpub,
 		Index:        idx,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	})
 	if err == nil {
 		t.Fatal("Run with no conns returned nil")
@@ -278,7 +272,6 @@ func TestRun_MultiPeer_DistributesAcrossChunks(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 		Rng:          mrand.New(mrand.NewPCG(7, 11)),
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -359,7 +352,6 @@ func TestRun_MultiPeer_FullPeerExcludedFromPlacement(t *testing.T) {
 		RecipientPub: rpub,
 		Index:        idx,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -392,7 +384,6 @@ func TestPrune_MultiPeer_NotFoundCountsAsSuccess(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -407,10 +398,9 @@ func TestPrune_MultiPeer_NotFoundCountsAsSuccess(t *testing.T) {
 		t.Fatalf("rm: %v", err)
 	}
 	if err := backup.Prune(context.Background(), backup.PruneOptions{
-		Root:     root,
-		Conns:    rig.ownerConns,
-		Index:    rig.ownerIndex,
-		Progress: io.Discard,
+		Root:  root,
+		Conns: rig.ownerConns,
+		Index: rig.ownerIndex,
 	}); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -435,7 +425,6 @@ func TestPrune_MultiPeer_NoLiveConnBranchTriggers(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -445,10 +434,9 @@ func TestPrune_MultiPeer_NoLiveConnBranchTriggers(t *testing.T) {
 	// Prune with only peer 0's conn. Chunk on peer 1 has no live conn but
 	// peer 0's delete succeeds → entry removed.
 	if err := backup.Prune(context.Background(), backup.PruneOptions{
-		Root:     root,
-		Conns:    rig.ownerConns[:1],
-		Index:    rig.ownerIndex,
-		Progress: io.Discard,
+		Root:  root,
+		Conns: rig.ownerConns[:1],
+		Index: rig.ownerIndex,
 	}); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -473,7 +461,6 @@ func TestPrune_MultiPeer_AllPeersOffline(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -499,10 +486,9 @@ func TestPrune_MultiPeer_AllPeersOffline(t *testing.T) {
 	t.Cleanup(func() { _ = strangerConn.Close() })
 
 	err = backup.Prune(context.Background(), backup.PruneOptions{
-		Root:     root,
-		Conns:    []*bsquic.Conn{strangerConn},
-		Index:    rig.ownerIndex,
-		Progress: io.Discard,
+		Root:  root,
+		Conns: []*bsquic.Conn{strangerConn},
+		Index: rig.ownerIndex,
 	})
 	if err == nil {
 		t.Fatal("Prune succeeded when no recorded peer had a live conn")
@@ -558,7 +544,6 @@ func TestProbeCandidates_FullPeerSkipped(t *testing.T) {
 		RecipientPub: rpub,
 		Index:        idx,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	})
 	if err == nil {
 		t.Fatal("Run with full-only pool returned nil")
@@ -581,7 +566,6 @@ func TestPrune_MultiPeer_DeletesFromAllPeers(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -592,10 +576,9 @@ func TestPrune_MultiPeer_DeletesFromAllPeers(t *testing.T) {
 		t.Fatalf("rm: %v", err)
 	}
 	if err := backup.Prune(context.Background(), backup.PruneOptions{
-		Root:     root,
-		Conns:    rig.ownerConns,
-		Index:    rig.ownerIndex,
-		Progress: io.Discard,
+		Root:  root,
+		Conns: rig.ownerConns,
+		Index: rig.ownerIndex,
 	}); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}

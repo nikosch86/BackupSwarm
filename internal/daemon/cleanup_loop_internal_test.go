@@ -173,7 +173,7 @@ func TestMakeCleanupFn_NoConnForPub_Skips(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = idx.Close() })
 	cs := swarm.NewConnSet()
-	fn := makeCleanupFn(idx, cs, 1, nil)
+	fn := makeCleanupFn(idx, cs, 1)
 	fn(context.Background(), []byte("absent-pub"))
 }
 
@@ -186,12 +186,8 @@ func TestMakeCleanupFn_DispatchesToReplication(t *testing.T) {
 	conn := newDialConn(t)
 	cs := swarm.NewConnSet()
 	cs.Add(conn)
-	var buf bytes.Buffer
-	fn := makeCleanupFn(idx, cs, 1, &buf)
+	fn := makeCleanupFn(idx, cs, 1)
 	fn(context.Background(), conn.RemotePub())
-	if buf.Len() != 0 {
-		t.Errorf("progress output on empty index = %q, want empty", buf.String())
-	}
 }
 
 func TestMakeCleanupFn_ReplicationFails_LoggedAndReturns(t *testing.T) {
@@ -206,6 +202,6 @@ func TestMakeCleanupFn_ReplicationFails_LoggedAndReturns(t *testing.T) {
 	if err := idx.Close(); err != nil {
 		t.Fatalf("idx.Close: %v", err)
 	}
-	fn := makeCleanupFn(idx, cs, 1, nil)
+	fn := makeCleanupFn(idx, cs, 1)
 	fn(context.Background(), conn.RemotePub())
 }

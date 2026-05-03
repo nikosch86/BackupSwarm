@@ -6,7 +6,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,7 +71,7 @@ func newPartialRig(t *testing.T) *partialRig {
 	}
 	if err := backup.Run(context.Background(), backup.RunOptions{
 		Path: srcRoot, Conns: []*bsquic.Conn{dialA}, Redundancy: 1,
-		RecipientPub: rpub, Index: idx, ChunkSize: 1 << 20, Progress: io.Discard,
+		RecipientPub: rpub, Index: idx, ChunkSize: 1 << 20,
 	}); err != nil {
 		t.Fatalf("backup A: %v", err)
 	}
@@ -86,7 +85,7 @@ func newPartialRig(t *testing.T) *partialRig {
 	}
 	if err := backup.Run(context.Background(), backup.RunOptions{
 		Path: srcRoot, Conns: []*bsquic.Conn{dialB}, Redundancy: 1,
-		RecipientPub: rpub, Index: idx, ChunkSize: 1 << 20, Progress: io.Discard,
+		RecipientPub: rpub, Index: idx, ChunkSize: 1 << 20,
 	}); err != nil {
 		t.Fatalf("backup B: %v", err)
 	}
@@ -131,7 +130,6 @@ func TestRun_PartialAvailability_RestoresAvailable_DefersMissing(t *testing.T) {
 		Index:         rig.idx,
 		RecipientPub:  rig.rpub,
 		RecipientPriv: rig.rpriv,
-		Progress:      io.Discard,
 	})
 	if err == nil {
 		t.Fatal("Run returned nil with peerB unreachable")
@@ -177,7 +175,6 @@ func TestRun_PartialAvailability_NoPartialFileLeftBehind(t *testing.T) {
 		Index:         rig.idx,
 		RecipientPub:  rig.rpub,
 		RecipientPriv: rig.rpriv,
-		Progress:      io.Discard,
 	})
 	// no .partial under dest for any rel
 	walked := false
@@ -217,7 +214,6 @@ func TestRun_PartialAvailability_RetryRecoversWithRedial(t *testing.T) {
 		Index:         rig.idx,
 		RecipientPub:  rig.rpub,
 		RecipientPriv: rig.rpriv,
-		Progress:      io.Discard,
 		RetryTimeout:  3 * time.Second,
 		RetryBackoff:  10 * time.Millisecond,
 		Redial:        redial,
@@ -260,7 +256,6 @@ func TestRun_PartialAvailability_TimeoutSurfacesMissingPeersError(t *testing.T) 
 		Index:         rig.idx,
 		RecipientPub:  rig.rpub,
 		RecipientPriv: rig.rpriv,
-		Progress:      io.Discard,
 		RetryTimeout:  150 * time.Millisecond,
 		RetryBackoff:  10 * time.Millisecond,
 		Redial:        redial,
@@ -302,7 +297,6 @@ func TestRun_PartialAvailability_ContextCancellationDuringRetry(t *testing.T) {
 		Index:         rig.idx,
 		RecipientPub:  rig.rpub,
 		RecipientPriv: rig.rpriv,
-		Progress:      io.Discard,
 		RetryTimeout:  10 * time.Second,
 		RetryBackoff:  500 * time.Millisecond,
 		Redial:        redial,
@@ -345,7 +339,6 @@ func TestRun_PartialAvailability_FatalErrorShortCircuits(t *testing.T) {
 		Index:         rig.idx,
 		RecipientPub:  rig.rpub,
 		RecipientPriv: rig.rpriv,
-		Progress:      io.Discard,
 		RetryTimeout:  500 * time.Millisecond,
 		RetryBackoff:  10 * time.Millisecond,
 		Redial: func(ctx context.Context) ([]*bsquic.Conn, error) {

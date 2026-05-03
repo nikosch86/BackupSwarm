@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
-	"io"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -36,7 +35,6 @@ func startStorageDaemon(t *testing.T, dataDir string) (addr string, stop func())
 		done <- daemon.Run(ctx, daemon.Options{
 			DataDir:    dataDir,
 			ListenAddr: "127.0.0.1:0",
-			Progress:   io.Discard,
 		})
 	}()
 

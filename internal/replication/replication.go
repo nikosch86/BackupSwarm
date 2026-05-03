@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	mrand "math/rand/v2"
 	"time"
@@ -92,8 +91,6 @@ type RunOptions struct {
 	Redundancy int
 	// Rng is the random source for new-target selection.
 	Rng placement.Rng
-	// Progress receives a per-task line on successful repair.
-	Progress io.Writer
 }
 
 // Test seams.
@@ -123,9 +120,6 @@ type repCandidate struct {
 
 // Run executes one re-replication sweep.
 func Run(ctx context.Context, opts RunOptions) error {
-	if opts.Progress == nil {
-		opts.Progress = io.Discard
-	}
 	if opts.Redundancy <= 0 {
 		return nil
 	}
@@ -202,7 +196,11 @@ func executeTask(ctx context.Context, task Task, opts RunOptions, connByPub map[
 			"err", err)
 		return
 	}
-	fmt.Fprintf(opts.Progress, "replicated %s chunk %d to %d new peer(s)\n", task.EntryPath, task.ChunkIndex, len(newPeers))
+	slog.InfoContext(ctx, "replicated chunk",
+		"path", task.EntryPath,
+		"chunk", task.ChunkIndex,
+		"new_peers", len(newPeers),
+	)
 }
 
 // pickSource returns the first conn matching one of sources, or nil.

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -50,7 +49,6 @@ func TestRun_ScrubLoopRemovesCorruptBlob(t *testing.T) {
 			ListenAddr:    "127.0.0.1:0",
 			ChunkSize:     1 << 20,
 			ScrubInterval: 50 * time.Millisecond,
-			Progress:      io.Discard,
 		})
 	}()
 

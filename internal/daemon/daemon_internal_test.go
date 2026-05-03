@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,15 +42,14 @@ func mustGenPub(t *testing.T) ed25519.PublicKey {
 	return pub
 }
 
-// TestWarnIfOverCap_OverCapEmitsSlogAndProgress: when used > capacity,
-// the helper writes both an slog warning and a human-readable progress
-// line so an operator notices the cap is below current on-disk usage.
-func TestWarnIfOverCap_OverCapEmitsSlogAndProgress(t *testing.T) {
+// TestWarnIfOverCap_OverCapEmitsSlog: when used > capacity, the helper
+// emits a structured slog WARN with used/max/over-by attrs so an
+// operator notices the cap is below current on-disk usage.
+func TestWarnIfOverCap_OverCapEmitsSlog(t *testing.T) {
 	w := &syncWriter{}
 	captureSlog(t, w)
 
-	var progress strings.Builder
-	warnIfOverCap(context.Background(), 200, 100, &progress)
+	warnIfOverCap(context.Background(), 200, 100)
 
 	logged := w.String()
 	if !strings.Contains(logged, "stored bytes exceed configured max-storage") {
@@ -59,9 +57,6 @@ func TestWarnIfOverCap_OverCapEmitsSlogAndProgress(t *testing.T) {
 	}
 	if !strings.Contains(logged, "used_bytes=200") || !strings.Contains(logged, "max_bytes=100") || !strings.Contains(logged, "over_by_bytes=100") {
 		t.Errorf("slog output missing structured fields: %q", logged)
-	}
-	if !strings.Contains(progress.String(), "exceeds --max-storage") {
-		t.Errorf("progress output missing warning: %q", progress.String())
 	}
 }
 
@@ -81,13 +76,9 @@ func TestWarnIfOverCap_UnderCapSilent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &syncWriter{}
 			captureSlog(t, w)
-			var progress strings.Builder
-			warnIfOverCap(context.Background(), tc.used, tc.capacity, &progress)
+			warnIfOverCap(context.Background(), tc.used, tc.capacity)
 			if got := w.String(); got != "" {
 				t.Errorf("slog wrote %q, want empty", got)
-			}
-			if got := progress.String(); got != "" {
-				t.Errorf("progress wrote %q, want empty", got)
 			}
 		})
 	}
@@ -552,7 +543,7 @@ func TestPurgeAll_ListFailure(t *testing.T) {
 		t.Fatalf("index.Close: %v", err)
 	}
 
-	err = purgeAll(context.Background(), idx, nil, io.Discard)
+	err = purgeAll(context.Background(), idx, nil)
 	if err == nil {
 		t.Fatal("purgeAll returned nil on closed index")
 	}
@@ -582,7 +573,7 @@ func TestPurgeAll_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err = purgeAll(ctx, idx, nil, io.Discard)
+	err = purgeAll(ctx, idx, nil)
 	if err == nil {
 		t.Fatal("purgeAll returned nil despite cancelled context")
 	}
@@ -641,7 +632,7 @@ func TestPurgeAll_PruneFailurePropagates(t *testing.T) {
 		t.Fatalf("seed index: %v", err)
 	}
 
-	err = purgeAll(context.Background(), idx, []*bsquic.Conn{conn}, io.Discard)
+	err = purgeAll(context.Background(), idx, []*bsquic.Conn{conn})
 	if err == nil {
 		t.Fatal("purgeAll returned nil despite closed conn")
 	}
@@ -792,7 +783,6 @@ func TestRun_FounderWithBackupDir_EntersScanLoop(t *testing.T) {
 			ListenAddr:   "127.0.0.1:0",
 			ChunkSize:    1 << 20,
 			ScanInterval: 50 * time.Millisecond,
-			Progress:     io.Discard,
 		})
 	}()
 
@@ -898,7 +888,6 @@ func TestRun_STUNServerSpawnsLoopWithAdvertiseAddrPort(t *testing.T) {
 			AdvertiseAddr:      "203.0.113.99:7777",
 			STUNServer:         "stun.example:3478",
 			NATRefreshInterval: 50 * time.Millisecond,
-			Progress:           io.Discard,
 		})
 	}()
 	deadline := time.Now().Add(2 * time.Second)
@@ -936,7 +925,6 @@ func TestRun_STUNServerFallsBackToListenAddrWhenAdvertiseEmpty(t *testing.T) {
 			ListenAddr:         "127.0.0.1:0",
 			STUNServer:         "stun.example:3478",
 			NATRefreshInterval: 50 * time.Millisecond,
-			Progress:           io.Discard,
 		})
 	}()
 	time.Sleep(150 * time.Millisecond)

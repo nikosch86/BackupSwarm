@@ -27,3 +27,10 @@ func NewStreamForTest(rwc io.ReadWriteCloser, up, down *rate.Limiter) *Stream {
 func NewStreamForTestWithContext(rwc io.ReadWriteCloser, up, down *rate.Limiter, ctx context.Context) *Stream {
 	return &Stream{rwc: rwc, up: up, down: down, ctx: ctx}
 }
+
+// NewStreamForTestWithMeter is NewStreamForTest with an additional
+// optional ByteMeter. Test-only; production paths install the meter via
+// a *Conn's Limiters.
+func NewStreamForTestWithMeter(rwc io.ReadWriteCloser, up, down *rate.Limiter, meter ByteMeter) *Stream {
+	return &Stream{rwc: rwc, up: up, down: down, meter: meter}
+}

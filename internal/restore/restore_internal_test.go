@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,7 +131,6 @@ func seedRig(t *testing.T) Options {
 		RecipientPub: recipientPub,
 		Index:        idx,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}); err != nil {
 		t.Fatalf("backup.Run: %v", err)
 	}
@@ -142,7 +140,6 @@ func seedRig(t *testing.T) Options {
 		Index:         idx,
 		RecipientPub:  recipientPub,
 		RecipientPriv: recipientPriv,
-		Progress:      io.Discard,
 	}
 }
 

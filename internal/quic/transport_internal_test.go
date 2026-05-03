@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"testing/iotest"
 )
@@ -182,5 +183,99 @@ func TestVerifyChain_BadIntermediateDER(t *testing.T) {
 	err = verifyChain(rawCerts, pool)
 	if err == nil {
 		t.Fatal("expected verifyChain to fail on garbage intermediate DER")
+	}
+}
+
+// TestListener_DialPeer_InvalidTrust asserts a half-populated TrustConfig
+// is rejected with ErrInvalidTrustConfig before any network work.
+func TestListener_DialPeer_InvalidTrust(t *testing.T) {
+	t.Parallel()
+	priv := newTestKey(t)
+	pub := priv.Public().(ed25519.PublicKey)
+
+	l, err := Listen("127.0.0.1:0", priv, nil, nil)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err = l.DialPeer(ctx, "127.0.0.1:1", priv, pub, &TrustConfig{})
+	if !errors.Is(err, ErrInvalidTrustConfig) {
+		t.Fatalf("err = %v, want ErrInvalidTrustConfig", err)
+	}
+}
+
+// TestListener_DialPeer_BadAddr asserts an unparseable addr surfaces a
+// resolve-udp wrapped error before quic-go is engaged.
+func TestListener_DialPeer_BadAddr(t *testing.T) {
+	t.Parallel()
+	priv := newTestKey(t)
+	pub := priv.Public().(ed25519.PublicKey)
+
+	l, err := Listen("127.0.0.1:0", priv, nil, nil)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err = l.DialPeer(ctx, "not-a-valid-addr", priv, pub, nil)
+	if err == nil {
+		t.Fatal("DialPeer succeeded on malformed addr")
+	}
+	if !strings.Contains(err.Error(), "resolve udp") {
+		t.Errorf("err = %q, want 'resolve udp' substring", err)
+	}
+}
+
+// TestListener_DialPeer_CertBuildFailure asserts a failing rand source
+// surfaces a "build client cert" wrapped error from DialPeer.
+func TestListener_DialPeer_CertBuildFailure(t *testing.T) {
+	priv := newTestKey(t)
+	pub := priv.Public().(ed25519.PublicKey)
+
+	l, err := Listen("127.0.0.1:0", priv, nil, nil)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	withRandReader(t, iotest.ErrReader(errors.New("forced rng failure")))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err = l.DialPeer(ctx, "127.0.0.1:1", priv, pub, nil)
+	if err == nil {
+		t.Fatal("DialPeer succeeded with broken rand source")
+	}
+	if !strings.Contains(err.Error(), "build client cert") {
+		t.Errorf("err = %q, want 'build client cert' substring", err)
+	}
+}
+
+// TestListener_DialPeer_QUICDialFailure asserts an immediately-cancelled
+// context surfaces a "quic dial" wrapped error after addr resolution.
+func TestListener_DialPeer_QUICDialFailure(t *testing.T) {
+	t.Parallel()
+	priv := newTestKey(t)
+	pub := priv.Public().(ed25519.PublicKey)
+
+	l, err := Listen("127.0.0.1:0", priv, nil, nil)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = l.DialPeer(ctx, "127.0.0.1:1", priv, pub, nil)
+	if err == nil {
+		t.Fatal("DialPeer succeeded with cancelled context")
+	}
+	if !strings.Contains(err.Error(), "quic dial") {
+		t.Errorf("err = %q, want 'quic dial' substring", err)
 	}
 }

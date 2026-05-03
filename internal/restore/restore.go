@@ -9,7 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -126,8 +126,6 @@ type Options struct {
 	Index *index.Index
 	// RecipientPub and RecipientPriv are the X25519 keypair used at backup.
 	RecipientPub, RecipientPriv *[crypto.RecipientKeySize]byte
-	// Progress receives per-file progress lines. nil is treated as io.Discard.
-	Progress io.Writer
 	// RetryTimeout is the upper bound spent retrying files whose chunks
 	// were unreachable on the first pass. Zero disables retries entirely
 	// (any deferred file surfaces as *MissingPeersError immediately).
@@ -169,9 +167,6 @@ type pendingFile struct {
 // cannot be fetched are deferred and retried up to opts.RetryTimeout;
 // any remaining unrestored files surface as *MissingPeersError.
 func Run(ctx context.Context, opts Options) error {
-	if opts.Progress == nil {
-		opts.Progress = io.Discard
-	}
 	if !filepath.IsAbs(opts.Dest) {
 		return fmt.Errorf("dest %q is not absolute", opts.Dest)
 	}
@@ -397,7 +392,10 @@ func restoreFile(
 	if cerr := chtimesInRootFunc(root, rel, entry.ModTime, entry.ModTime); cerr != nil {
 		return nil, fmt.Errorf("chtimes: %w", cerr)
 	}
-	fmt.Fprintf(opts.Progress, "restored %s (%d chunks)\n", entry.Path, len(entry.Chunks))
+	slog.InfoContext(ctx, "restored file",
+		"path", entry.Path,
+		"chunks", len(entry.Chunks),
+	)
 	return nil, nil
 }
 

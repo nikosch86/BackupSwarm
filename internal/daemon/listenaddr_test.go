@@ -3,7 +3,6 @@ package daemon_test
 import (
 	"context"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,7 +64,6 @@ func TestDaemon_PublishesAndRemovesListenAddr(t *testing.T) {
 		done <- daemon.Run(ctx, daemon.Options{
 			DataDir:    dataDir,
 			ListenAddr: "127.0.0.1:0",
-			Progress:   io.Discard,
 		})
 	}()
 

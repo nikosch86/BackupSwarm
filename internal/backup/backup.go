@@ -56,18 +56,17 @@ type RunOptions struct {
 	// ChunkSize is the target chunk size; must fall within
 	// [chunk.MinChunkSize, chunk.MaxChunkSize].
 	ChunkSize int
-	// Progress receives per-file progress lines; nil = io.Discard.
-	Progress io.Writer
 	// Rng is the random source for placement; nil seeds a PCG from the clock.
 	Rng placement.Rng
+	// OnFileBackedUp, when non-nil, fires once per file whose chunks are
+	// placed and index entry persists. Implementations must be safe for
+	// concurrent use.
+	OnFileBackedUp func()
 }
 
 // Run backs up every regular file under opts.Path across opts.Conns.
-// Symlinks and special files are skipped with a progress note.
+// Symlinks and special files are skipped with a slog warning.
 func Run(ctx context.Context, opts RunOptions) error {
-	if opts.Progress == nil {
-		opts.Progress = io.Discard
-	}
 	if opts.Redundancy <= 0 {
 		opts.Redundancy = 1
 	}
@@ -106,7 +105,10 @@ func Run(ctx context.Context, opts RunOptions) error {
 			return nil
 		}
 		if !d.Type().IsRegular() {
-			fmt.Fprintf(opts.Progress, "skip non-regular file %s\n", path)
+			slog.WarnContext(ctx, "skipping non-regular file",
+				"path", path,
+				"mode", d.Type().String(),
+			)
 			return nil
 		}
 		rel, err := filepath.Rel(opts.Path, path)
@@ -137,7 +139,10 @@ func backupFile(ctx context.Context, opts RunOptions, path, rel string, candidat
 
 	if existing, err := opts.Index.Get(rel); err == nil {
 		if existing.Size == info.Size() && existing.ModTime.Equal(info.ModTime()) {
-			fmt.Fprintf(opts.Progress, "unchanged %s\n", rel)
+			slog.DebugContext(ctx, "file unchanged; skipping re-encryption",
+				"path", rel,
+				"bytes", info.Size(),
+			)
 			return nil
 		}
 	} else if !errors.Is(err, index.ErrFileNotFound) {
@@ -181,7 +186,14 @@ func backupFile(ctx context.Context, opts RunOptions, path, rel string, candidat
 	if err := indexPutFunc(opts.Index, entry); err != nil {
 		return fmt.Errorf("index put %q: %w", rel, err)
 	}
-	fmt.Fprintf(opts.Progress, "backed up %s (%d chunks)\n", rel, len(chunks))
+	if opts.OnFileBackedUp != nil {
+		opts.OnFileBackedUp()
+	}
+	slog.InfoContext(ctx, "backed up file",
+		"path", rel,
+		"chunks", len(chunks),
+		"bytes", info.Size(),
+	)
 	return nil
 }
 
@@ -270,17 +282,12 @@ type PruneOptions struct {
 	Conns []*bsquic.Conn
 	// Index is the local bbolt index.
 	Index *index.Index
-	// Progress receives per-entry lines; nil = io.Discard.
-	Progress io.Writer
 }
 
 // Prune sends DeleteChunk for every index entry under Root whose file is
 // gone from disk, then removes the entry. A "not_found" peer reply counts
 // as success. Entries are kept when no peer accepted the delete.
 func Prune(ctx context.Context, opts PruneOptions) error {
-	if opts.Progress == nil {
-		opts.Progress = io.Discard
-	}
 	if len(opts.Conns) == 0 {
 		return errors.New("prune: no peer conns provided")
 	}
@@ -319,7 +326,10 @@ func Prune(ctx context.Context, opts PruneOptions) error {
 		if err := indexDeleteFunc(opts.Index, entry.Path); err != nil {
 			return fmt.Errorf("index delete %q: %w", entry.Path, err)
 		}
-		fmt.Fprintf(opts.Progress, "pruned %s (%d chunks)\n", entry.Path, len(entry.Chunks))
+		slog.InfoContext(ctx, "pruned vanished file",
+			"path", entry.Path,
+			"chunks", len(entry.Chunks),
+		)
 	}
 	return nil
 }

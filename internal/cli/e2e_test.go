@@ -5,12 +5,24 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+// redirectSlogTo replaces the default slog handler with a TextHandler
+// writing to w for the duration of t. Used by e2e tests that need to
+// assert on the log output now that per-file events are slog calls
+// instead of fmt.Fprintf to opts.Progress.
+func redirectSlogTo(t *testing.T, w io.Writer) {
+	t.Helper()
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+}
 
 // TestE2E_BackupAndRestoreRoundTrip drives two in-process nodes through invite, join, backup, and restore and compares the final tree byte-for-byte.
 func TestE2E_BackupAndRestoreRoundTrip(t *testing.T) {
@@ -79,6 +91,7 @@ func TestE2E_BackupAndRestoreRoundTrip(t *testing.T) {
 	aDone := make(chan error, 1)
 	aRunCmd := NewRootCmd()
 	aStdout := &syncBuffer{}
+	redirectSlogTo(t, aStdout)
 	aRunCmd.SetOut(aStdout)
 	aRunCmd.SetErr(io.Discard)
 	aRunCmd.SetArgs([]string{
@@ -92,7 +105,7 @@ func TestE2E_BackupAndRestoreRoundTrip(t *testing.T) {
 
 	waitForBlobs(t, filepath.Join(dataB, "chunks"), expectedBlobs, 20*time.Second)
 	for _, f := range fixtures {
-		line := "backed up " + f.rel
+		line := "path=" + f.rel
 		waitForSubstring(t, aStdout, line, 20*time.Second)
 	}
 
@@ -174,6 +187,7 @@ func TestE2E_ThenRunFlags_BackupAndRestoreRoundTrip(t *testing.T) {
 	aDone := make(chan error, 1)
 	aCmd := NewRootCmd()
 	aStdout := &syncBuffer{}
+	redirectSlogTo(t, aStdout)
 	aCmd.SetOut(aStdout)
 	aCmd.SetErr(io.Discard)
 	aCmd.SetArgs([]string{
@@ -190,7 +204,7 @@ func TestE2E_ThenRunFlags_BackupAndRestoreRoundTrip(t *testing.T) {
 
 	waitForBlobs(t, filepath.Join(dataB, "chunks"), expectedBlobs, 20*time.Second)
 	for _, f := range fixtures {
-		waitForSubstring(t, aStdout, "backed up "+f.rel, 20*time.Second)
+		waitForSubstring(t, aStdout, "path="+f.rel, 20*time.Second)
 	}
 
 	cancelA()

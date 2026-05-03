@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"path/filepath"
 	"testing"
@@ -19,20 +18,12 @@ func TestReplicateOnce_RedundancyZero_NoOp(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = idx.Close() })
 	reach := swarm.NewReachabilityMapWithGrace(3, time.Hour, nil)
-	var buf bytes.Buffer
-	replicateOnce(context.Background(), idx, nil, reach, 0, &buf)
-	if buf.Len() != 0 {
-		t.Errorf("redundancy=0 wrote progress: %q", buf.String())
-	}
+	replicateOnce(context.Background(), idx, nil, reach, 0)
 }
 
 func TestReplicateOnce_NilIndex_NoOp(t *testing.T) {
 	reach := swarm.NewReachabilityMapWithGrace(3, time.Hour, nil)
-	var buf bytes.Buffer
-	replicateOnce(context.Background(), nil, nil, reach, 2, &buf)
-	if buf.Len() != 0 {
-		t.Errorf("nil idx wrote progress: %q", buf.String())
-	}
+	replicateOnce(context.Background(), nil, nil, reach, 2)
 }
 
 func TestReplicateOnce_NilReach_NoOp(t *testing.T) {
@@ -41,25 +32,17 @@ func TestReplicateOnce_NilReach_NoOp(t *testing.T) {
 		t.Fatalf("index.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = idx.Close() })
-	var buf bytes.Buffer
-	replicateOnce(context.Background(), idx, nil, nil, 2, &buf)
-	if buf.Len() != 0 {
-		t.Errorf("nil reach wrote progress: %q", buf.String())
-	}
+	replicateOnce(context.Background(), idx, nil, nil, 2)
 }
 
-func TestReplicateOnce_EmptyIndex_NoProgress(t *testing.T) {
+func TestReplicateOnce_EmptyIndex_NoOp(t *testing.T) {
 	idx, err := index.Open(filepath.Join(t.TempDir(), "index.db"))
 	if err != nil {
 		t.Fatalf("index.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = idx.Close() })
 	reach := swarm.NewReachabilityMapWithGrace(3, time.Hour, nil)
-	var buf bytes.Buffer
-	replicateOnce(context.Background(), idx, nil, reach, 2, &buf)
-	if buf.Len() != 0 {
-		t.Errorf("empty index wrote progress: %q", buf.String())
-	}
+	replicateOnce(context.Background(), idx, nil, reach, 2)
 }
 
 func TestReplicateOnce_ClosedIndex_LogsAndReturns(t *testing.T) {
@@ -71,11 +54,7 @@ func TestReplicateOnce_ClosedIndex_LogsAndReturns(t *testing.T) {
 		t.Fatalf("idx.Close: %v", err)
 	}
 	reach := swarm.NewReachabilityMapWithGrace(3, time.Hour, nil)
-	var buf bytes.Buffer
-	replicateOnce(context.Background(), idx, nil, reach, 2, &buf)
-	if buf.Len() != 0 {
-		t.Errorf("closed index wrote progress: %q", buf.String())
-	}
+	replicateOnce(context.Background(), idx, nil, reach, 2)
 }
 
 func TestToReplicationConns(t *testing.T) {

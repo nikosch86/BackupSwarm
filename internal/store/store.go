@@ -73,6 +73,7 @@ type Store struct {
 	noStorage bool
 	chunkTTL  time.Duration
 	now       func() time.Time
+	onPut     func(bytes int)
 
 	// owners is lazily opened on first owner-tracking call.
 	ownersMu sync.Mutex
@@ -97,6 +98,10 @@ type Options struct {
 	ChunkTTL time.Duration
 	// Now is the clock used for expiry stamping; nil defaults to time.Now.
 	Now func() time.Time
+	// OnPut, when non-nil, is invoked after every successful Put/PutOwned
+	// with the byte count that landed. Implementations must be safe for
+	// concurrent use.
+	OnPut func(bytes int)
 }
 
 // New opens (or initializes) a store rooted at dir with default options.
@@ -137,6 +142,7 @@ func NewWithOptions(dir string, opts Options) (*Store, error) {
 		noStorage: opts.NoStorage,
 		chunkTTL:  opts.ChunkTTL,
 		now:       now,
+		onPut:     opts.OnPut,
 		used:      used,
 	}, nil
 }
@@ -169,6 +175,9 @@ func (s *Store) Put(data []byte) ([sha256.Size]byte, error) {
 		return hash, err
 	}
 	committed = true
+	if s.onPut != nil {
+		s.onPut(len(data))
+	}
 	return hash, nil
 }
 
@@ -192,6 +201,9 @@ func (s *Store) PutOwned(data, owner []byte) ([sha256.Size]byte, error) {
 		return hash, err
 	}
 	committed = true
+	if s.onPut != nil {
+		s.onPut(len(data))
+	}
 	return hash, nil
 }
 

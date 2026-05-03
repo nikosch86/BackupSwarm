@@ -8,9 +8,11 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -133,7 +135,6 @@ func TestScanOnce_BackupAndPrune(t *testing.T) {
 		Index:        rig.ownerIndex,
 		RecipientPub: rig.recipientPub,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	if err := daemon.ScanOnce(context.Background(), opts); err != nil {
 		t.Fatalf("ScanOnce #1: %v", err)
@@ -146,8 +147,11 @@ func TestScanOnce_BackupAndPrune(t *testing.T) {
 	if err := os.Remove(goner); err != nil {
 		t.Fatalf("rm goner: %v", err)
 	}
-	var progress bytes.Buffer
-	opts.Progress = &progress
+	var captured bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&captured, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
 	if err := daemon.ScanOnce(context.Background(), opts); err != nil {
 		t.Fatalf("ScanOnce #2: %v", err)
 	}
@@ -166,8 +170,8 @@ func TestScanOnce_BackupAndPrune(t *testing.T) {
 			t.Error("peer still holds blob for pruned file")
 		}
 	}
-	if !bytes.Contains(progress.Bytes(), []byte("pruned")) {
-		t.Errorf("expected 'pruned' progress note, got %q", progress.String())
+	if !strings.Contains(captured.String(), "pruned vanished file") {
+		t.Errorf("expected 'pruned vanished file' slog note, got %q", captured.String())
 	}
 }
 
@@ -199,7 +203,6 @@ func TestScanOnce_BackupFailurePropagates(t *testing.T) {
 		Index:        rig.ownerIndex,
 		RecipientPub: rig.recipientPub,
 		ChunkSize:    1,
-		Progress:     io.Discard,
 	}
 	err := daemon.ScanOnce(context.Background(), opts)
 	if err == nil {
@@ -226,7 +229,6 @@ func TestScanOnce_PruneFailurePropagates(t *testing.T) {
 		Index:        rig.ownerIndex,
 		RecipientPub: rig.recipientPub,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	err := daemon.ScanOnce(context.Background(), opts)
 	if err == nil {
@@ -278,7 +280,6 @@ func TestRun_RejectsNegativeGracePeriod(t *testing.T) {
 		ListenAddr:  "127.0.0.1:0",
 		ChunkSize:   1 << 20,
 		GracePeriod: -1 * time.Second,
-		Progress:    io.Discard,
 	})
 	if err == nil {
 		t.Fatal("Run accepted negative GracePeriod")
@@ -298,7 +299,6 @@ func TestRun_IdleStorageOnlyExitsOnContextCancel(t *testing.T) {
 			BackupDir:  backupDir,
 			ListenAddr: "127.0.0.1:0",
 			ChunkSize:  1 << 20,
-			Progress:   io.Discard,
 		})
 	}()
 
@@ -381,7 +381,6 @@ func TestRun_WithPeer_FirstBackupShipsChunks(t *testing.T) {
 			ListenAddr:   "127.0.0.1:0",
 			ChunkSize:    1 << 20,
 			ScanInterval: 50 * time.Millisecond,
-			Progress:     io.Discard,
 		})
 	}()
 
@@ -445,7 +444,6 @@ func TestRun_RestoreMode(t *testing.T) {
 			ListenAddr:   "127.0.0.1:0",
 			ChunkSize:    1 << 20,
 			ScanInterval: 50 * time.Millisecond,
-			Progress:     io.Discard,
 		})
 	}()
 	deadline := time.Now().Add(3 * time.Second)
@@ -473,7 +471,6 @@ func TestRun_RestoreMode(t *testing.T) {
 			ChunkSize:    1 << 20,
 			ScanInterval: 50 * time.Millisecond,
 			Restore:      true,
-			Progress:     io.Discard,
 		})
 	}()
 	deadline = time.Now().Add(3 * time.Second)
@@ -529,7 +526,6 @@ func TestRun_PurgeMode(t *testing.T) {
 			ListenAddr:   "127.0.0.1:0",
 			ChunkSize:    1 << 20,
 			ScanInterval: 50 * time.Millisecond,
-			Progress:     io.Discard,
 		})
 	}()
 	deadline := time.Now().Add(3 * time.Second)
@@ -557,7 +553,6 @@ func TestRun_PurgeMode(t *testing.T) {
 			ChunkSize:    1 << 20,
 			ScanInterval: 50 * time.Millisecond,
 			Purge:        true,
-			Progress:     io.Discard,
 		})
 	}()
 	time.Sleep(500 * time.Millisecond)
@@ -610,7 +605,6 @@ func TestRun_ModeTransitionsToReconcileAfterRestore(t *testing.T) {
 			ListenAddr:   "127.0.0.1:0",
 			ChunkSize:    1 << 20,
 			ScanInterval: 50 * time.Millisecond,
-			Progress:     io.Discard,
 		})
 	}()
 	deadline := time.Now().Add(3 * time.Second)
@@ -637,7 +631,6 @@ func TestRun_ModeTransitionsToReconcileAfterRestore(t *testing.T) {
 			ChunkSize:    1 << 20,
 			ScanInterval: 50 * time.Millisecond,
 			Restore:      true,
-			Progress:     io.Discard,
 		})
 	}()
 	defer func() {
@@ -689,7 +682,6 @@ func TestRun_ModeTransitionsToIdleAfterPurge(t *testing.T) {
 			ListenAddr:   "127.0.0.1:0",
 			ChunkSize:    1 << 20,
 			ScanInterval: 50 * time.Millisecond,
-			Progress:     io.Discard,
 		})
 	}()
 	deadline := time.Now().Add(3 * time.Second)
@@ -716,7 +708,6 @@ func TestRun_ModeTransitionsToIdleAfterPurge(t *testing.T) {
 			ChunkSize:    1 << 20,
 			ScanInterval: 50 * time.Millisecond,
 			Purge:        true,
-			Progress:     io.Discard,
 		})
 	}()
 	defer func() {
@@ -764,7 +755,6 @@ func TestRun_DialFailure(t *testing.T) {
 		ListenAddr:  "127.0.0.1:0",
 		ChunkSize:   1 << 20,
 		DialTimeout: 200 * time.Millisecond,
-		Progress:    io.Discard,
 	})
 	if err == nil {
 		t.Fatal("Run accepted unreachable peer")
@@ -795,7 +785,6 @@ func TestRun_DialsAllKnownPeers(t *testing.T) {
 			ListenAddr:   "127.0.0.1:0",
 			ChunkSize:    1 << 20,
 			ScanInterval: 50 * time.Millisecond,
-			Progress:     io.Discard,
 		})
 	}()
 
@@ -856,7 +845,6 @@ func TestRun_BestEffortDial_OnePeerOffline(t *testing.T) {
 			ChunkSize:    1 << 20,
 			DialTimeout:  500 * time.Millisecond,
 			ScanInterval: 50 * time.Millisecond,
-			Progress:     io.Discard,
 		})
 	}()
 
@@ -915,7 +903,6 @@ func TestRun_StorageOnly_NoBackupDir(t *testing.T) {
 			DataDir:    dataDir,
 			ListenAddr: listenAddr,
 			ChunkSize:  1 << 20,
-			Progress:   io.Discard,
 		})
 	}()
 	time.Sleep(200 * time.Millisecond)
@@ -953,7 +940,6 @@ func TestRun_StorageOnly_NoBackupDir(t *testing.T) {
 		RecipientPub: recipientPub,
 		Index:        ownerIdx,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}); err != nil {
 		cancel()
 		t.Fatalf("backup.Run against storage-only daemon: %v", err)
@@ -1000,7 +986,6 @@ func TestRun_RejectsUnknownPeerAtHandshake(t *testing.T) {
 			DataDir:    dataDir,
 			ListenAddr: listenAddr,
 			ChunkSize:  1 << 20,
-			Progress:   io.Discard,
 		})
 	}()
 	time.Sleep(200 * time.Millisecond)
@@ -1050,7 +1035,6 @@ func TestRun_IgnoresPeersWithEmptyAddr(t *testing.T) {
 			BackupDir:  backupDir,
 			ListenAddr: "127.0.0.1:0",
 			ChunkSize:  1 << 20,
-			Progress:   io.Discard,
 		})
 	}()
 	time.AfterFunc(100*time.Millisecond, cancel)
@@ -1095,7 +1079,6 @@ func TestRun_NoStorageCandidate_FallsThroughToStorageOnly(t *testing.T) {
 			ListenAddr:   "127.0.0.1:0",
 			ChunkSize:    1 << 20,
 			ScanInterval: 50 * time.Millisecond,
-			Progress:     io.Discard,
 		})
 	}()
 
@@ -1138,7 +1121,6 @@ func TestRun_ReachabilityMarkedOnDialFailure(t *testing.T) {
 		ListenAddr:   "127.0.0.1:0",
 		ChunkSize:    1 << 20,
 		DialTimeout:  200 * time.Millisecond,
-		Progress:     io.Discard,
 		Reachability: reach,
 	}); err == nil {
 		t.Fatal("Run accepted unreachable peer")
@@ -1171,7 +1153,6 @@ func TestRun_ReachabilityMarkedOnDialSuccess(t *testing.T) {
 			ListenAddr:   "127.0.0.1:0",
 			ChunkSize:    1 << 20,
 			ScanInterval: 50 * time.Millisecond,
-			Progress:     io.Discard,
 			Reachability: reach,
 		})
 	}()
@@ -1231,7 +1212,6 @@ func TestRun_ReachabilityMarkedOnInboundAccept(t *testing.T) {
 			DataDir:      dataDir,
 			ListenAddr:   listenAddr,
 			ChunkSize:    1 << 20,
-			Progress:     io.Discard,
 			Reachability: reach,
 		})
 	}()
@@ -1322,7 +1302,6 @@ func TestRun_PostStartupPeer_DialedBySweep(t *testing.T) {
 			ListenAddr:   "127.0.0.1:0",
 			ChunkSize:    1 << 20,
 			ScanInterval: 50 * time.Millisecond,
-			Progress:     io.Discard,
 			PeerStore:    peerStore,
 		})
 	}()
@@ -1385,7 +1364,6 @@ func TestRun_StorageOnly_BadListenAddr(t *testing.T) {
 		DataDir:    dataDir,
 		ListenAddr: "not-a-valid-addr",
 		ChunkSize:  1 << 20,
-		Progress:   io.Discard,
 	})
 	if err == nil {
 		t.Fatal("Run accepted malformed ListenAddr")

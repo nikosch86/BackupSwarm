@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"errors"
-	"io"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -42,7 +41,6 @@ func TestRun_TURNAllocateFuncReceivesConfig(t *testing.T) {
 		done <- Run(ctx, Options{
 			DataDir:    t.TempDir(),
 			ListenAddr: "127.0.0.1:0",
-			Progress:   io.Discard,
 			TURN: TURNOptions{
 				Server:   "turn.example:3478",
 				Username: "u",
@@ -118,7 +116,6 @@ func TestRun_TURNAllocation_PublishesAndRemovesRelayAddr(t *testing.T) {
 		done <- Run(ctx, Options{
 			DataDir:    dataDir,
 			ListenAddr: "127.0.0.1:0",
-			Progress:   io.Discard,
 			TURN: TURNOptions{
 				Server:   turnAddr,
 				Username: "u",
@@ -180,7 +177,6 @@ func TestRun_TURNAllocationLogsRelayAddr(t *testing.T) {
 		done <- Run(ctx, Options{
 			DataDir:    t.TempDir(),
 			ListenAddr: "127.0.0.1:0",
-			Progress:   io.Discard,
 			TURN: TURNOptions{
 				Server:   turnAddr,
 				Username: "u",

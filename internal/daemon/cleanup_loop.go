@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"io"
 	"log/slog"
 
 	"backupswarm/internal/index"
@@ -52,7 +51,7 @@ func makeRecoverDispatcher(ch chan<- []byte) swarm.OnRecoverFunc {
 }
 
 // makeCleanupFn returns the per-event cleanup closure used by runCleanupLoop.
-func makeCleanupFn(idx *index.Index, connSet *swarm.ConnSet, redundancy int, progress io.Writer) func(context.Context, []byte) {
+func makeCleanupFn(idx *index.Index, connSet *swarm.ConnSet, redundancy int) func(context.Context, []byte) {
 	return func(ctx context.Context, pub []byte) {
 		c := findConnByPub(connSet, pub)
 		if c == nil {
@@ -64,7 +63,6 @@ func makeCleanupFn(idx *index.Index, connSet *swarm.ConnSet, redundancy int, pro
 			Index:      idx,
 			Conn:       c,
 			Redundancy: redundancy,
-			Progress:   progress,
 		}); err != nil {
 			slog.WarnContext(ctx, "cleanup sweep failed",
 				"peer_pub", hex.EncodeToString(pub),

@@ -24,6 +24,7 @@ import (
 	"backupswarm/internal/ca"
 	"backupswarm/internal/crypto"
 	"backupswarm/internal/index"
+	"backupswarm/internal/metrics"
 	"backupswarm/internal/nat"
 	"backupswarm/internal/node"
 	"backupswarm/internal/peers"
@@ -98,33 +99,29 @@ type ScanOnceOptions struct {
 	RecipientPub *[crypto.RecipientKeySize]byte
 	// ChunkSize is the target fixed-chunk size in bytes.
 	ChunkSize int
-	// Progress receives per-file progress lines from both backup.Run
-	// and backup.Prune. nil is treated as io.Discard.
-	Progress io.Writer
+	// OnFileBackedUp, when non-nil, fires once per file backup.Run
+	// successfully ships and persists.
+	OnFileBackedUp func()
 }
 
 // ScanOnce runs one incremental backup pass followed by one prune sweep
 // against opts.Conns. Each call is independent; safe to retry after failure.
 func ScanOnce(ctx context.Context, opts ScanOnceOptions) error {
-	if opts.Progress == nil {
-		opts.Progress = io.Discard
-	}
 	if err := backup.Run(ctx, backup.RunOptions{
-		Path:         opts.BackupDir,
-		Conns:        opts.Conns,
-		Redundancy:   opts.Redundancy,
-		RecipientPub: opts.RecipientPub,
-		Index:        opts.Index,
-		ChunkSize:    opts.ChunkSize,
-		Progress:     opts.Progress,
+		Path:           opts.BackupDir,
+		Conns:          opts.Conns,
+		Redundancy:     opts.Redundancy,
+		RecipientPub:   opts.RecipientPub,
+		Index:          opts.Index,
+		ChunkSize:      opts.ChunkSize,
+		OnFileBackedUp: opts.OnFileBackedUp,
 	}); err != nil {
 		return fmt.Errorf("backup run: %w", err)
 	}
 	if err := backup.Prune(ctx, backup.PruneOptions{
-		Root:     opts.BackupDir,
-		Conns:    opts.Conns,
-		Index:    opts.Index,
-		Progress: opts.Progress,
+		Root:  opts.BackupDir,
+		Conns: opts.Conns,
+		Index: opts.Index,
 	}); err != nil {
 		return fmt.Errorf("prune: %w", err)
 	}
@@ -214,6 +211,10 @@ type Options struct {
 	UploadRateBytes int64
 	// DownloadRateBytes caps inbound bytes/sec across all conns. 0 = unlimited.
 	DownloadRateBytes int64
+	// StatsInterval is the cadence for the periodic INFO "activity" line
+	// (files backed up, chunks stored, average bandwidth). Zero defaults
+	// to 2 minutes; negative is rejected.
+	StatsInterval time.Duration
 }
 
 // TURNOptions configures the TURN client. All four fields are required
@@ -309,6 +310,13 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.STUNServer != "" && opts.NATRefreshInterval == 0 {
 		opts.NATRefreshInterval = defaultNATRefreshInterval
 	}
+	if opts.StatsInterval == 0 {
+		opts.StatsInterval = defaultStatsInterval
+	}
+	if opts.StatsInterval < 0 {
+		return fmt.Errorf("stats interval must be non-negative, got %v", opts.StatsInterval)
+	}
+	counters := &metrics.Counters{}
 
 	id, _, err := node.Ensure(opts.DataDir)
 	if err != nil {
@@ -329,13 +337,14 @@ func Run(ctx context.Context, opts Options) error {
 		MaxBytes:  opts.MaxStorageBytes,
 		NoStorage: opts.NoStorage,
 		ChunkTTL:  opts.ChunkTTL,
+		OnPut:     func(int) { counters.AddChunksStored() },
 	})
 	if err != nil {
 		return fmt.Errorf("open chunk store: %w", err)
 	}
 	defer func() { _ = st.Close() }()
 
-	warnIfOverCap(ctx, st.Used(), st.Capacity(), opts.Progress)
+	warnIfOverCap(ctx, st.Used(), st.Capacity())
 
 	peerStore := opts.PeerStore
 	if peerStore == nil {
@@ -401,6 +410,7 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("download rate must be non-negative, got %d", opts.DownloadRateBytes)
 	}
 	limiters := buildLimiters(opts.UploadRateBytes, opts.DownloadRateBytes)
+	limiters.Meter = counters
 
 	listener := opts.Listener
 	if listener == nil {
@@ -598,6 +608,19 @@ func Run(ctx context.Context, opts Options) error {
 	defer expireWG.Wait()
 	defer expireCancel()
 
+	statsCtx, statsCancel := context.WithCancel(ctx)
+	var statsWG sync.WaitGroup
+	statsWG.Add(1)
+	go func() {
+		defer statsWG.Done()
+		runStatsLoop(statsCtx, statsLoopOptions{
+			interval: opts.StatsInterval,
+			counters: counters,
+		})
+	}()
+	defer statsWG.Wait()
+	defer statsCancel()
+
 	ibCtx, ibCancel := context.WithCancel(ctx)
 	var ibWG sync.WaitGroup
 	if opts.BackupDir != "" {
@@ -639,7 +662,7 @@ func Run(ctx context.Context, opts Options) error {
 			defer cleanupWG.Done()
 			runCleanupLoop(cleanupCtx, cleanupLoopOptions{
 				ch:      cleanupCh,
-				cleanFn: makeCleanupFn(idx, connSet, opts.Redundancy, opts.Progress),
+				cleanFn: makeCleanupFn(idx, connSet, opts.Redundancy),
 			})
 		}()
 		reach.SetOnRecover(makeRecoverDispatcher(cleanupCh))
@@ -695,7 +718,6 @@ func Run(ctx context.Context, opts Options) error {
 			"node_id", id.ShortID(),
 			"listen", opts.ListenAddr,
 		)
-		fmt.Fprintf(opts.Progress, "daemon starting: role=storage-peer listen=%s\n", opts.ListenAddr)
 		return waitForServe(ctx, serveErrCh)
 	}
 
@@ -705,7 +727,6 @@ func Run(ctx context.Context, opts Options) error {
 		"listen", opts.ListenAddr,
 		"known_peers", len(dialablePeers),
 	)
-	fmt.Fprintf(opts.Progress, "daemon starting: mode=%s listen=%s known_peers=%d\n", modeName(mode), opts.ListenAddr, len(dialablePeers))
 
 	if len(dialablePeers) > 0 {
 		if err := dialAllPeers(ctx, dialer, dialablePeers); err != nil {
@@ -725,10 +746,10 @@ func Run(ctx context.Context, opts Options) error {
 
 	switch mode {
 	case ModePurge:
-		if err := purgeAll(ctx, idx, connsFn(), opts.Progress); err != nil {
+		if err := purgeAll(ctx, idx, connsFn()); err != nil {
 			return fmt.Errorf("purge: %w", err)
 		}
-		fmt.Fprintln(opts.Progress, "purge complete; daemon continuing in idle mode")
+		slog.InfoContext(ctx, "purge complete; daemon continuing in idle mode")
 		idleMode := "idle"
 		modeStr.Store(&idleMode)
 	case ModeRestore:
@@ -745,38 +766,37 @@ func Run(ctx context.Context, opts Options) error {
 			Index:         idx,
 			RecipientPub:  rk.PublicKey,
 			RecipientPriv: rk.PrivateKey,
-			Progress:      opts.Progress,
 			RetryTimeout:  opts.RestoreRetryTimeout,
 			RetryBackoff:  opts.RestoreRetryBackoff,
 			Redial:        redial,
 		}); err != nil {
 			return fmt.Errorf("restore: %w", err)
 		}
-		fmt.Fprintln(opts.Progress, "restore complete; daemon continuing in reconcile mode")
+		slog.InfoContext(ctx, "restore complete; daemon continuing in reconcile mode")
 		reconcileMode := "reconcile"
 		modeStr.Store(&reconcileMode)
 	}
 
 	scanOpts := ScanOnceOptions{
-		BackupDir:    opts.BackupDir,
-		Redundancy:   opts.Redundancy,
-		Index:        idx,
-		RecipientPub: rk.PublicKey,
-		ChunkSize:    opts.ChunkSize,
-		Progress:     opts.Progress,
+		BackupDir:      opts.BackupDir,
+		Redundancy:     opts.Redundancy,
+		Index:          idx,
+		RecipientPub:   rk.PublicKey,
+		ChunkSize:      opts.ChunkSize,
+		OnFileBackedUp: counters.AddFilesBackedUp,
 	}
 	sweep := func() {
 		redialMissingPeers(ctx, peerStore, dialer, connSet)
 	}
 	return runScanLoop(ctx, scanOpts, opts.ScanInterval, serveErrCh, connsFn, sweep, func() {
 		lastScanAtNanos.Store(time.Now().UnixNano())
-		replicateOnce(ctx, idx, connsFn(), reach, opts.Redundancy, opts.Progress)
+		replicateOnce(ctx, idx, connsFn(), reach, opts.Redundancy)
 	})
 }
 
 // replicateOnce runs one re-replication sweep against the live storage
 // conns. Best-effort; errors log and return.
-func replicateOnce(ctx context.Context, idx *index.Index, conns []*bsquic.Conn, reach *swarm.ReachabilityMap, redundancy int, progress io.Writer) {
+func replicateOnce(ctx context.Context, idx *index.Index, conns []*bsquic.Conn, reach *swarm.ReachabilityMap, redundancy int) {
 	if redundancy <= 0 || idx == nil || reach == nil {
 		return
 	}
@@ -785,7 +805,6 @@ func replicateOnce(ctx context.Context, idx *index.Index, conns []*bsquic.Conn, 
 		Conns:      toReplicationConns(conns),
 		LostFn:     reach.IsLost,
 		Redundancy: redundancy,
-		Progress:   progress,
 	}); err != nil {
 		slog.WarnContext(ctx, "replication sweep failed", "err", err)
 	}
@@ -1053,7 +1072,6 @@ func runScanLoop(ctx context.Context, opts ScanOnceOptions, interval time.Durati
 		opts.Conns = connsFn()
 		if err := ScanOnce(ctx, opts); err != nil {
 			slog.WarnContext(ctx, "scan failed", "err", err)
-			fmt.Fprintf(opts.Progress, "scan failed: %v\n", err)
 			return
 		}
 		if onScanSuccess != nil {
@@ -1075,7 +1093,7 @@ func runScanLoop(ctx context.Context, opts ScanOnceOptions, interval time.Durati
 
 // purgeAll sends DeleteChunk for every chunk of every index entry, then
 // clears the index.
-func purgeAll(ctx context.Context, idx *index.Index, conns []*bsquic.Conn, progress io.Writer) error {
+func purgeAll(ctx context.Context, idx *index.Index, conns []*bsquic.Conn) error {
 	entries, err := idx.List()
 	if err != nil {
 		return fmt.Errorf("list index: %w", err)
@@ -1085,10 +1103,9 @@ func purgeAll(ctx context.Context, idx *index.Index, conns []*bsquic.Conn, progr
 			return err
 		}
 		if err := backup.Prune(ctx, backup.PruneOptions{
-			Root:     filepath.Dir(e.Path),
-			Conns:    conns,
-			Index:    idx,
-			Progress: progress,
+			Root:  filepath.Dir(e.Path),
+			Conns: conns,
+			Index: idx,
 		}); err != nil {
 			return err
 		}
@@ -1114,17 +1131,15 @@ func modeName(m Mode) string {
 }
 
 // warnIfOverCap warns when used exceeds capacity; capacity 0 is a no-op.
-func warnIfOverCap(ctx context.Context, used, capacity int64, progress io.Writer) {
+func warnIfOverCap(ctx context.Context, used, capacity int64) {
 	if capacity == 0 || used <= capacity {
 		return
 	}
-	overBy := used - capacity
 	slog.WarnContext(ctx, "stored bytes exceed configured max-storage; new chunks will be rejected until usage drops",
 		"used_bytes", used,
 		"max_bytes", capacity,
-		"over_by_bytes", overBy,
+		"over_by_bytes", used-capacity,
 	)
-	fmt.Fprintf(progress, "warning: %d bytes on disk exceeds --max-storage %d (over by %d); new chunks will be rejected until usage drops\n", used, capacity, overBy)
 }
 
 // BackupDirHasRegularFiles returns true once a regular file is found in dir.

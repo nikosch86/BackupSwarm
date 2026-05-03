@@ -685,7 +685,6 @@ func TestRun_IndexPutError(t *testing.T) {
 		RecipientPub: recipientPub,
 		Index:        idx,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	})
 	if err == nil {
 		t.Fatal("Run returned nil despite injected index.Put failure")
@@ -753,7 +752,6 @@ func TestPrune_IndexDeleteError(t *testing.T) {
 		RecipientPub: recipientPub,
 		Index:        idx,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -767,10 +765,9 @@ func TestPrune_IndexDeleteError(t *testing.T) {
 	})
 
 	err = Prune(context.Background(), PruneOptions{
-		Root:     root,
-		Conns:    []*bsquic.Conn{conn},
-		Index:    idx,
-		Progress: io.Discard,
+		Root:  root,
+		Conns: []*bsquic.Conn{conn},
+		Index: idx,
 	})
 	if err == nil {
 		t.Fatal("Prune returned nil despite injected index.Delete failure")

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -101,7 +100,6 @@ func TestRestore_MultiPeer_PicksCorrectConn(t *testing.T) {
 		RecipientPub: rpub,
 		Index:        idx,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}); err != nil {
 		t.Fatalf("backup.Run: %v", err)
 	}
@@ -114,7 +112,6 @@ func TestRestore_MultiPeer_PicksCorrectConn(t *testing.T) {
 		Index:         idx,
 		RecipientPub:  rpub,
 		RecipientPriv: rpriv,
-		Progress:      io.Discard,
 	}); err != nil {
 		t.Fatalf("restore.Run: %v", err)
 	}
@@ -179,7 +176,6 @@ func TestRestore_MultiPeer_FallbackOnUnreachablePeer(t *testing.T) {
 		RecipientPub: rpub,
 		Index:        idx,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}); err != nil {
 		t.Fatalf("backup.Run: %v", err)
 	}
@@ -194,7 +190,6 @@ func TestRestore_MultiPeer_FallbackOnUnreachablePeer(t *testing.T) {
 		Index:         idx,
 		RecipientPub:  rpub,
 		RecipientPriv: rpriv,
-		Progress:      io.Discard,
 	}); err != nil {
 		t.Fatalf("restore.Run with peerA dead: %v", err)
 	}
@@ -258,7 +253,6 @@ func TestRestore_MultiPeer_NoMatchingConn(t *testing.T) {
 		RecipientPub: rpub,
 		Index:        idx,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}); err != nil {
 		t.Fatalf("backup.Run: %v", err)
 	}
@@ -271,7 +265,6 @@ func TestRestore_MultiPeer_NoMatchingConn(t *testing.T) {
 		Index:         idx,
 		RecipientPub:  rpub,
 		RecipientPriv: rpriv,
-		Progress:      io.Discard,
 	})
 	if err == nil {
 		t.Fatal("restore.Run succeeded with no matching conn for chunk")

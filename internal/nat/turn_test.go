@@ -168,3 +168,24 @@ func TestAllocate_BadServer(t *testing.T) {
 		t.Fatalf("unexpected panic-like error: %v", err)
 	}
 }
+
+// TestAddPermission_ForwardsToClient asserts the success path reaches the
+// pion client and the server installs the permission without error.
+func TestAddPermission_ForwardsToClient(t *testing.T) {
+	addr := startTestTURNServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	alloc, err := nat.Allocate(ctx, nat.TURNConfig{
+		Server:   addr,
+		Username: testUser,
+		Password: testPassword,
+		Realm:    testRealm,
+	})
+	if err != nil {
+		t.Fatalf("Allocate: %v", err)
+	}
+	defer func() { _ = alloc.Close() }()
+	if err := alloc.AddPermission(net.ParseIP("127.0.0.1")); err != nil {
+		t.Fatalf("AddPermission: %v", err)
+	}
+}

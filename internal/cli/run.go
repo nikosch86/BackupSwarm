@@ -128,6 +128,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		turnRealm           string
 		uploadRate          string
 		downloadRate        string
+		statsInterval       time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -266,6 +267,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				NoStorage:           noStorage,
 				UploadRateBytes:     uploadRateBytes,
 				DownloadRateBytes:   downloadRateBytes,
+				StatsInterval:       statsInterval,
 				Redundancy:          redundancy,
 				Progress:            cmd.OutOrStdout(),
 				TURN: daemon.TURNOptions{
@@ -311,6 +313,7 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&turnRealm, "turn-realm", "", "Realm for the TURN long-term credential (required with --turn-server)")
 	cmd.Flags().StringVar(&uploadRate, "upload-rate", "unlimited", "Cap node-wide outbound bytes/sec across every conn; accepts k/m/g/t suffixes (e.g. 5m). 'unlimited' (default) places no cap.")
 	cmd.Flags().StringVar(&downloadRate, "download-rate", "unlimited", "Cap node-wide inbound bytes/sec across every conn; accepts k/m/g/t suffixes (e.g. 5m). 'unlimited' (default) places no cap.")
+	cmd.Flags().DurationVar(&statsInterval, "stats-interval", 2*time.Minute, "Cadence for the periodic INFO 'activity' log line (files backed up, chunks stored, average bandwidth). 0 disables.")
 	return cmd
 }
 

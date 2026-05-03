@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,7 +146,6 @@ func TestRestoreCmd_EndToEnd(t *testing.T) {
 		RecipientPub: rk.PublicKey,
 		Index:        ix,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}); err != nil {
 		t.Fatalf("backup.Run: %v", err)
 	}

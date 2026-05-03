@@ -624,3 +624,68 @@ func TestRunCmd_AcknowledgeDeletesBypassesGate(t *testing.T) {
 		t.Fatal("run did not exit within 5s of cancel")
 	}
 }
+
+// TestRunCmd_RegistersStatsIntervalFlag asserts the --stats-interval flag
+// is exposed so operators can adjust the periodic activity-line cadence.
+func TestRunCmd_RegistersStatsIntervalFlag(t *testing.T) {
+	root := NewRootCmd()
+	var run *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Name() == "run" {
+			run = c
+			break
+		}
+	}
+	if run == nil {
+		t.Fatal("run subcommand missing")
+	}
+	if f := run.Flags().Lookup("stats-interval"); f == nil {
+		t.Fatal("run is missing --stats-interval flag")
+	}
+}
+
+// TestRunCmd_AcceptsStatsInterval asserts a non-default --stats-interval
+// parses and the daemon starts cleanly.
+func TestRunCmd_AcceptsStatsInterval(t *testing.T) {
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--stats-interval", "30s",
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("run with --stats-interval 30s returned err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit within 5s of cancel")
+	}
+}
+
+// TestRunCmd_RejectsNegativeStatsInterval asserts a negative
+// --stats-interval surfaces as an error from daemon.Run.
+func TestRunCmd_RejectsNegativeStatsInterval(t *testing.T) {
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--stats-interval", "-1s",
+	})
+	if err := root.Execute(); err == nil {
+		t.Error("run accepted negative --stats-interval")
+	}
+}

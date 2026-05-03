@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -99,6 +100,19 @@ func TestAllocationClose_PropagatesLocalError(t *testing.T) {
 	a := &Allocation{relay: relay, local: local}
 	if err := a.Close(); !errors.Is(err, errClosed) {
 		t.Fatalf("Close error = %v, want errClosed", err)
+	}
+}
+
+// TestAddPermission_NilIP_Errors asserts the nil-guard returns a
+// descriptive error before touching the underlying client.
+func TestAddPermission_NilIP_Errors(t *testing.T) {
+	a := &Allocation{}
+	err := a.AddPermission(nil)
+	if err == nil {
+		t.Fatal("AddPermission(nil) succeeded; want error")
+	}
+	if !strings.Contains(err.Error(), "non-nil peer ip") {
+		t.Errorf("err = %q, want 'non-nil peer ip' substring", err)
 	}
 }
 

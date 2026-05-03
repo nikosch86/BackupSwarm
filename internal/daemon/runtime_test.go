@@ -3,7 +3,6 @@ package daemon_test
 import (
 	"context"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -166,7 +165,6 @@ func TestDaemon_PublishesAndRemovesRuntimeSnapshot(t *testing.T) {
 		done <- daemon.Run(ctx, daemon.Options{
 			DataDir:      dataDir,
 			ListenAddr:   "127.0.0.1:0",
-			Progress:     io.Discard,
 			ScanInterval: 100 * time.Millisecond,
 		})
 	}()
@@ -246,7 +244,6 @@ func TestDaemon_RuntimeSnapshotCarriesOwnBackup(t *testing.T) {
 		done <- daemon.Run(ctx, daemon.Options{
 			DataDir:      dataDir,
 			ListenAddr:   "127.0.0.1:0",
-			Progress:     io.Discard,
 			ScanInterval: 100 * time.Millisecond,
 		})
 	}()

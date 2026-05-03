@@ -76,6 +76,27 @@ The image sets `BACKUPSWARM_DATA_DIR=/data` so a `-v <vol>:/data` mount (or comp
 All commands honour `--log-level debug|info|warn|error` (default `info`),
 or the `BACKUPSWARM_LOG_LEVEL` env var. The flag wins over the env.
 
+Every event is emitted as one structured `log/slog` JSON line on stderr.
+Per-file events (`msg=backed up file`, `msg=file unchanged`,
+`msg=pruned vanished file`, `msg=restored file`, `msg=replicated chunk`,
+`msg=cleaned up stale chunk on recovered peer`) carry `path`, `chunks`,
+and `bytes` attrs; the only stdout output is the invite token printed
+by `run --invite`.
+
+### Activity stats
+
+The daemon emits one INFO line `msg=activity` every `--stats-interval`
+(default `2m`, `0` disables) summarising work done since the previous
+tick:
+
+| Field | Meaning |
+|---|---|
+| `files_backed_up` | files whose chunks were placed and indexed this tick |
+| `chunks_stored` | chunks written into the local store for other peers |
+| `bytes_up` / `bytes_down` | raw byte counters across every QUIC stream |
+| `up_bytes_per_sec` / `down_bytes_per_sec` | the bytes counters divided by `interval_seconds` |
+| `interval_seconds` | wall-clock seconds since the previous emit |
+
 ### Auto-join from an env var
 
 For containerised joiners, `run` reads `BACKUPSWARM_INVITE_TOKEN` at startup

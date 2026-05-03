@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 
 	"backupswarm/internal/backup"
@@ -27,7 +26,6 @@ type CleanupOptions struct {
 	Index      *index.Index
 	Conn       Conn
 	Redundancy int
-	Progress   io.Writer
 }
 
 // Test seams (cleanup-side).
@@ -66,9 +64,6 @@ func PlanCleanup(entries []index.FileEntry, recoveredPub []byte, redundancy int)
 
 // RunCleanup plans then executes one stale-cleanup sweep.
 func RunCleanup(ctx context.Context, opts CleanupOptions) error {
-	if opts.Progress == nil {
-		opts.Progress = io.Discard
-	}
 	if opts.Redundancy <= 0 || opts.Conn == nil {
 		return nil
 	}
@@ -107,8 +102,11 @@ func executeCleanup(ctx context.Context, task CleanupTask, opts CleanupOptions) 
 			"err", err)
 		return
 	}
-	fmt.Fprintf(opts.Progress, "cleaned up %s chunk %d on peer %s\n",
-		task.EntryPath, task.ChunkIndex, hex.EncodeToString(task.StalePub[:8]))
+	slog.InfoContext(ctx, "cleaned up stale chunk on recovered peer",
+		"path", task.EntryPath,
+		"chunk", task.ChunkIndex,
+		"peer_pub", hex.EncodeToString(task.StalePub),
+	)
 }
 
 // dropPeerFromIndex removes task.StalePub from the chunk's Peers list

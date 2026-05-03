@@ -25,10 +25,19 @@ import (
 
 // Limiters carries the upload/download token-bucket limiters propagated
 // to every Stream a Conn opens or accepts. nil on either side = no
-// throttle.
+// throttle. Meter, when non-nil, receives every successfully transferred
+// byte count on Stream.Read / Stream.Write.
 type Limiters struct {
-	Up   *rate.Limiter
-	Down *rate.Limiter
+	Up    *rate.Limiter
+	Down  *rate.Limiter
+	Meter ByteMeter
+}
+
+// ByteMeter receives the byte counts a Stream successfully transferred
+// in Read / Write. Implementations must be safe for concurrent use.
+type ByteMeter interface {
+	AddBytesUp(n int)
+	AddBytesDown(n int)
 }
 
 // randReader is the package-level random source; tests swap it via white-box.
@@ -375,6 +384,7 @@ func (c *Conn) wrapStream(qs *qgo.Stream) *Stream {
 		Stream: qs,
 		up:     c.limiters.Up,
 		down:   c.limiters.Down,
+		meter:  c.limiters.Meter,
 		ctx:    qs.Context(),
 	}
 }

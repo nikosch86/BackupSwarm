@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -380,7 +381,7 @@ func TestRunCleanup_IndexListFails_BubblesUp(t *testing.T) {
 	}
 }
 
-func TestRunCleanup_ProgressEmitsLineOnSuccess(t *testing.T) {
+func TestRunCleanup_LogsLineOnSuccess(t *testing.T) {
 	idx := openIndexInTemp(t)
 	if err := idx.Put(index.FileEntry{
 		Path:   "a.txt",
@@ -390,18 +391,25 @@ func TestRunCleanup_ProgressEmitsLineOnSuccess(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	withSendDeleteChunk(t, func(context.Context, Conn, [32]byte) error { return nil })
-	var buf bytes.Buffer
+
+	var captured bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&captured, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
 	if err := RunCleanup(context.Background(), CleanupOptions{
 		Index:      idx,
 		Conn:       newConn('A'),
 		Redundancy: 1,
-		Progress:   &buf,
 	}); err != nil {
 		t.Fatalf("RunCleanup: %v", err)
 	}
-	out := buf.String()
-	if !strings.Contains(out, "cleaned up a.txt chunk 0 on peer") {
-		t.Errorf("progress output = %q, want a 'cleaned up' line", out)
+	out := captured.String()
+	if !strings.Contains(out, "cleaned up stale chunk on recovered peer") {
+		t.Errorf("slog capture = %q, want a 'cleaned up stale chunk on recovered peer' line", out)
+	}
+	if !strings.Contains(out, "path=a.txt") || !strings.Contains(out, "chunk=0") {
+		t.Errorf("slog capture missing path/chunk attrs; got: %s", out)
 	}
 }
 

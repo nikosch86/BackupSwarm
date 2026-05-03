@@ -93,7 +93,6 @@ func newRestoreCmd(dataDir *string) *cobra.Command {
 				Index:         idx,
 				RecipientPub:  rk.PublicKey,
 				RecipientPriv: rk.PrivateKey,
-				Progress:      cmd.OutOrStdout(),
 				RetryTimeout:  retryTimeout,
 				RetryBackoff:  retryBackoff,
 				Redial:        redial,

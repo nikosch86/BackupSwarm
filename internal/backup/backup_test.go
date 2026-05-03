@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -133,7 +134,6 @@ func TestRun_SingleFileSmall(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	if err := backup.Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -174,7 +174,6 @@ func TestRun_EmptyFile(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	if err := backup.Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -201,7 +200,6 @@ func TestRun_MultiChunkFile(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	if err := backup.Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -244,7 +242,6 @@ func TestRun_DirectoryWalk(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	if err := backup.Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -278,7 +275,6 @@ func TestPrune_RemovesMissingFileFromSwarmAndIndex(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	if err := backup.Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -296,10 +292,9 @@ func TestPrune_RemovesMissingFileFromSwarmAndIndex(t *testing.T) {
 	}
 
 	pruneOpts := backup.PruneOptions{
-		Root:     root,
-		Conns:    []*bsquic.Conn{rig.ownerConn},
-		Index:    rig.ownerIndex,
-		Progress: io.Discard,
+		Root:  root,
+		Conns: []*bsquic.Conn{rig.ownerConn},
+		Index: rig.ownerIndex,
 	}
 	if err := backup.Prune(context.Background(), pruneOpts); err != nil {
 		t.Fatalf("Prune: %v", err)
@@ -331,7 +326,6 @@ func TestPrune_LeavesPresentFilesAlone(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	if err := backup.Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -342,10 +336,9 @@ func TestPrune_LeavesPresentFilesAlone(t *testing.T) {
 	}
 
 	pruneOpts := backup.PruneOptions{
-		Root:     root,
-		Conns:    []*bsquic.Conn{rig.ownerConn},
-		Index:    rig.ownerIndex,
-		Progress: io.Discard,
+		Root:  root,
+		Conns: []*bsquic.Conn{rig.ownerConn},
+		Index: rig.ownerIndex,
 	}
 	if err := backup.Prune(context.Background(), pruneOpts); err != nil {
 		t.Fatalf("Prune: %v", err)
@@ -386,10 +379,9 @@ func TestPrune_IgnoresTamperedEntries(t *testing.T) {
 	}
 
 	pruneOpts := backup.PruneOptions{
-		Root:     t.TempDir(),
-		Conns:    []*bsquic.Conn{rig.ownerConn},
-		Index:    rig.ownerIndex,
-		Progress: io.Discard,
+		Root:  t.TempDir(),
+		Conns: []*bsquic.Conn{rig.ownerConn},
+		Index: rig.ownerIndex,
 	}
 	if err := backup.Prune(context.Background(), pruneOpts); err != nil {
 		t.Fatalf("Prune: %v", err)
@@ -404,17 +396,17 @@ func TestPrune_IgnoresTamperedEntries(t *testing.T) {
 // TestRun_Incremental asserts a second Run on an unchanged file skips re-encryption and a size change forces re-upload.
 func TestRun_Incremental(t *testing.T) {
 	tests := []struct {
-		name                 string
-		mutate               func(t *testing.T, path string)
-		wantUnchanged        bool
-		wantSizeGrew         bool
-		wantProgressContains string
+		name             string
+		mutate           func(t *testing.T, path string)
+		wantUnchanged    bool
+		wantSizeGrew     bool
+		wantSlogContains string
 	}{
 		{
-			name:                 "unchanged file skips re-encryption",
-			mutate:               func(t *testing.T, path string) {},
-			wantUnchanged:        true,
-			wantProgressContains: "unchanged",
+			name:             "unchanged file skips re-encryption",
+			mutate:           func(t *testing.T, path string) {},
+			wantUnchanged:    true,
+			wantSlogContains: "file unchanged",
 		},
 		{
 			name: "size change forces re-upload",
@@ -444,7 +436,6 @@ func TestRun_Incremental(t *testing.T) {
 				RecipientPub: rig.recipientPub,
 				Index:        rig.ownerIndex,
 				ChunkSize:    1 << 20,
-				Progress:     io.Discard,
 			}
 			if err := backup.Run(context.Background(), opts); err != nil {
 				t.Fatalf("Run #1: %v", err)
@@ -456,8 +447,11 @@ func TestRun_Incremental(t *testing.T) {
 
 			tc.mutate(t, path)
 
-			var progress bytes.Buffer
-			opts.Progress = &progress
+			var captured bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&captured, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
 			if err := backup.Run(context.Background(), opts); err != nil {
 				t.Fatalf("Run #2: %v", err)
 			}
@@ -482,8 +476,8 @@ func TestRun_Incremental(t *testing.T) {
 			if tc.wantSizeGrew && secondEntry.Size <= firstEntry.Size {
 				t.Errorf("Size did not grow: %d -> %d", firstEntry.Size, secondEntry.Size)
 			}
-			if tc.wantProgressContains != "" && !bytes.Contains(progress.Bytes(), []byte(tc.wantProgressContains)) {
-				t.Errorf("expected progress note containing %q, got %q", tc.wantProgressContains, progress.String())
+			if tc.wantSlogContains != "" && !strings.Contains(captured.String(), tc.wantSlogContains) {
+				t.Errorf("expected slog containing %q, got %q", tc.wantSlogContains, captured.String())
 			}
 		})
 	}
@@ -506,7 +500,6 @@ func TestRun_RecordsStatFields(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	if err := backup.Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -535,7 +528,6 @@ func TestRun_RecordsPeerPubKey(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	if err := backup.Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -571,33 +563,41 @@ func TestRun_ContextCancellation(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	if err := backup.Run(ctx, opts); err == nil {
 		t.Error("Run with pre-cancelled ctx returned nil error")
 	}
 }
 
-func TestRun_ProgressOutput(t *testing.T) {
+// TestRun_LogsBackedUpFile asserts a successful Run emits a slog INFO
+// "backed up file" line per file with the structured key/value attrs.
+func TestRun_LogsBackedUpFile(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
 	path := filepath.Join(root, "f.bin")
 	writeFile(t, path, 1<<20)
 
-	var progress bytes.Buffer
+	var captured bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&captured, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
 	opts := backup.RunOptions{
 		Path:         root,
 		Conns:        []*bsquic.Conn{rig.ownerConn},
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     &progress,
 	}
 	if err := backup.Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if progress.Len() == 0 {
-		t.Error("expected progress output, got none")
+	out := captured.String()
+	if !strings.Contains(out, "backed up file") {
+		t.Errorf("slog capture missing 'backed up file'; got: %s", out)
+	}
+	if !strings.Contains(out, "path=f.bin") {
+		t.Errorf("slog capture missing path attr; got: %s", out)
 	}
 }
 
@@ -609,7 +609,6 @@ func TestRun_RejectsMissingPath(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	if err := backup.Run(context.Background(), opts); err == nil {
 		t.Error("Run on non-existent path returned nil error")
@@ -626,7 +625,6 @@ func TestRun_RejectsEmptyPath(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	err := backup.Run(context.Background(), opts)
 	if err == nil {
@@ -651,7 +649,6 @@ func TestRun_RejectsRegularFilePath(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	err := backup.Run(context.Background(), opts)
 	if err == nil {
@@ -674,7 +671,6 @@ func TestRun_RejectsInvalidChunkSize(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1024,
-		Progress:     io.Discard,
 	}
 	err := backup.Run(context.Background(), opts)
 	if err == nil {
@@ -705,7 +701,6 @@ func TestServe_ConcurrentRuns(t *testing.T) {
 				RecipientPub: rig.recipientPub,
 				Index:        rig.ownerIndex,
 				ChunkSize:    1 << 20,
-				Progress:     io.Discard,
 			}
 			if err := backup.Run(context.Background(), opts); err != nil {
 				t.Errorf("Run %s: %v", path, err)
@@ -723,7 +718,8 @@ func TestServe_ConcurrentRuns(t *testing.T) {
 	}
 }
 
-// TestRun_SkipsSymlinks asserts symlinks under root are not indexed and a skip note appears in progress.
+// TestRun_SkipsSymlinks asserts symlinks under root are not indexed and a
+// skip-note slog WARN line is emitted.
 func TestRun_SkipsSymlinks(t *testing.T) {
 	rig := newTestRig(t)
 	root := t.TempDir()
@@ -734,14 +730,17 @@ func TestRun_SkipsSymlinks(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	var progress bytes.Buffer
+	var captured bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&captured, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
 	opts := backup.RunOptions{
 		Path:         root,
 		Conns:        []*bsquic.Conn{rig.ownerConn},
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     &progress,
 	}
 	if err := backup.Run(context.Background(), opts); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -752,8 +751,8 @@ func TestRun_SkipsSymlinks(t *testing.T) {
 	if _, err := rig.ownerIndex.Get(filepath.Base(realFile)); err != nil {
 		t.Errorf("real file should have been indexed: %v", err)
 	}
-	if !bytes.Contains(progress.Bytes(), []byte("skip")) {
-		t.Errorf("expected skip-note in progress output, got: %q", progress.String())
+	if !strings.Contains(captured.String(), "skipping non-regular file") {
+		t.Errorf("slog capture missing skip-note; got: %s", captured.String())
 	}
 }
 
@@ -773,7 +772,6 @@ func TestRun_PropagatesIndexError(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	if err := backup.Run(context.Background(), opts); err == nil {
 		t.Fatal("Run returned nil despite closed index")
@@ -841,7 +839,6 @@ func TestRun_PeerErrorPropagation(t *testing.T) {
 		RecipientPub: recipientPub,
 		Index:        ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	err = backup.Run(context.Background(), opts)
 	if err == nil {
@@ -970,7 +967,6 @@ func TestRun_NilRecipientPubFailsEncrypt(t *testing.T) {
 		RecipientPub: nil,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	})
 	if err == nil {
 		t.Fatal("Run with nil RecipientPub returned nil")
@@ -997,7 +993,6 @@ func TestRun_OpenFileError(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	err := backup.Run(context.Background(), opts)
 	if err == nil {
@@ -1021,7 +1016,6 @@ func TestRun_WalkError(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}
 	err := backup.Run(context.Background(), opts)
 	if err == nil {
@@ -1036,10 +1030,9 @@ func TestPrune_IndexListError(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	err := backup.Prune(context.Background(), backup.PruneOptions{
-		Root:     t.TempDir(),
-		Conns:    []*bsquic.Conn{rig.ownerConn},
-		Index:    rig.ownerIndex,
-		Progress: io.Discard,
+		Root:  t.TempDir(),
+		Conns: []*bsquic.Conn{rig.ownerConn},
+		Index: rig.ownerIndex,
 	})
 	if err == nil {
 		t.Fatal("Prune returned nil despite closed index")
@@ -1065,10 +1058,9 @@ func TestPrune_ContextCancelled(t *testing.T) {
 	cancel()
 
 	err := backup.Prune(ctx, backup.PruneOptions{
-		Root:     root,
-		Conns:    []*bsquic.Conn{rig.ownerConn},
-		Index:    rig.ownerIndex,
-		Progress: io.Discard,
+		Root:  root,
+		Conns: []*bsquic.Conn{rig.ownerConn},
+		Index: rig.ownerIndex,
 	})
 	if err == nil {
 		t.Fatal("Prune returned nil despite cancelled context")
@@ -1092,10 +1084,9 @@ func TestPrune_SendDeleteChunkError(t *testing.T) {
 	_ = rig.ownerConn.Close()
 
 	err := backup.Prune(context.Background(), backup.PruneOptions{
-		Root:     root,
-		Conns:    []*bsquic.Conn{rig.ownerConn},
-		Index:    rig.ownerIndex,
-		Progress: io.Discard,
+		Root:  root,
+		Conns: []*bsquic.Conn{rig.ownerConn},
+		Index: rig.ownerIndex,
 	})
 	if err == nil {
 		t.Fatal("Prune returned nil despite closed conn")
@@ -1132,10 +1123,9 @@ func TestPrune_NonNotFoundPeerErrorLogsAndFails(t *testing.T) {
 	}
 
 	err = backup.Prune(context.Background(), backup.PruneOptions{
-		Root:     root,
-		Conns:    []*bsquic.Conn{rig.ownerConn},
-		Index:    rig.ownerIndex,
-		Progress: io.Discard,
+		Root:  root,
+		Conns: []*bsquic.Conn{rig.ownerConn},
+		Index: rig.ownerIndex,
 	})
 	if err == nil {
 		t.Fatal("Prune returned nil despite owner_mismatch peer reply")
@@ -1155,10 +1145,9 @@ func TestPrune_NonNotFoundPeerErrorLogsAndFails(t *testing.T) {
 func TestPrune_NoConns(t *testing.T) {
 	rig := newTestRig(t)
 	err := backup.Prune(context.Background(), backup.PruneOptions{
-		Root:     t.TempDir(),
-		Conns:    nil,
-		Index:    rig.ownerIndex,
-		Progress: io.Discard,
+		Root:  t.TempDir(),
+		Conns: nil,
+		Index: rig.ownerIndex,
 	})
 	if err == nil {
 		t.Fatal("Prune returned nil with no conns")
@@ -1181,7 +1170,6 @@ func TestPrune_NilProgressDefaultsToDiscard(t *testing.T) {
 		RecipientPub: rig.recipientPub,
 		Index:        rig.ownerIndex,
 		ChunkSize:    1 << 20,
-		Progress:     io.Discard,
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -1224,10 +1212,9 @@ func TestPrune_StatError(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(sub, 0o700) })
 
 	err := backup.Prune(context.Background(), backup.PruneOptions{
-		Root:     root,
-		Conns:    []*bsquic.Conn{rig.ownerConn},
-		Index:    rig.ownerIndex,
-		Progress: io.Discard,
+		Root:  root,
+		Conns: []*bsquic.Conn{rig.ownerConn},
+		Index: rig.ownerIndex,
 	})
 	if err == nil {
 		t.Fatal("Prune returned nil despite stat EACCES")
