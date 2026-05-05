@@ -45,6 +45,7 @@ func (r *Router) HandleStream(ctx context.Context, rd io.Reader, senderPub []byt
 		"kind", ann.Kind,
 		"peer_pub", hex.EncodeToString(ann.PubKey[:]),
 		"addr", ann.Addr,
+		"relay_addr", ann.RelayAddr,
 		"id", hex.EncodeToString(ann.ID[:]),
 	)
 	if r.OnApplied != nil {

@@ -179,6 +179,9 @@ type Options struct {
 	PunchTimeout time.Duration
 	// TURNDialTimeout bounds the TURN fallback step. Zero defaults to 15s.
 	TURNDialTimeout time.Duration
+	// RelayDialTimeout bounds the steady-state relay step (target's
+	// advertised RelayAddr). Zero defaults to 15s.
+	RelayDialTimeout time.Duration
 	// IssueInitialInvite issues a token at startup.
 	IssueInitialInvite bool
 	// InitialInviteOut is the file path the initial invite token is written to.
@@ -255,6 +258,7 @@ const (
 	defaultDialTimeout         = 30 * time.Second
 	defaultPunchTimeout        = 5 * time.Second
 	defaultTURNDialTimeout     = 15 * time.Second
+	defaultRelayDialTimeout    = 15 * time.Second
 	defaultGracePeriod         = 24 * time.Hour
 	defaultChunkTTL            = 30 * 24 * time.Hour
 	defaultExpireInterval      = 1 * time.Hour
@@ -326,6 +330,12 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	if opts.TURNDialTimeout < 0 {
 		return fmt.Errorf("turn dial timeout must be non-negative, got %v", opts.TURNDialTimeout)
+	}
+	if opts.RelayDialTimeout == 0 {
+		opts.RelayDialTimeout = defaultRelayDialTimeout
+	}
+	if opts.RelayDialTimeout < 0 {
+		return fmt.Errorf("relay dial timeout must be non-negative, got %v", opts.RelayDialTimeout)
 	}
 	if opts.NATRefreshInterval < 0 {
 		return fmt.Errorf("nat refresh interval must be non-negative, got %v", opts.NATRefreshInterval)
@@ -567,6 +577,7 @@ func Run(ctx context.Context, opts Options) error {
 		timeout:      opts.DialTimeout,
 		punchTimeout: opts.PunchTimeout,
 		turnTimeout:  opts.TURNDialTimeout,
+		relayTimeout: opts.RelayDialTimeout,
 		st:           st,
 		annHandler:   router.HandleStream,
 		connSet:      connSet,
@@ -768,6 +779,7 @@ func Run(ctx context.Context, opts Options) error {
 				port:        port,
 				pub:         id.PublicKey,
 				initialHost: host,
+				relayAddr:   relayAddr,
 				connsFn:     connSet.Snapshot,
 			})
 		}()
@@ -798,6 +810,7 @@ func Run(ctx context.Context, opts Options) error {
 				initial:      mapping,
 				internalPort: listenPort,
 				pub:          id.PublicKey,
+				relayAddr:    relayAddr,
 				connsFn:      connSet.Snapshot,
 			})
 		}()
@@ -938,11 +951,11 @@ type outboundDialer struct {
 	reach       *swarm.ReachabilityMap
 	limiters    bsquic.Limiters
 
-	// punchTimeout / turnTimeout bound the hole-punch and TURN steps of
-	// the fallback chain; punchOrch / turnListener enable each step. Set
-	// post-construction by the daemon once those subsystems are ready.
+	// punchTimeout / turnTimeout / relayTimeout bound the hole-punch,
+	// TURN, and relay steps; punchOrch / turnListener enable each step.
 	punchTimeout time.Duration
 	turnTimeout  time.Duration
+	relayTimeout time.Duration
 	punchOrch    *punchOrchestrator
 	turnListener turnRelayDialer
 
@@ -990,6 +1003,7 @@ func (d *outboundDialer) dial(ctx context.Context, p peers.Peer) (*bsquic.Conn, 
 		directTimeout: d.timeout,
 		punchTimeout:  d.punchTimeout,
 		turnTimeout:   d.turnTimeout,
+		relayTimeout:  d.relayTimeout,
 		punchOrch:     d.punchOrch,
 		turnListener:  d.turnListener,
 		connSet:       d.connSet,

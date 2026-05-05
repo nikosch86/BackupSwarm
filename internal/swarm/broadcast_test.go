@@ -313,7 +313,7 @@ func TestBroadcastAddressChanged_FansOutToAllConns(t *testing.T) {
 		}()
 	}
 
-	if err := swarm.BroadcastAddressChanged(context.Background(), rig.introSide, subjPub, "203.0.113.7:9001"); err != nil {
+	if err := swarm.BroadcastAddressChanged(context.Background(), rig.introSide, subjPub, "203.0.113.7:9001", "203.0.113.5:3478"); err != nil {
 		t.Fatalf("BroadcastAddressChanged: %v", err)
 	}
 	wg.Wait()
@@ -330,6 +330,9 @@ func TestBroadcastAddressChanged_FansOutToAllConns(t *testing.T) {
 		if r.ann.Addr != "203.0.113.7:9001" {
 			t.Errorf("addr = %q, want %q", r.ann.Addr, "203.0.113.7:9001")
 		}
+		if r.ann.RelayAddr != "203.0.113.5:3478" {
+			t.Errorf("relay = %q, want %q", r.ann.RelayAddr, "203.0.113.5:3478")
+		}
 		var wantPub [32]byte
 		copy(wantPub[:], subjPub)
 		if r.ann.PubKey != wantPub {
@@ -338,18 +341,18 @@ func TestBroadcastAddressChanged_FansOutToAllConns(t *testing.T) {
 	}
 }
 
-func TestBroadcastAddressChanged_RejectsEmptyAddr(t *testing.T) {
+func TestBroadcastAddressChanged_RejectsBothEmpty(t *testing.T) {
 	subjPub, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("subject key: %v", err)
 	}
-	if err := swarm.BroadcastAddressChanged(context.Background(), nil, subjPub, ""); err == nil {
-		t.Fatal("BroadcastAddressChanged accepted empty addr")
+	if err := swarm.BroadcastAddressChanged(context.Background(), nil, subjPub, "", ""); err == nil {
+		t.Fatal("BroadcastAddressChanged accepted both addr and relay empty")
 	}
 }
 
 func TestBroadcastAddressChanged_RejectsBadPubkey(t *testing.T) {
-	if err := swarm.BroadcastAddressChanged(context.Background(), nil, ed25519.PublicKey{0x01, 0x02}, "203.0.113.7:9001"); err == nil {
+	if err := swarm.BroadcastAddressChanged(context.Background(), nil, ed25519.PublicKey{0x01, 0x02}, "203.0.113.7:9001", ""); err == nil {
 		t.Fatal("BroadcastAddressChanged accepted short pubkey")
 	}
 }
@@ -383,7 +386,7 @@ func TestBroadcastAddressChanged_FillsRandomID(t *testing.T) {
 	for i := range got {
 		ch := make(chan protocol.PeerAnnouncement, 1)
 		go func() { ch <- receive() }()
-		if err := swarm.BroadcastAddressChanged(context.Background(), rig.introSide, subjPub, "203.0.113.7:9001"); err != nil {
+		if err := swarm.BroadcastAddressChanged(context.Background(), rig.introSide, subjPub, "203.0.113.7:9001", ""); err != nil {
 			t.Fatalf("BroadcastAddressChanged %d: %v", i, err)
 		}
 		got[i] = <-ch

@@ -64,19 +64,22 @@ func TestOpen_BucketCreateFailure(t *testing.T) {
 // TestEncodeDecodeValue_RoundTrip asserts the wire format round-trips every defined Role.
 func TestEncodeDecodeValue_RoundTrip(t *testing.T) {
 	cases := []struct {
-		role Role
-		addr string
+		role      Role
+		addr      string
+		relayAddr string
 	}{
-		{RolePeer, "127.0.0.1:1"},
-		{RoleIntroducer, "10.0.0.1:443"},
-		{RoleStorage, ""},
+		{RolePeer, "127.0.0.1:1", ""},
+		{RoleIntroducer, "10.0.0.1:443", "203.0.113.5:3478"},
+		{RoleStorage, "", ""},
+		{RolePeer, "", "203.0.113.6:3478"},
+		{RoleStorage, "10.0.0.2:7777", "203.0.113.7:3478"},
 	}
 	for _, tc := range cases {
-		raw := encodeValue(tc.role, tc.addr)
+		raw := encodeValue(tc.role, tc.addr, tc.relayAddr)
 		if len(raw) < 2 || raw[0] != valueFormatVersion {
 			t.Fatalf("encoded value missing version prefix: % x", raw)
 		}
-		role, addr, err := decodeValue(raw)
+		role, addr, relayAddr, err := decodeValue(raw)
 		if err != nil {
 			t.Fatalf("decode %v: %v", tc.role, err)
 		}
@@ -86,22 +89,47 @@ func TestEncodeDecodeValue_RoundTrip(t *testing.T) {
 		if addr != tc.addr {
 			t.Errorf("addr = %q, want %q", addr, tc.addr)
 		}
+		if relayAddr != tc.relayAddr {
+			t.Errorf("relayAddr = %q, want %q", relayAddr, tc.relayAddr)
+		}
+	}
+}
+
+// TestDecodeValue_RejectsTruncatedV2 asserts decode rejects v2 records
+// that end mid-length-prefix or mid-payload.
+func TestDecodeValue_RejectsTruncatedV2(t *testing.T) {
+	cases := [][]byte{
+		// version + role only; missing addr_len header
+		{valueFormatVersion, byte(RolePeer)},
+		// version + role + 3-byte (truncated) addr_len header
+		{valueFormatVersion, byte(RolePeer), 0x00, 0x00, 0x00},
+		// addr_len = 1 but no addr byte follows
+		{valueFormatVersion, byte(RolePeer), 0x00, 0x00, 0x00, 0x01},
+		// addr_len = 0, missing relay_len header
+		{valueFormatVersion, byte(RolePeer), 0x00, 0x00, 0x00, 0x00},
+		// relay_len = 5 but only 4 bytes follow
+		{valueFormatVersion, byte(RolePeer), 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 'a', 'b', 'c', 'd'},
+	}
+	for i, raw := range cases {
+		if _, _, _, err := decodeValue(raw); err == nil {
+			t.Errorf("case %d: decodeValue(% x) returned nil error", i, raw)
+		}
 	}
 }
 
 // TestDecodeValue_RejectsTruncated asserts decode fails on too-short values.
 func TestDecodeValue_RejectsTruncated(t *testing.T) {
-	if _, _, err := decodeValue(nil); err == nil {
+	if _, _, _, err := decodeValue(nil); err == nil {
 		t.Error("decodeValue(nil) returned nil error")
 	}
-	if _, _, err := decodeValue([]byte{valueFormatVersion}); err == nil {
+	if _, _, _, err := decodeValue([]byte{valueFormatVersion}); err == nil {
 		t.Error("decodeValue(version-only) returned nil error")
 	}
 }
 
 // TestDecodeValue_RejectsUnknownVersion asserts decode fails on an unknown version byte.
 func TestDecodeValue_RejectsUnknownVersion(t *testing.T) {
-	if _, _, err := decodeValue([]byte{0x99, byte(RolePeer)}); err == nil {
+	if _, _, _, err := decodeValue([]byte{0x99, byte(RolePeer)}); err == nil {
 		t.Error("decodeValue(unknown version) returned nil error")
 	}
 }
@@ -150,7 +178,7 @@ func TestGet_DecodeFailureSurfacesWrapped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
 	}
-	seedRawValue(t, path, pub, []byte{valueFormatVersion})
+	seedRawValue(t, path, pub, []byte{valueFormatVersion, byte(RolePeer)})
 
 	s, err := Open(path)
 	if err != nil {
@@ -173,7 +201,7 @@ func TestList_DecodeFailureSurfacesWrapped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
 	}
-	seedRawValue(t, path, pub, []byte{valueFormatVersion})
+	seedRawValue(t, path, pub, []byte{valueFormatVersion, byte(RolePeer)})
 
 	s, err := Open(path)
 	if err != nil {

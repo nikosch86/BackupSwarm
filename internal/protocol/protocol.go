@@ -344,16 +344,18 @@ func ReadJoinResponse(r io.Reader, maxCertLen int) ([]byte, string, error) {
 }
 
 // PeerEntry is one element of a PeerListMessage. Role is opaque to this
-// package; consumers map the byte to their own enum.
+// package; consumers map the byte to their own enum. RelayAddr is the
+// peer's TURN-relayed listen address (empty when no allocation).
 type PeerEntry struct {
-	PubKey [32]byte
-	Role   byte
-	Addr   string
+	PubKey    [32]byte
+	Role      byte
+	Addr      string
+	RelayAddr string
 }
 
 // WritePeerListMessage frames entries as [4B BE count][entry...] where
-// each entry is [32B pubkey][1B role][4B BE addr_len][addr bytes]. A
-// zero role is rejected.
+// each entry is [32B pubkey][1B role][4B BE addr_len][addr bytes]
+// [4B BE relay_len][relay bytes]. A zero role is rejected.
 func WritePeerListMessage(w io.Writer, entries []PeerEntry) error {
 	var hdr [4]byte
 	binary.BigEndian.PutUint32(hdr[:], uint32(len(entries)))
@@ -378,6 +380,15 @@ func WritePeerListMessage(w io.Writer, entries []PeerEntry) error {
 		if len(e.Addr) > 0 {
 			if _, err := w.Write([]byte(e.Addr)); err != nil {
 				return fmt.Errorf("write peer list entry %d addr: %w", i, err)
+			}
+		}
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(e.RelayAddr)))
+		if _, err := w.Write(lenBuf[:]); err != nil {
+			return fmt.Errorf("write peer list entry %d relay length: %w", i, err)
+		}
+		if len(e.RelayAddr) > 0 {
+			if _, err := w.Write([]byte(e.RelayAddr)); err != nil {
+				return fmt.Errorf("write peer list entry %d relay: %w", i, err)
 			}
 		}
 	}
@@ -424,6 +435,20 @@ func ReadPeerListMessage(r io.Reader, maxEntries, maxAddrLen int) ([]PeerEntry, 
 				return nil, fmt.Errorf("read peer list entry %d addr: %w", i, err)
 			}
 			e.Addr = string(body)
+		}
+		if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+			return nil, fmt.Errorf("read peer list entry %d relay length: %w", i, err)
+		}
+		rn := binary.BigEndian.Uint32(lenBuf[:])
+		if maxAddrLen > 0 && int64(rn) > int64(maxAddrLen) {
+			return nil, fmt.Errorf("%w: entry %d relay got %d, max %d", ErrAddrTooLarge, i, rn, maxAddrLen)
+		}
+		if rn > 0 {
+			body := make([]byte, rn)
+			if _, err := io.ReadFull(r, body); err != nil {
+				return nil, fmt.Errorf("read peer list entry %d relay: %w", i, err)
+			}
+			e.RelayAddr = string(body)
 		}
 		out = append(out, e)
 	}

@@ -110,11 +110,12 @@ func TestRouter_HandleStream_ForwardsToOtherConns(t *testing.T) {
 		t.Fatalf("ed25519.GenerateKey: %v", err)
 	}
 	ann := protocol.PeerAnnouncement{
-		Kind:   protocol.AnnouncePeerJoined,
-		ID:     id(0xa3),
-		PubKey: pubArray(pub),
-		Role:   byte(peers.RolePeer),
-		Addr:   "10.0.0.5:4242",
+		Kind:      protocol.AnnouncePeerJoined,
+		ID:        id(0xa3),
+		PubKey:    pubArray(pub),
+		Role:      byte(peers.RolePeer),
+		Addr:      "10.0.0.5:4242",
+		RelayAddr: "203.0.113.5:3478",
 	}
 
 	// Both subscribers should receive the forwarded announcement.
@@ -162,6 +163,12 @@ func TestRouter_HandleStream_ForwardsToOtherConns(t *testing.T) {
 		gotCount++
 		if recv.ID != ann.ID {
 			t.Errorf("forwarded ID mismatch: got %x, want %x", recv.ID, ann.ID)
+		}
+		if recv.Addr != ann.Addr {
+			t.Errorf("forwarded Addr = %q, want %q", recv.Addr, ann.Addr)
+		}
+		if recv.RelayAddr != ann.RelayAddr {
+			t.Errorf("forwarded RelayAddr = %q, want %q", recv.RelayAddr, ann.RelayAddr)
 		}
 	}
 	if gotCount != 2 {

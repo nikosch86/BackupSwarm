@@ -44,10 +44,11 @@ func TestApply_PeerJoined_InsertsNew(t *testing.T) {
 	pub := mustKey(t)
 
 	ann := protocol.PeerAnnouncement{
-		Kind:   protocol.AnnouncePeerJoined,
-		PubKey: pubArray(pub),
-		Role:   byte(peers.RolePeer),
-		Addr:   "10.0.0.5:4242",
+		Kind:      protocol.AnnouncePeerJoined,
+		PubKey:    pubArray(pub),
+		Role:      byte(peers.RolePeer),
+		Addr:      "10.0.0.5:4242",
+		RelayAddr: "203.0.113.5:3478",
 	}
 	if err := swarm.Apply(ann, store); err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -58,6 +59,9 @@ func TestApply_PeerJoined_InsertsNew(t *testing.T) {
 	}
 	if got.Addr != ann.Addr || got.Role != peers.RolePeer {
 		t.Errorf("got %+v, want addr=%q role=peer", got, ann.Addr)
+	}
+	if got.RelayAddr != ann.RelayAddr {
+		t.Errorf("RelayAddr = %q, want %q", got.RelayAddr, ann.RelayAddr)
 	}
 }
 
@@ -139,6 +143,78 @@ func TestApply_AddressChanged_UpdatesAddrPreservesRole(t *testing.T) {
 	}
 	if got.Role != peers.RoleIntroducer {
 		t.Errorf("role = %v, want RoleIntroducer (AddressChanged must not modify role)", got.Role)
+	}
+}
+
+// TestApply_AddressChanged_OverwritesRelayAddr asserts AddressChanged
+// overwrites both Addr and RelayAddr verbatim while preserving Role.
+func TestApply_AddressChanged_OverwritesRelayAddr(t *testing.T) {
+	store := openStore(t)
+	pub := mustKey(t)
+	if err := store.Add(peers.Peer{
+		Addr:      "10.0.0.1:1",
+		RelayAddr: "203.0.113.1:3478",
+		PubKey:    pub,
+		Role:      peers.RoleIntroducer,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	ann := protocol.PeerAnnouncement{
+		Kind:      protocol.AnnounceAddressChanged,
+		PubKey:    pubArray(pub),
+		Addr:      "192.0.2.7:9000",
+		RelayAddr: "203.0.113.9:3478",
+	}
+	if err := swarm.Apply(ann, store); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	got, err := store.Get(pub)
+	if err != nil {
+		t.Fatalf("Get after Apply: %v", err)
+	}
+	if got.Addr != ann.Addr {
+		t.Errorf("addr = %q, want %q", got.Addr, ann.Addr)
+	}
+	if got.RelayAddr != ann.RelayAddr {
+		t.Errorf("RelayAddr = %q, want %q (AddressChanged must apply RelayAddr verbatim)", got.RelayAddr, ann.RelayAddr)
+	}
+	if got.Role != peers.RoleIntroducer {
+		t.Errorf("role = %v, want RoleIntroducer", got.Role)
+	}
+}
+
+// TestApply_AddressChanged_AcceptsRelayOnly asserts an AddressChanged
+// carrying only RelayAddr writes empty Addr and the new RelayAddr.
+func TestApply_AddressChanged_AcceptsRelayOnly(t *testing.T) {
+	store := openStore(t)
+	pub := mustKey(t)
+	if err := store.Add(peers.Peer{
+		Addr:      "10.0.0.1:1",
+		RelayAddr: "",
+		PubKey:    pub,
+		Role:      peers.RoleStorage,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	ann := protocol.PeerAnnouncement{
+		Kind:      protocol.AnnounceAddressChanged,
+		PubKey:    pubArray(pub),
+		RelayAddr: "203.0.113.5:3478",
+	}
+	if err := swarm.Apply(ann, store); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	got, err := store.Get(pub)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Addr != "" {
+		t.Errorf("Addr = %q, want empty (announcement carried empty)", got.Addr)
+	}
+	if got.RelayAddr != ann.RelayAddr {
+		t.Errorf("RelayAddr = %q, want %q", got.RelayAddr, ann.RelayAddr)
 	}
 }
 
@@ -230,6 +306,7 @@ func TestServeAnnouncementStream_RejectsUnknownKind(t *testing.T) {
 	frame := append([]byte{99}, bytes.Repeat([]byte{0x11}, 16)...) // id
 	frame = append(frame, bytes.Repeat([]byte{0xaa}, 32)...)       // pubkey
 	frame = append(frame, 1, 0, 0, 0, 0)                           // role + addr_len=0
+	frame = append(frame, 0, 0, 0, 0)                              // relay_len=0
 	if err := swarm.ServeAnnouncementStream(context.Background(), bytes.NewReader(frame), store); err == nil {
 		t.Error("ServeAnnouncementStream accepted unknown kind")
 	}
@@ -334,5 +411,14 @@ func TestBroadcastPeerJoined_RejectsRoleUnspecified(t *testing.T) {
 	}
 	if err := swarm.BroadcastPeerJoined(context.Background(), nil, joiner); err == nil {
 		t.Error("BroadcastPeerJoined accepted RoleUnspecified")
+	}
+}
+
+// TestBroadcastAddressChanged_AcceptsRelayOnly asserts the validator
+// allows a "relay-only" announcement (peer learned its TURN relay but
+// has no reachable direct addr).
+func TestBroadcastAddressChanged_AcceptsRelayOnly(t *testing.T) {
+	if err := swarm.BroadcastAddressChanged(context.Background(), nil, mustKey(t), "", "203.0.113.5:3478"); err != nil {
+		t.Errorf("BroadcastAddressChanged with relay-only: err = %v, want nil", err)
 	}
 }

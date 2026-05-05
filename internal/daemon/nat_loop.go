@@ -54,12 +54,13 @@ type natLoopOptions struct {
 	port        string
 	pub         ed25519.PublicKey
 	initialHost string
+	relayAddr   string
 	connsFn     func() []*bsquic.Conn
 }
 
 // runNATLoop polls the STUN server every opts.interval and broadcasts
-// AddressChanged to all live conns when the discovered host changes.
-// The first tick fires synchronously before the ticker starts.
+// AddressChanged (Addr + RelayAddr) to all live conns when the host
+// changes. The first tick fires synchronously before the ticker.
 func runNATLoop(ctx context.Context, opts natLoopOptions) {
 	lastHost := opts.initialHost
 	tick := func() {
@@ -77,14 +78,15 @@ func runNATLoop(ctx context.Context, opts natLoopOptions) {
 		}
 		lastHost = host
 		addr := net.JoinHostPort(host, opts.port)
-		if err := broadcastAddressChangedFunc(ctx, opts.connsFn(), opts.pub, addr); err != nil {
+		if err := broadcastAddressChangedFunc(ctx, opts.connsFn(), opts.pub, addr, opts.relayAddr); err != nil {
 			slog.WarnContext(ctx, "nat: broadcast AddressChanged failed",
 				"addr", addr,
 				"err", err)
 			return
 		}
 		slog.InfoContext(ctx, "nat: external address changed",
-			"addr", addr)
+			"addr", addr,
+			"relay_addr", opts.relayAddr)
 	}
 	tick()
 	ticker := time.NewTicker(opts.interval)

@@ -23,7 +23,7 @@ type turnRelayDialer interface {
 }
 
 // chainDial step seams: one var per fallback rung (direct, hole-punch,
-// TURN). Tests swap them.
+// TURN, relay). Tests swap them.
 var (
 	chainDirectDialFn = bsquic.Dial
 	chainTURNDialFn   = func(ctx context.Context, l turnRelayDialer, addr string, priv ed25519.PrivateKey, expected ed25519.PublicKey, trust *bsquic.TrustConfig) (*bsquic.Conn, error) {
@@ -31,6 +31,12 @@ var (
 	}
 	chainPunchFn = func(ctx context.Context, po *punchOrchestrator, target ed25519.PublicKey, rdv *bsquic.Conn) (*bsquic.Conn, error) {
 		return po.RequestPunch(ctx, target, rdv)
+	}
+	chainRelayDialFn = func(ctx context.Context, l turnRelayDialer, addr string, priv ed25519.PrivateKey, expected ed25519.PublicKey, trust *bsquic.TrustConfig) (*bsquic.Conn, error) {
+		if l != nil {
+			return l.DialPeer(ctx, addr, priv, expected, trust)
+		}
+		return bsquic.Dial(ctx, addr, priv, expected, trust)
 	}
 )
 
@@ -41,35 +47,40 @@ const (
 	chainMethodDirect    chainMethod = "direct"
 	chainMethodHolePunch chainMethod = "hole_punch"
 	chainMethodTURN      chainMethod = "turn"
+	chainMethodRelay     chainMethod = "relay"
 )
 
 // chainDialOptions configures one fallback-chain dial. Nil punchOrch
-// disables the hole-punch step; nil turnListener disables the TURN
-// step. Each timeout bounds only its own step.
+// disables hole-punch; nil turnListener disables TURN; empty
+// target.RelayAddr disables relay. Each timeout bounds its own step.
 type chainDialOptions struct {
 	target        peers.Peer
 	priv          ed25519.PrivateKey
 	directTimeout time.Duration
 	punchTimeout  time.Duration
 	turnTimeout   time.Duration
+	relayTimeout  time.Duration
 	punchOrch     *punchOrchestrator
 	turnListener  turnRelayDialer
 	connSet       *swarm.ConnSet
 }
 
-// chainDial tries direct → hole-punch → TURN with per-step sub-contexts,
-// returns the first success. Skipped steps (absent prerequisites) do not
+// chainDial tries direct → hole-punch → TURN → relay with per-step
+// sub-contexts, returns the first success. Skipped steps do not
 // contribute to the joined error returned on full failure.
 func chainDial(ctx context.Context, opts chainDialOptions) (*bsquic.Conn, chainMethod, error) {
 	targetPubHex := hex.EncodeToString(opts.target.PubKey)
 	slog.DebugContext(ctx, "chain_dial: start",
 		"target_pub", targetPubHex,
 		"target_addr", opts.target.Addr,
+		"target_relay_addr", opts.target.RelayAddr,
 		"punch_enabled", opts.punchOrch != nil,
 		"turn_enabled", opts.turnListener != nil,
+		"relay_enabled", opts.target.RelayAddr != "",
 		"direct_timeout", opts.directTimeout,
 		"punch_timeout", opts.punchTimeout,
 		"turn_timeout", opts.turnTimeout,
+		"relay_timeout", opts.relayTimeout,
 	)
 	var errs []error
 
@@ -142,6 +153,29 @@ func chainDial(ctx context.Context, opts chainDialOptions) (*bsquic.Conn, chainM
 			"target_pub", targetPubHex,
 			"err", err)
 		errs = append(errs, fmt.Errorf("turn: %w", err))
+	}
+
+	if opts.target.RelayAddr == "" {
+		slog.DebugContext(ctx, "chain_dial: relay skipped",
+			"target_pub", targetPubHex,
+			"reason", "no_relay_addr")
+	} else {
+		slog.DebugContext(ctx, "chain_dial: relay attempt",
+			"target_pub", targetPubHex,
+			"target_relay_addr", opts.target.RelayAddr,
+			"via_turn_listener", opts.turnListener != nil,
+			"timeout", opts.relayTimeout)
+		rctx, rcancel := context.WithTimeout(ctx, opts.relayTimeout)
+		conn, err := chainRelayDialFn(rctx, opts.turnListener, opts.target.RelayAddr, opts.priv, opts.target.PubKey, nil)
+		rcancel()
+		if err == nil {
+			slog.DebugContext(ctx, "chain_dial: relay succeeded", "target_pub", targetPubHex)
+			return conn, chainMethodRelay, nil
+		}
+		slog.DebugContext(ctx, "chain_dial: relay failed",
+			"target_pub", targetPubHex,
+			"err", err)
+		errs = append(errs, fmt.Errorf("relay: %w", err))
 	}
 
 	slog.DebugContext(ctx, "chain_dial: all steps failed",

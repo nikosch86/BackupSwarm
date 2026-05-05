@@ -28,7 +28,8 @@ var (
 )
 
 // Apply commits ann to store. PeerJoined no-ops on existing peers,
-// PeerLeft is idempotent, AddressChanged updates Addr only.
+// PeerLeft is idempotent, AddressChanged overwrites both Addr and
+// RelayAddr while preserving Role.
 func Apply(ann protocol.PeerAnnouncement, store *peers.Store) error {
 	pub := ed25519.PublicKey(ann.PubKey[:])
 	switch ann.Kind {
@@ -39,9 +40,10 @@ func Apply(ann protocol.PeerAnnouncement, store *peers.Store) error {
 			return fmt.Errorf("apply PeerJoined: get existing: %w", err)
 		}
 		newPeer := peers.Peer{
-			Addr:   ann.Addr,
-			PubKey: append(ed25519.PublicKey(nil), ann.PubKey[:]...),
-			Role:   peers.Role(ann.Role),
+			Addr:      ann.Addr,
+			RelayAddr: ann.RelayAddr,
+			PubKey:    append(ed25519.PublicKey(nil), ann.PubKey[:]...),
+			Role:      peers.Role(ann.Role),
 		}
 		if err := storeAddFunc(store, newPeer); err != nil {
 			return fmt.Errorf("apply PeerJoined: add: %w", err)
@@ -61,6 +63,7 @@ func Apply(ann protocol.PeerAnnouncement, store *peers.Store) error {
 			return fmt.Errorf("apply AddressChanged: get: %w", err)
 		}
 		existing.Addr = ann.Addr
+		existing.RelayAddr = ann.RelayAddr
 		if err := storeAddFunc(store, existing); err != nil {
 			return fmt.Errorf("apply AddressChanged: add: %w", err)
 		}
@@ -91,7 +94,8 @@ func ServeAnnouncementStream(ctx context.Context, r io.Reader, store *peers.Stor
 	return nil
 }
 
-// BroadcastPeerJoined opens one stream per conn and writes a PeerJoined frame.
+// BroadcastPeerJoined opens one stream per conn and writes a
+// PeerJoined frame for joiner, including joiner.RelayAddr.
 func BroadcastPeerJoined(ctx context.Context, conns []*bsquic.Conn, joiner peers.Peer) error {
 	if len(joiner.PubKey) != ed25519.PublicKeySize {
 		return fmt.Errorf("broadcast PeerJoined: pubkey size %d, want %d", len(joiner.PubKey), ed25519.PublicKeySize)
@@ -107,6 +111,7 @@ func BroadcastPeerJoined(ctx context.Context, conns []*bsquic.Conn, joiner peers
 	copy(ann.PubKey[:], joiner.PubKey)
 	ann.Role = byte(joiner.Role)
 	ann.Addr = joiner.Addr
+	ann.RelayAddr = joiner.RelayAddr
 	for _, conn := range conns {
 		sendAnnouncement(ctx, conn, ann)
 	}
@@ -114,13 +119,15 @@ func BroadcastPeerJoined(ctx context.Context, conns []*bsquic.Conn, joiner peers
 }
 
 // BroadcastAddressChanged opens one stream per conn and writes an
-// AddressChanged frame for subjPub's new addr. addr must be non-empty.
-func BroadcastAddressChanged(ctx context.Context, conns []*bsquic.Conn, subjPub ed25519.PublicKey, addr string) error {
+// AddressChanged frame for subjPub's new addr and relay addr. At least
+// one of addr / relayAddr must be non-empty; receivers apply both
+// fields verbatim.
+func BroadcastAddressChanged(ctx context.Context, conns []*bsquic.Conn, subjPub ed25519.PublicKey, addr, relayAddr string) error {
 	if len(subjPub) != ed25519.PublicKeySize {
 		return fmt.Errorf("broadcast AddressChanged: pubkey size %d, want %d", len(subjPub), ed25519.PublicKeySize)
 	}
-	if addr == "" {
-		return fmt.Errorf("broadcast AddressChanged: addr is empty")
+	if addr == "" && relayAddr == "" {
+		return fmt.Errorf("broadcast AddressChanged: addr and relay addr are both empty")
 	}
 	var ann protocol.PeerAnnouncement
 	ann.Kind = protocol.AnnounceAddressChanged
@@ -129,6 +136,7 @@ func BroadcastAddressChanged(ctx context.Context, conns []*bsquic.Conn, subjPub 
 	}
 	copy(ann.PubKey[:], subjPub)
 	ann.Addr = addr
+	ann.RelayAddr = relayAddr
 	for _, conn := range conns {
 		sendAnnouncement(ctx, conn, ann)
 	}

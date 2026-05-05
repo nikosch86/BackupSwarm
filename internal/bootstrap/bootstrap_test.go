@@ -192,6 +192,50 @@ func TestBootstrap_EndToEnd(t *testing.T) {
 	}
 }
 
+// TestBootstrap_DoJoin_PersistsTokenRelayAddr asserts the joiner stores
+// the inviter's token-embedded RelayAddr alongside Addr in peers.db.
+func TestBootstrap_DoJoin_PersistsTokenRelayAddr(t *testing.T) {
+	rig := setupTwoSides(t)
+	const joinerListen = "192.0.2.1:9000"
+	const inviterRelayAddr = "203.0.113.5:3478"
+	tok, err := token.Encode(token.Token{
+		Addr:      rig.listener.Addr().String(),
+		RelayAddr: inviterRelayAddr,
+		Pub:       rig.introducerPub,
+		SwarmID:   rig.swarmID,
+		Secret:    rig.secret,
+	})
+	if err != nil {
+		t.Fatalf("token.Encode: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = bootstrap.AcceptJoin(ctx, rig.listener, rig.introducerPeerList, rig.validator(), nil)
+	}()
+
+	if _, err := bootstrap.DoJoin(ctx, tok, rig.joinerPriv, joinerListen, rig.joinerPeerList); err != nil {
+		t.Fatalf("DoJoin: %v", err)
+	}
+	wg.Wait()
+
+	got, err := rig.joinerPeerList.Get(rig.introducerPub)
+	if err != nil {
+		t.Fatalf("joiner peer store missing introducer: %v", err)
+	}
+	if got.Addr != rig.listener.Addr().String() {
+		t.Errorf("Addr = %q, want %q", got.Addr, rig.listener.Addr().String())
+	}
+	if got.RelayAddr != inviterRelayAddr {
+		t.Errorf("RelayAddr = %q, want %q (token-embedded relay must persist into peers.db)", got.RelayAddr, inviterRelayAddr)
+	}
+}
+
 // TestBootstrap_SendsExistingPeers seeds the introducer's peer store
 // with a third-party entry and verifies DoJoin returns it verbatim.
 func TestBootstrap_SendsExistingPeers(t *testing.T) {
@@ -200,7 +244,7 @@ func TestBootstrap_SendsExistingPeers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("third key: %v", err)
 	}
-	seeded := peers.Peer{Addr: "10.20.30.40:7777", PubKey: thirdPub, Role: peers.RoleStorage}
+	seeded := peers.Peer{Addr: "10.20.30.40:7777", RelayAddr: "203.0.113.40:3478", PubKey: thirdPub, Role: peers.RoleStorage}
 	if err := rig.introducerPeerList.Add(seeded); err != nil {
 		t.Fatalf("seed peer: %v", err)
 	}
@@ -236,6 +280,9 @@ func TestBootstrap_SendsExistingPeers(t *testing.T) {
 	}
 	if got.Addr != seeded.Addr {
 		t.Errorf("third-party addr = %q, want %q", got.Addr, seeded.Addr)
+	}
+	if got.RelayAddr != seeded.RelayAddr {
+		t.Errorf("third-party relay addr = %q, want %q (peer-list message must carry RelayAddr)", got.RelayAddr, seeded.RelayAddr)
 	}
 	if got.Role != peers.RoleStorage {
 		t.Errorf("third-party role = %v, want RoleStorage", got.Role)

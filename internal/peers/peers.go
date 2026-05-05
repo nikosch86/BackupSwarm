@@ -6,6 +6,7 @@ package peers
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -29,8 +30,9 @@ const (
 	// bbolt file inside a node's data directory.
 	DefaultFilename = "peers.db"
 
-	// valueFormatVersion is the leading byte of every encoded peer record.
-	valueFormatVersion byte = 1
+	// valueFormatVersion is the leading byte of every encoded peer
+	// record; the layout length-prefixes both Addr and RelayAddr.
+	valueFormatVersion byte = 2
 )
 
 // ErrPeerNotFound is returned by Get and Remove when no peer is stored
@@ -86,25 +88,51 @@ func validateRole(r Role) error {
 	}
 }
 
-// encodeValue serializes a peer record as [version | role | addr...].
-func encodeValue(role Role, addr string) []byte {
-	out := make([]byte, 2+len(addr))
+// encodeValue serializes a peer record as
+// [version | role | addr_len:4 BE | addr | relay_len:4 BE | relay].
+func encodeValue(role Role, addr, relayAddr string) []byte {
+	out := make([]byte, 2+4+len(addr)+4+len(relayAddr))
 	out[0] = valueFormatVersion
 	out[1] = byte(role)
-	copy(out[2:], addr)
+	binary.BigEndian.PutUint32(out[2:6], uint32(len(addr)))
+	copy(out[6:], addr)
+	off := 6 + len(addr)
+	binary.BigEndian.PutUint32(out[off:off+4], uint32(len(relayAddr)))
+	copy(out[off+4:], relayAddr)
 	return out
 }
 
 // decodeValue parses an encoded peer record, returning ErrUnknownVersion
 // when the leading byte is not valueFormatVersion.
-func decodeValue(raw []byte) (Role, string, error) {
+func decodeValue(raw []byte) (Role, string, string, error) {
 	if len(raw) < 2 {
-		return RoleUnspecified, "", fmt.Errorf("peers: record too short (%d bytes)", len(raw))
+		return RoleUnspecified, "", "", fmt.Errorf("peers: record too short (%d bytes)", len(raw))
 	}
 	if raw[0] != valueFormatVersion {
-		return RoleUnspecified, "", fmt.Errorf("%w: %d", ErrUnknownVersion, raw[0])
+		return RoleUnspecified, "", "", fmt.Errorf("%w: %d", ErrUnknownVersion, raw[0])
 	}
-	return Role(raw[1]), string(raw[2:]), nil
+	role := Role(raw[1])
+	rest := raw[2:]
+	if len(rest) < 4 {
+		return RoleUnspecified, "", "", fmt.Errorf("peers: record missing addr length (%d bytes left)", len(rest))
+	}
+	addrLen := binary.BigEndian.Uint32(rest[:4])
+	rest = rest[4:]
+	if uint32(len(rest)) < addrLen {
+		return RoleUnspecified, "", "", fmt.Errorf("peers: addr truncated (have %d, want %d)", len(rest), addrLen)
+	}
+	addr := string(rest[:addrLen])
+	rest = rest[addrLen:]
+	if len(rest) < 4 {
+		return RoleUnspecified, "", "", fmt.Errorf("peers: record missing relay length (%d bytes left)", len(rest))
+	}
+	relayLen := binary.BigEndian.Uint32(rest[:4])
+	rest = rest[4:]
+	if uint32(len(rest)) < relayLen {
+		return RoleUnspecified, "", "", fmt.Errorf("peers: relay truncated (have %d, want %d)", len(rest), relayLen)
+	}
+	relayAddr := string(rest[:relayLen])
+	return role, addr, relayAddr, nil
 }
 
 // Test-only seams; production never reassigns these.
@@ -115,12 +143,14 @@ var (
 	}
 )
 
-// Peer is one known storage peer: its last-reported listen address,
-// Ed25519 identity public key, and Role.
+// Peer is one known storage peer. Addr is the direct listen address;
+// RelayAddr is the TURN-relayed listen address (empty when none).
+// Either may be empty; PubKey and Role are mandatory.
 type Peer struct {
-	Addr   string
-	PubKey ed25519.PublicKey
-	Role   Role
+	Addr      string
+	RelayAddr string
+	PubKey    ed25519.PublicKey
+	Role      Role
 }
 
 // Store is a bbolt-backed peer registry.
@@ -183,7 +213,7 @@ func (s *Store) Add(p Peer) error {
 	}
 	return s.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucketName))
-		return b.Put(p.PubKey, encodeValue(p.Role, p.Addr))
+		return b.Put(p.PubKey, encodeValue(p.Role, p.Addr, p.RelayAddr))
 	})
 }
 
@@ -199,14 +229,15 @@ func (s *Store) Get(pub ed25519.PublicKey) (Peer, error) {
 		if raw == nil {
 			return fmt.Errorf("%w: %x", ErrPeerNotFound, pub[:8])
 		}
-		role, addr, decErr := decodeValue(raw)
+		role, addr, relayAddr, decErr := decodeValue(raw)
 		if decErr != nil {
 			return fmt.Errorf("decode peer record: %w", decErr)
 		}
 		got = Peer{
-			Addr:   addr,
-			PubKey: bytes.Clone(pub),
-			Role:   role,
+			Addr:      addr,
+			RelayAddr: relayAddr,
+			PubKey:    bytes.Clone(pub),
+			Role:      role,
 		}
 		return nil
 	})
@@ -238,14 +269,15 @@ func (s *Store) List() ([]Peer, error) {
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(bucketName))
 		return b.ForEach(func(k, v []byte) error {
-			role, addr, decErr := decodeValue(v)
+			role, addr, relayAddr, decErr := decodeValue(v)
 			if decErr != nil {
 				return fmt.Errorf("decode peer record: %w", decErr)
 			}
 			out = append(out, Peer{
-				Addr:   addr,
-				PubKey: bytes.Clone(k),
-				Role:   role,
+				Addr:      addr,
+				RelayAddr: relayAddr,
+				PubKey:    bytes.Clone(k),
+				Role:      role,
 			})
 			return nil
 		})

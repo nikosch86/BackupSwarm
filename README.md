@@ -223,13 +223,17 @@ rung first succeeds.
 #### Connection fallback chain
 
 Each outbound peer dial runs an ordered chain of attempts with
-per-step timeouts: `direct` → `hole_punch` → `turn`. A step is skipped
-when its prerequisites are absent — the hole-punch step needs at least
-one live conn to a non-target peer to act as rendezvous, and the TURN
-step needs `--turn-server` to be configured. On success the daemon
-emits an INFO line `peer connected method=<direct|hole_punch|turn>
-peer_pub=<hex> peer_addr=<host:port>` so an operator filtering
-journalctl can see which path produced each connection.
+per-step timeouts: `direct` → `hole_punch` → `turn` → `relay`. A step
+is skipped when its prerequisites are absent — the hole-punch step
+needs at least one live conn to a non-target peer to act as
+rendezvous, the TURN step needs `--turn-server` to be configured, and
+the relay step is skipped when the target peer has no advertised
+`RelayAddr` (peers learn each other's `RelayAddr` from the bootstrap
+peer-list, the invite token, and announcement gossip). On success the
+daemon emits an INFO line `peer connected
+method=<direct|hole_punch|turn|relay> peer_pub=<hex>
+peer_addr=<host:port>` so an operator filtering journalctl can see
+which path produced each connection.
 
 The per-step bounds are configurable on `run`:
 
@@ -238,6 +242,7 @@ The per-step bounds are configurable on `run`:
 | `--dial-timeout` | 30s | direct step |
 | `--punch-timeout` | 5s  | hole-punch step |
 | `--turn-dial-timeout` | 15s | TURN step |
+| `--relay-dial-timeout` | 15s | relay step (target's `RelayAddr`) |
 
 Each timeout is a sub-context of the parent dial context — a step
 hitting its limit moves the chain on without cancelling the rest.

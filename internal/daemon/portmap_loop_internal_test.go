@@ -97,6 +97,71 @@ func withFastRefresh(t *testing.T) {
 	})
 }
 
+// TestRunPortMapLoop_BroadcastsRelayAddr asserts opts.relayAddr is
+// shipped alongside the new mapped addr on every emit.
+func TestRunPortMapLoop_BroadcastsRelayAddr(t *testing.T) {
+	prevBroadcast := broadcastAddressChangedFunc
+	prevMap := portmapMapFunc
+	prevJitter := portmapJitterFn
+	t.Cleanup(func() {
+		broadcastAddressChangedFunc = prevBroadcast
+		portmapMapFunc = prevMap
+		portmapJitterFn = prevJitter
+	})
+	portmapJitterFn = func() float64 { return 1.0 }
+	withFastRefresh(t)
+
+	type bc struct{ addr, relay string }
+	bcCh := make(chan bc, 4)
+	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, addr, relay string) error {
+		bcCh <- bc{addr: addr, relay: relay}
+		return nil
+	}
+
+	mapper := &fakePortMapper{
+		results: []nat.Mapping{
+			{ExternalIP: net.IPv4(203, 0, 113, 22), ExternalPort: 7777, InternalPort: 7777, Protocol: "upnp", LeaseSeconds: 0},
+		},
+	}
+	portmapMapFunc = func(_ context.Context, _ nat.PortMapper, _ int) (nat.Mapping, error) {
+		return mapper.Map(context.Background(), 0)
+	}
+
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runPortMapLoop(ctx, portmapLoopOptions{
+			mapper:       mapper,
+			initial:      nat.Mapping{ExternalIP: net.IPv4(198, 51, 100, 1), ExternalPort: 7777, InternalPort: 7777, Protocol: "upnp", LeaseSeconds: 60},
+			internalPort: 7777,
+			pub:          pub,
+			relayAddr:    "203.0.113.5:3478",
+			connsFn:      func() []*bsquic.Conn { return nil },
+		})
+	}()
+
+	select {
+	case got := <-bcCh:
+		if got.addr != "203.0.113.22:7777" {
+			t.Errorf("addr = %q, want 203.0.113.22:7777", got.addr)
+		}
+		if got.relay != "203.0.113.5:3478" {
+			t.Errorf("relay = %q, want 203.0.113.5:3478", got.relay)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("AddressChanged not broadcast within 2s")
+	}
+	cancel()
+	<-done
+}
+
 func TestRunPortMapLoop_BroadcastsOnAddressChange(t *testing.T) {
 	prevBroadcast := broadcastAddressChangedFunc
 	prevMap := portmapMapFunc
@@ -110,7 +175,7 @@ func TestRunPortMapLoop_BroadcastsOnAddressChange(t *testing.T) {
 	withFastRefresh(t)
 
 	gotAddrCh := make(chan string, 4)
-	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, addr string) error {
+	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, addr, _ string) error {
 		gotAddrCh <- addr
 		return nil
 	}
@@ -169,7 +234,7 @@ func TestRunPortMapLoop_NoBroadcastWhenAddressUnchanged(t *testing.T) {
 
 	var broadcasts int
 	var mu sync.Mutex
-	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, _ string) error {
+	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, _, _ string) error {
 		mu.Lock()
 		defer mu.Unlock()
 		broadcasts++
@@ -219,7 +284,7 @@ func TestRunPortMapLoop_RefreshFailureLogsAndContinues(t *testing.T) {
 	})
 	portmapJitterFn = func() float64 { return 1.0 }
 	withFastRefresh(t)
-	broadcastAddressChangedFunc = func(context.Context, []*bsquic.Conn, ed25519.PublicKey, string) error {
+	broadcastAddressChangedFunc = func(context.Context, []*bsquic.Conn, ed25519.PublicKey, string, string) error {
 		t.Fatal("broadcast should not run on refresh failure")
 		return nil
 	}
@@ -357,7 +422,7 @@ func TestRunPortMapLoop_BroadcastFailureLogsAndContinues(t *testing.T) {
 	portmapJitterFn = func() float64 { return 1.0 }
 	withFastRefresh(t)
 
-	broadcastAddressChangedFunc = func(context.Context, []*bsquic.Conn, ed25519.PublicKey, string) error {
+	broadcastAddressChangedFunc = func(context.Context, []*bsquic.Conn, ed25519.PublicKey, string, string) error {
 		return errors.New("forced broadcast failure")
 	}
 	portmapMapFunc = func(_ context.Context, _ nat.PortMapper, _ int) (nat.Mapping, error) {

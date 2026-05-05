@@ -28,7 +28,7 @@ func TestRunNATLoop_NoBroadcastWhenHostUnchanged(t *testing.T) {
 
 	origB := broadcastAddressChangedFunc
 	t.Cleanup(func() { broadcastAddressChangedFunc = origB })
-	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, _ string) error {
+	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, _, _ string) error {
 		broadcastCalls.Add(1)
 		return nil
 	}
@@ -71,6 +71,62 @@ func TestRunNATLoop_NoBroadcastWhenHostUnchanged(t *testing.T) {
 	}
 }
 
+// TestRunNATLoop_BroadcastsRelayAddr asserts opts.relayAddr is shipped
+// alongside the new direct addr on every emit, so receivers learn the
+// peer's TURN endpoint in the same announcement.
+func TestRunNATLoop_BroadcastsRelayAddr(t *testing.T) {
+	var hostMu sync.Mutex
+	host := "203.0.113.7"
+	getHost := func() string { hostMu.Lock(); defer hostMu.Unlock(); return host }
+	setHost := func(h string) { hostMu.Lock(); defer hostMu.Unlock(); host = h }
+
+	orig := natDiscoverFunc
+	t.Cleanup(func() { natDiscoverFunc = orig })
+	natDiscoverFunc = func(_ context.Context, _ string) (string, error) {
+		return getHost(), nil
+	}
+
+	type bc struct{ addr, relay string }
+	bcCh := make(chan bc, 4)
+	origB := broadcastAddressChangedFunc
+	t.Cleanup(func() { broadcastAddressChangedFunc = origB })
+	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, addr, relay string) error {
+		bcCh <- bc{addr: addr, relay: relay}
+		return nil
+	}
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("genkey: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go runNATLoop(ctx, natLoopOptions{
+		server:      "stun.example:3478",
+		interval:    20 * time.Millisecond,
+		perProbe:    50 * time.Millisecond,
+		port:        "7777",
+		pub:         pub,
+		initialHost: "203.0.113.7",
+		relayAddr:   "203.0.113.5:3478",
+		connsFn:     func() []*bsquic.Conn { return nil },
+	})
+
+	setHost("198.51.100.42")
+	select {
+	case got := <-bcCh:
+		if got.addr != "198.51.100.42:7777" {
+			t.Errorf("addr = %q, want 198.51.100.42:7777", got.addr)
+		}
+		if got.relay != "203.0.113.5:3478" {
+			t.Errorf("relay = %q, want 203.0.113.5:3478", got.relay)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no broadcast received after host change")
+	}
+}
+
 func TestRunNATLoop_BroadcastsOnHostChange(t *testing.T) {
 	var hostMu sync.Mutex
 	host := "203.0.113.7"
@@ -90,7 +146,7 @@ func TestRunNATLoop_BroadcastsOnHostChange(t *testing.T) {
 	bcCh := make(chan bc, 4)
 	origB := broadcastAddressChangedFunc
 	t.Cleanup(func() { broadcastAddressChangedFunc = origB })
-	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, p ed25519.PublicKey, addr string) error {
+	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, p ed25519.PublicKey, addr, _ string) error {
 		bcCh <- bc{addr: addr, pub: p}
 		return nil
 	}
@@ -134,6 +190,64 @@ func TestRunNATLoop_BroadcastsOnHostChange(t *testing.T) {
 	}
 }
 
+// TestRunNATLoop_BroadcastErrorIsLoggedAndLoopContinues asserts a
+// failing AddressChanged broadcast does not abort the loop and the
+// next host change still triggers another emit attempt.
+func TestRunNATLoop_BroadcastErrorIsLoggedAndLoopContinues(t *testing.T) {
+	var hostMu sync.Mutex
+	host := "203.0.113.7"
+	getHost := func() string { hostMu.Lock(); defer hostMu.Unlock(); return host }
+	setHost := func(h string) { hostMu.Lock(); defer hostMu.Unlock(); host = h }
+
+	orig := natDiscoverFunc
+	t.Cleanup(func() { natDiscoverFunc = orig })
+	natDiscoverFunc = func(_ context.Context, _ string) (string, error) {
+		return getHost(), nil
+	}
+
+	var broadcastCalls atomic.Int32
+	origB := broadcastAddressChangedFunc
+	t.Cleanup(func() { broadcastAddressChangedFunc = origB })
+	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, _, _ string) error {
+		broadcastCalls.Add(1)
+		return errors.New("broadcast boom")
+	}
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("genkey: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go runNATLoop(ctx, natLoopOptions{
+		server:      "stun.example:3478",
+		interval:    20 * time.Millisecond,
+		perProbe:    50 * time.Millisecond,
+		port:        "7777",
+		pub:         pub,
+		initialHost: "203.0.113.7",
+		connsFn:     func() []*bsquic.Conn { return nil },
+	})
+
+	setHost("198.51.100.42")
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && broadcastCalls.Load() < 1 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := broadcastCalls.Load(); got < 1 {
+		t.Fatalf("broadcast calls = %d, want >= 1 after host change", got)
+	}
+	// Loop must keep ticking after the broadcast error.
+	setHost("198.51.100.43")
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && broadcastCalls.Load() < 2 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := broadcastCalls.Load(); got < 2 {
+		t.Errorf("broadcast calls = %d after second host change, want loop to continue", got)
+	}
+}
+
 func TestRunNATLoop_DiscoverErrorIsLoggedAndLoopContinues(t *testing.T) {
 	var discoverCalls atomic.Int32
 	var broadcastCalls atomic.Int32
@@ -146,7 +260,7 @@ func TestRunNATLoop_DiscoverErrorIsLoggedAndLoopContinues(t *testing.T) {
 	}
 	origB := broadcastAddressChangedFunc
 	t.Cleanup(func() { broadcastAddressChangedFunc = origB })
-	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, _ string) error {
+	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, _, _ string) error {
 		broadcastCalls.Add(1)
 		return nil
 	}
@@ -236,7 +350,7 @@ func TestRunNATLoop_StopsOnCtxCancel(t *testing.T) {
 	}
 	origB := broadcastAddressChangedFunc
 	t.Cleanup(func() { broadcastAddressChangedFunc = origB })
-	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, _ string) error {
+	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, _, _ string) error {
 		return nil
 	}
 

@@ -287,8 +287,8 @@ func TestWriteJoinRequest_PropagatesWriteErrors(t *testing.T) {
 // TestWritePeerListMessage_PropagatesEntryWriteError covers a failure
 // on each entry-stage write.
 func TestWritePeerListMessage_PropagatesEntryWriteError(t *testing.T) {
-	in := []protocol.PeerEntry{{PubKey: filledArray(0x11), Role: 1, Addr: "x"}}
-	for i, name := range []string{"count", "pubkey", "role", "addrLen", "addr"} {
+	in := []protocol.PeerEntry{{PubKey: filledArray(0x11), Role: 1, Addr: "x", RelayAddr: "y"}}
+	for i, name := range []string{"count", "pubkey", "role", "addrLen", "addr", "relayLen", "relay"} {
 		sentinel := errors.New(name + " peer entry boom")
 		w := &errWriter{failAt: i, err: sentinel}
 		err := protocol.WritePeerListMessage(w, in)
@@ -417,9 +417,9 @@ func TestReadJoinResponse_RejectsTruncated(t *testing.T) {
 
 func samplePeerEntries() []protocol.PeerEntry {
 	return []protocol.PeerEntry{
-		{PubKey: filledArray(0x11), Role: 1, Addr: "10.0.0.1:7777"},
+		{PubKey: filledArray(0x11), Role: 1, Addr: "10.0.0.1:7777", RelayAddr: "203.0.113.1:3478"},
 		{PubKey: filledArray(0x22), Role: 2, Addr: "10.0.0.2:7777"},
-		{PubKey: filledArray(0x33), Role: 3, Addr: ""},
+		{PubKey: filledArray(0x33), Role: 3, Addr: "", RelayAddr: "203.0.113.3:3478"},
 	}
 }
 
@@ -447,6 +447,23 @@ func TestWriteReadPeerListMessage_RoundTrip(t *testing.T) {
 		if out[i].Addr != in[i].Addr {
 			t.Errorf("entry %d addr = %q, want %q", i, out[i].Addr, in[i].Addr)
 		}
+		if out[i].RelayAddr != in[i].RelayAddr {
+			t.Errorf("entry %d relay addr = %q, want %q", i, out[i].RelayAddr, in[i].RelayAddr)
+		}
+	}
+}
+
+// TestReadPeerListMessage_RejectsOversizedRelayAddr asserts the wire
+// reader caps each entry's RelayAddr against maxAddrLen, mirroring the
+// Addr cap.
+func TestReadPeerListMessage_RejectsOversizedRelayAddr(t *testing.T) {
+	in := []protocol.PeerEntry{{PubKey: filledArray(0x11), Role: 1, Addr: "x", RelayAddr: "way-too-long-to-fit"}}
+	var buf bytes.Buffer
+	if err := protocol.WritePeerListMessage(&buf, in); err != nil {
+		t.Fatalf("WritePeerListMessage: %v", err)
+	}
+	if _, err := protocol.ReadPeerListMessage(&buf, 1<<10, 5); err == nil {
+		t.Error("ReadPeerListMessage accepted oversized relay addr")
 	}
 }
 
@@ -507,5 +524,44 @@ func TestReadPeerListMessage_RejectsTruncated(t *testing.T) {
 	frame = append(frame, bytes.Repeat([]byte{0x11}, 31)...)
 	if _, err := protocol.ReadPeerListMessage(bytes.NewReader(frame), 1<<10, 1<<10); err == nil {
 		t.Error("ReadPeerListMessage accepted truncated pubkey")
+	}
+
+	// Per-stage truncation: cut after pubkey (no role byte).
+	frame = []byte{0, 0, 0, 1}
+	frame = append(frame, bytes.Repeat([]byte{0x11}, 32)...)
+	if _, err := protocol.ReadPeerListMessage(bytes.NewReader(frame), 1<<10, 1<<10); err == nil {
+		t.Error("ReadPeerListMessage accepted truncated role")
+	}
+
+	// Cut after role (no addr length prefix).
+	frame = []byte{0, 0, 0, 1}
+	frame = append(frame, bytes.Repeat([]byte{0x11}, 32)...)
+	frame = append(frame, 0x01)
+	if _, err := protocol.ReadPeerListMessage(bytes.NewReader(frame), 1<<10, 1<<10); err == nil {
+		t.Error("ReadPeerListMessage accepted truncated addr length")
+	}
+
+	// Declared addr_len=4 with no addr body bytes.
+	frame = []byte{0, 0, 0, 1}
+	frame = append(frame, bytes.Repeat([]byte{0x11}, 32)...)
+	frame = append(frame, 0x01, 0, 0, 0, 4)
+	if _, err := protocol.ReadPeerListMessage(bytes.NewReader(frame), 1<<10, 1<<10); err == nil {
+		t.Error("ReadPeerListMessage accepted truncated addr body")
+	}
+
+	// Addr present but no relay length prefix.
+	frame = []byte{0, 0, 0, 1}
+	frame = append(frame, bytes.Repeat([]byte{0x11}, 32)...)
+	frame = append(frame, 0x01, 0, 0, 0, 1, 'x')
+	if _, err := protocol.ReadPeerListMessage(bytes.NewReader(frame), 1<<10, 1<<10); err == nil {
+		t.Error("ReadPeerListMessage accepted truncated relay length")
+	}
+
+	// Declared relay_len=4 with no relay body bytes.
+	frame = []byte{0, 0, 0, 1}
+	frame = append(frame, bytes.Repeat([]byte{0x11}, 32)...)
+	frame = append(frame, 0x01, 0, 0, 0, 1, 'x', 0, 0, 0, 4)
+	if _, err := protocol.ReadPeerListMessage(bytes.NewReader(frame), 1<<10, 1<<10); err == nil {
+		t.Error("ReadPeerListMessage accepted truncated relay body")
 	}
 }

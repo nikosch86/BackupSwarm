@@ -147,7 +147,7 @@ publish-dryrun:
 # joiners ("peer joined" >= 3), node-a backed up the seeded tree,
 # node-b shipped its own backup payload (founder-as-source), node-a
 # observed both forwarded announcements ("applied announcement" >= 2),
-# and node-a dialed every announced peer ("dialed peer" >= 3).
+# and node-a connected to every announced peer ("peer connected" >= 3).
 docker-compose-test:
 	docker compose up -d --build
 	@echo "verifying --port default of 7777 binds 0.0.0.0:7777..."
@@ -193,18 +193,18 @@ docker-compose-test:
 		echo "node-a only logged $$count 'applied announcement' events; want >=2 (node-c + node-d)"; \
 		docker compose logs node-a; docker compose logs node-b; docker compose down -v; exit 1; \
 	fi
-	@echo "waiting for node-a to dial every announced peer..."
+	@echo "waiting for node-a to connect to every announced peer..."
 	@for i in $$(seq 1 90); do \
-		count=$$(docker compose logs node-a 2>/dev/null | grep -c '"msg":"dialed peer"'); \
+		count=$$(docker compose logs node-a 2>/dev/null | grep -c '"msg":"peer connected"'); \
 		if [ "$$count" -ge 3 ]; then break; fi; \
 		sleep 1; \
 	done
-	@count=$$(docker compose logs node-a 2>/dev/null | grep -c '"msg":"dialed peer"'); \
+	@count=$$(docker compose logs node-a 2>/dev/null | grep -c '"msg":"peer connected"'); \
 	if [ "$$count" -lt 3 ]; then \
-		echo "node-a only logged $$count 'dialed peer' events; want >=3 (node-b at startup + node-c + node-d post-startup)"; \
+		echo "node-a only logged $$count 'peer connected' events; want >=3 (node-b at startup + node-c + node-d post-startup)"; \
 		docker compose logs node-a; docker compose down -v; exit 1; \
 	fi
-	@echo "docker-compose-test: 4-node swarm formed; node-a backed up the seeded tree, node-b shipped its own payload, both saw forwarded announcements, node-a dialed each announced peer, and env-default-check bound via the --port default"
+	@echo "docker-compose-test: 4-node swarm formed; node-a backed up the seeded tree, node-b shipped its own payload, both saw forwarded announcements, node-a connected to each announced peer, and env-default-check bound via the --port default"
 	docker compose down -v
 
 ## docker-compose-test-turn: cross-allocation TURN smoke test against a real

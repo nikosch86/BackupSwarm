@@ -19,6 +19,7 @@ type portmapLoopOptions struct {
 	initial      nat.Mapping
 	internalPort int
 	pub          ed25519.PublicKey
+	relayAddr    string
 	connsFn      func() []*bsquic.Conn
 }
 
@@ -71,7 +72,7 @@ func runPortMapLoop(ctx context.Context, opts portmapLoopOptions) {
 		previous := current
 		current = next
 		addr := net.JoinHostPort(next.ExternalIP.String(), strconv.Itoa(next.ExternalPort))
-		if err := broadcastAddressChangedFunc(ctx, opts.connsFn(), opts.pub, addr); err != nil {
+		if err := broadcastAddressChangedFunc(ctx, opts.connsFn(), opts.pub, addr, opts.relayAddr); err != nil {
 			slog.WarnContext(ctx, "nat: port mapping broadcast AddressChanged failed",
 				"addr", addr,
 				"err", err,
@@ -82,6 +83,7 @@ func runPortMapLoop(ctx context.Context, opts portmapLoopOptions) {
 			"protocol", next.Protocol,
 			"prev_addr", net.JoinHostPort(previous.ExternalIP.String(), strconv.Itoa(previous.ExternalPort)),
 			"addr", addr,
+			"relay_addr", opts.relayAddr,
 		)
 	}
 }

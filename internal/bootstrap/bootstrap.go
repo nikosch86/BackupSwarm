@@ -343,7 +343,7 @@ func DoJoin(ctx context.Context, tokenStr string, myPriv ed25519.PrivateKey, myL
 		return JoinResult{}, fmt.Errorf("decode peer list: %w", err)
 	}
 
-	introducer := peers.Peer{Addr: tok.Addr, PubKey: ed25519PubCopy(tok.Pub), Role: peers.RoleIntroducer}
+	introducer := peers.Peer{Addr: tok.Addr, RelayAddr: tok.RelayAddr, PubKey: ed25519PubCopy(tok.Pub), Role: peers.RoleIntroducer}
 	if err := store.Add(introducer); err != nil {
 		return JoinResult{}, fmt.Errorf("persist introducer: %w", err)
 	}
@@ -376,6 +376,7 @@ func peersToEntries(in []peers.Peer) ([]protocol.PeerEntry, error) {
 		copy(entry.PubKey[:], p.PubKey)
 		entry.Role = byte(p.Role)
 		entry.Addr = p.Addr
+		entry.RelayAddr = p.RelayAddr
 		out = append(out, entry)
 	}
 	return out, nil
@@ -394,7 +395,7 @@ func entriesToPeers(in []protocol.PeerEntry) ([]peers.Peer, error) {
 		}
 		pub := make(ed25519.PublicKey, ed25519.PublicKeySize)
 		copy(pub, e.PubKey[:])
-		out = append(out, peers.Peer{Addr: e.Addr, PubKey: pub, Role: role})
+		out = append(out, peers.Peer{Addr: e.Addr, RelayAddr: e.RelayAddr, PubKey: pub, Role: role})
 	}
 	return out, nil
 }

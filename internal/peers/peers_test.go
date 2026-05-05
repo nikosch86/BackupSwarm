@@ -72,6 +72,76 @@ func TestAddGet_RoundTrip(t *testing.T) {
 	if got.Role != peer.Role {
 		t.Errorf("Role = %v, want %v", got.Role, peer.Role)
 	}
+	if got.RelayAddr != "" {
+		t.Errorf("RelayAddr = %q, want empty (default)", got.RelayAddr)
+	}
+}
+
+// TestAddGet_PreservesRelayAddr asserts RelayAddr survives Add/Get when
+// set alongside Addr and when set with Addr empty.
+func TestAddGet_PreservesRelayAddr(t *testing.T) {
+	cases := []struct {
+		name      string
+		addr      string
+		relayAddr string
+	}{
+		{"both populated", "10.0.0.1:7777", "203.0.113.5:3478"},
+		{"relay only", "", "203.0.113.6:3478"},
+		{"addr only", "10.0.0.2:7777", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openTestStore(t)
+			pub := mustKey(t)
+			p := peers.Peer{Addr: tc.addr, RelayAddr: tc.relayAddr, PubKey: pub, Role: peers.RoleStorage}
+			if err := s.Add(p); err != nil {
+				t.Fatalf("Add: %v", err)
+			}
+			got, err := s.Get(pub)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Addr != tc.addr {
+				t.Errorf("Addr = %q, want %q", got.Addr, tc.addr)
+			}
+			if got.RelayAddr != tc.relayAddr {
+				t.Errorf("RelayAddr = %q, want %q", got.RelayAddr, tc.relayAddr)
+			}
+		})
+	}
+}
+
+// TestAdd_UpdateAddrPreservesRelayAddr asserts an upsert that re-supplies
+// both fields preserves the unchanged one. Callers own the snapshot.
+func TestAdd_UpdateAddrPreservesRelayAddr(t *testing.T) {
+	s := openTestStore(t)
+	pub := mustKey(t)
+	if err := s.Add(peers.Peer{
+		Addr:      "10.0.0.1:7777",
+		RelayAddr: "203.0.113.5:3478",
+		PubKey:    pub,
+		Role:      peers.RoleStorage,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := s.Add(peers.Peer{
+		Addr:      "10.0.0.1:8888",
+		RelayAddr: "203.0.113.5:3478",
+		PubKey:    pub,
+		Role:      peers.RoleStorage,
+	}); err != nil {
+		t.Fatalf("Add update: %v", err)
+	}
+	got, err := s.Get(pub)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Addr != "10.0.0.1:8888" {
+		t.Errorf("Addr = %q, want updated 10.0.0.1:8888", got.Addr)
+	}
+	if got.RelayAddr != "203.0.113.5:3478" {
+		t.Errorf("RelayAddr = %q, want preserved 203.0.113.5:3478", got.RelayAddr)
+	}
 }
 
 // TestAddGet_PreservesRole asserts every defined Role survives Add/Get round-trip.

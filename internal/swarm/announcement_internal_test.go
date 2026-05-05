@@ -68,6 +68,25 @@ func TestBroadcastPeerJoined_RandReadErrorSurfacesWrapped(t *testing.T) {
 	}
 }
 
+// TestBroadcastAddressChanged_RandReadErrorSurfacesWrapped exercises the
+// rand.Read failure branch when minting the announcement id.
+func TestBroadcastAddressChanged_RandReadErrorSurfacesWrapped(t *testing.T) {
+	sentinel := errors.New("forced rand failure")
+	withRandReadFunc(t, func([]byte) (int, error) { return 0, sentinel })
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+	gotErr := BroadcastAddressChanged(context.Background(), nil, pub, "192.0.2.7:9000", "203.0.113.5:3478")
+	if gotErr == nil {
+		t.Fatal("BroadcastAddressChanged succeeded despite injected rand failure")
+	}
+	if !errors.Is(gotErr, sentinel) {
+		t.Errorf("err = %v, want wraps sentinel", gotErr)
+	}
+}
+
 func openInternalStore(t *testing.T) *peers.Store {
 	t.Helper()
 	s, err := peers.Open(filepath.Join(t.TempDir(), "peers.db"))

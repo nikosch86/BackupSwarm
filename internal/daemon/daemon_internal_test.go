@@ -875,7 +875,7 @@ func TestRun_STUNServerSpawnsLoopWithAdvertiseAddrPort(t *testing.T) {
 	}
 	prevBC := broadcastAddressChangedFunc
 	t.Cleanup(func() { broadcastAddressChangedFunc = prevBC })
-	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, _ string) error {
+	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, _, _ string) error {
 		return nil
 	}
 
@@ -915,7 +915,7 @@ func TestRun_STUNServerFallsBackToListenAddrWhenAdvertiseEmpty(t *testing.T) {
 	}
 	prevBC := broadcastAddressChangedFunc
 	t.Cleanup(func() { broadcastAddressChangedFunc = prevBC })
-	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, _ string) error {
+	broadcastAddressChangedFunc = func(_ context.Context, _ []*bsquic.Conn, _ ed25519.PublicKey, _, _ string) error {
 		return nil
 	}
 
