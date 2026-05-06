@@ -63,6 +63,10 @@ type chainDialOptions struct {
 	punchOrch     *punchOrchestrator
 	turnListener  turnRelayDialer
 	connSet       *swarm.ConnSet
+
+	// allowDirectRelayDial opts the relay rung in when turnListener is
+	// nil; default false skips the rung in that case.
+	allowDirectRelayDial bool
 }
 
 // chainDial tries direct → hole-punch → TURN → relay with per-step
@@ -133,33 +137,18 @@ func chainDial(ctx context.Context, opts chainDialOptions) (*bsquic.Conn, chainM
 		}
 	}
 
-	if opts.turnListener == nil {
-		slog.DebugContext(ctx, "chain_dial: turn skipped",
-			"target_pub", targetPubHex,
-			"reason", "no_allocation")
-	} else {
-		slog.DebugContext(ctx, "chain_dial: turn attempt",
-			"target_pub", targetPubHex,
-			"target_addr", opts.target.Addr,
-			"timeout", opts.turnTimeout)
-		tctx, tcancel := context.WithTimeout(ctx, opts.turnTimeout)
-		conn, err := chainTURNDialFn(tctx, opts.turnListener, opts.target.Addr, opts.priv, opts.target.PubKey, nil)
-		tcancel()
-		if err == nil {
-			slog.DebugContext(ctx, "chain_dial: turn succeeded", "target_pub", targetPubHex)
-			return conn, chainMethodTURN, nil
-		}
-		slog.DebugContext(ctx, "chain_dial: turn failed",
-			"target_pub", targetPubHex,
-			"err", err)
-		errs = append(errs, fmt.Errorf("turn: %w", err))
-	}
+	relayRungEligible := opts.target.RelayAddr != "" && (opts.turnListener != nil || opts.allowDirectRelayDial)
 
-	if opts.target.RelayAddr == "" {
+	switch {
+	case opts.target.RelayAddr == "":
 		slog.DebugContext(ctx, "chain_dial: relay skipped",
 			"target_pub", targetPubHex,
 			"reason", "no_relay_addr")
-	} else {
+	case opts.turnListener == nil && !opts.allowDirectRelayDial:
+		slog.DebugContext(ctx, "chain_dial: relay skipped",
+			"target_pub", targetPubHex,
+			"reason", "no_turn_listener_for_relay_addr")
+	default:
 		slog.DebugContext(ctx, "chain_dial: relay attempt",
 			"target_pub", targetPubHex,
 			"target_relay_addr", opts.target.RelayAddr,
@@ -176,6 +165,33 @@ func chainDial(ctx context.Context, opts chainDialOptions) (*bsquic.Conn, chainM
 			"target_pub", targetPubHex,
 			"err", err)
 		errs = append(errs, fmt.Errorf("relay: %w", err))
+	}
+
+	switch {
+	case opts.turnListener == nil:
+		slog.DebugContext(ctx, "chain_dial: turn skipped",
+			"target_pub", targetPubHex,
+			"reason", "no_allocation")
+	case relayRungEligible:
+		slog.DebugContext(ctx, "chain_dial: turn skipped",
+			"target_pub", targetPubHex,
+			"reason", "relay_rung_already_attempted")
+	default:
+		slog.DebugContext(ctx, "chain_dial: turn attempt",
+			"target_pub", targetPubHex,
+			"target_addr", opts.target.Addr,
+			"timeout", opts.turnTimeout)
+		tctx, tcancel := context.WithTimeout(ctx, opts.turnTimeout)
+		conn, err := chainTURNDialFn(tctx, opts.turnListener, opts.target.Addr, opts.priv, opts.target.PubKey, nil)
+		tcancel()
+		if err == nil {
+			slog.DebugContext(ctx, "chain_dial: turn succeeded", "target_pub", targetPubHex)
+			return conn, chainMethodTURN, nil
+		}
+		slog.DebugContext(ctx, "chain_dial: turn failed",
+			"target_pub", targetPubHex,
+			"err", err)
+		errs = append(errs, fmt.Errorf("turn: %w", err))
 	}
 
 	slog.DebugContext(ctx, "chain_dial: all steps failed",

@@ -182,6 +182,10 @@ type Options struct {
 	// RelayDialTimeout bounds the steady-state relay step (target's
 	// advertised RelayAddr). Zero defaults to 15s.
 	RelayDialTimeout time.Duration
+	// AllowDirectRelayDial engages the relay rung when this daemon
+	// has no TURN listener; falls through to a plain UDP dial to
+	// target.RelayAddr.
+	AllowDirectRelayDial bool
 	// IssueInitialInvite issues a token at startup.
 	IssueInitialInvite bool
 	// InitialInviteOut is the file path the initial invite token is written to.
@@ -571,29 +575,33 @@ func Run(ctx context.Context, opts Options) error {
 		},
 	}
 
+	punchAdvertise := opts.AdvertiseAddr
+	if punchAdvertise == "" {
+		punchAdvertise = listener.Addr().String()
+	}
+
 	dialer := &outboundDialer{
-		ctx:          ctx,
-		priv:         id.PrivateKey,
-		timeout:      opts.DialTimeout,
-		punchTimeout: opts.PunchTimeout,
-		turnTimeout:  opts.TURNDialTimeout,
-		relayTimeout: opts.RelayDialTimeout,
-		st:           st,
-		annHandler:   router.HandleStream,
-		connSet:      connSet,
-		reach:        reach,
-		limiters:     limiters,
-		backoff:      newPeerBackoff(opts.BackoffBase, opts.BackoffMax, opts.BackoffJitter, nil, nil),
+		ctx:                  ctx,
+		priv:                 id.PrivateKey,
+		timeout:              opts.DialTimeout,
+		punchTimeout:         opts.PunchTimeout,
+		turnTimeout:          opts.TURNDialTimeout,
+		relayTimeout:         opts.RelayDialTimeout,
+		st:                   st,
+		annHandler:           router.HandleStream,
+		connSet:              connSet,
+		reach:                reach,
+		limiters:             limiters,
+		backoff:              newPeerBackoff(opts.BackoffBase, opts.BackoffMax, opts.BackoffJitter, nil, nil),
+		selfPub:              id.PublicKey,
+		selfAddr:             punchAdvertise,
+		selfRelayAddr:        relayAddr,
+		allowDirectRelayDial: opts.AllowDirectRelayDial,
 	}
 	defer dialer.CloseAll()
 	joinHandler := makeJoinHandler(opts.DataDir, peerStore, swarmCA, connSet, dialer)
 	dialer.joinHandler = joinHandler
 	router.OnApplied = makeImmediateDialOnApplied(peerStore, connSet, dialer)
-
-	punchAdvertise := opts.AdvertiseAddr
-	if punchAdvertise == "" {
-		punchAdvertise = listener.Addr().String()
-	}
 	punchOrch := newPunchOrchestrator(ctx, listener, connSet, peerStore, id.PrivateKey, punchAdvertise)
 	defer punchOrch.pendingPunches.Wait()
 	dialer.punchOrch = punchOrch
@@ -959,10 +967,18 @@ type outboundDialer struct {
 	punchOrch    *punchOrchestrator
 	turnListener turnRelayDialer
 
+	allowDirectRelayDial bool
+
 	// backoff gates redial-sweep retries on consecutive dial failures.
 	// Nil disables the gate; signal-driven dials (immediate-on-announce)
 	// always pass through dial() and update the state.
 	backoff *peerBackoff
+
+	// selfPub / selfAddr / selfRelayAddr seed the AddressChanged frame
+	// register sends on each new outbound conn.
+	selfPub       ed25519.PublicKey
+	selfAddr      string
+	selfRelayAddr string
 
 	mu    sync.Mutex
 	conns []*bsquic.Conn
@@ -987,6 +1003,24 @@ func (d *outboundDialer) register(conn *bsquic.Conn, p peers.Peer, method chainM
 		"peer_pub", hex.EncodeToString(p.PubKey),
 		"role", p.Role,
 	)
+	d.advertiseSelf(conn)
+}
+
+// advertiseSelf sends one AddressChanged frame on conn with this
+// daemon's listen + relay addresses; no-op when both are empty.
+func (d *outboundDialer) advertiseSelf(conn *bsquic.Conn) {
+	if d.selfAddr == "" && d.selfRelayAddr == "" {
+		return
+	}
+	if len(d.selfPub) != ed25519.PublicKeySize {
+		return
+	}
+	if err := broadcastAddressChangedFunc(d.ctx, []*bsquic.Conn{conn}, d.selfPub, d.selfAddr, d.selfRelayAddr); err != nil {
+		slog.WarnContext(d.ctx, "advertise self addresses failed",
+			"peer_pub", hex.EncodeToString(conn.RemotePub()),
+			"err", err,
+		)
+	}
 }
 
 // dial runs the direct → hole-punch → TURN fallback chain, marks
@@ -998,15 +1032,16 @@ func (d *outboundDialer) dial(ctx context.Context, p peers.Peer) (*bsquic.Conn, 
 		"role", p.Role,
 	)
 	conn, method, err := chainDial(ctx, chainDialOptions{
-		target:        p,
-		priv:          d.priv,
-		directTimeout: d.timeout,
-		punchTimeout:  d.punchTimeout,
-		turnTimeout:   d.turnTimeout,
-		relayTimeout:  d.relayTimeout,
-		punchOrch:     d.punchOrch,
-		turnListener:  d.turnListener,
-		connSet:       d.connSet,
+		target:               p,
+		priv:                 d.priv,
+		directTimeout:        d.timeout,
+		punchTimeout:         d.punchTimeout,
+		turnTimeout:          d.turnTimeout,
+		relayTimeout:         d.relayTimeout,
+		punchOrch:            d.punchOrch,
+		turnListener:         d.turnListener,
+		connSet:              d.connSet,
+		allowDirectRelayDial: d.allowDirectRelayDial,
 	})
 	if err != nil {
 		d.backoff.MarkFailure(p.PubKey)

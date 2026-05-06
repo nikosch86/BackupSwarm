@@ -28,6 +28,10 @@ func newJoinCmd(dataDir *string) *cobra.Command {
 		backupDir      string
 		chunkSize      int
 		scanInterval   time.Duration
+		turnServer     string
+		turnUser       string
+		turnPass       string
+		turnRealm      string
 	)
 	cmd := &cobra.Command{
 		Use:   "join [token]",
@@ -94,6 +98,11 @@ func newJoinCmd(dataDir *string) *cobra.Command {
 			if !thenRun {
 				return nil
 			}
+			if turnServer != "" {
+				if turnUser == "" || turnPass == "" || turnRealm == "" {
+					return fmt.Errorf("--turn-server requires --turn-user, --turn-pass, and --turn-realm")
+				}
+			}
 			sessHandedOff = true
 			return daemon.Run(cmd.Context(), daemon.Options{
 				DataDir:      sess.dir,
@@ -103,6 +112,12 @@ func newJoinCmd(dataDir *string) *cobra.Command {
 				ChunkSize:    chunkSize,
 				ScanInterval: scanInterval,
 				Progress:     cmd.OutOrStdout(),
+				TURN: daemon.TURNOptions{
+					Server:   turnServer,
+					Username: turnUser,
+					Password: turnPass,
+					Realm:    turnRealm,
+				},
 			})
 		},
 	}
@@ -113,6 +128,10 @@ func newJoinCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().StringVar(&backupDir, "backup-dir", "", "Directory to keep synced (used with --then-run)")
 	cmd.Flags().IntVar(&chunkSize, "chunk-size", 1<<20, "Target chunk size in bytes (used with --then-run)")
 	cmd.Flags().DurationVar(&scanInterval, "scan-interval", 60*time.Second, "Period between incremental scan passes (used with --then-run)")
+	cmd.Flags().StringVar(&turnServer, "turn-server", "", "host:port of a TURN server to allocate a relay against at startup (used with --then-run); empty disables the relay")
+	cmd.Flags().StringVar(&turnUser, "turn-user", "", "Username for the TURN long-term credential (required with --turn-server)")
+	cmd.Flags().StringVar(&turnPass, "turn-pass", "", "Password for the TURN long-term credential (required with --turn-server)")
+	cmd.Flags().StringVar(&turnRealm, "turn-realm", "", "Realm for the TURN long-term credential (required with --turn-server)")
 	return cmd
 }
 

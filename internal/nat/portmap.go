@@ -5,12 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"time"
 
 	"github.com/huin/goupnp/dcps/internetgateway2"
 	"github.com/jackpal/gateway"
 	"github.com/jackpal/go-nat-pmp"
 )
+
+// EnvLocalIP, when set, overrides defaultLocalOutboundIP.
+const EnvLocalIP = "BACKUPSWARM_LOCAL_IP"
 
 // ErrNoPortMapper is returned when neither UPnP nor NAT-PMP responded.
 var ErrNoPortMapper = errors.New("nat: no port mapper found")
@@ -237,7 +241,37 @@ var localOutboundIPFunc = defaultLocalOutboundIP
 
 func localOutboundIP() (net.IP, error) { return localOutboundIPFunc() }
 
+// netInterfacesFunc / netInterfaceAddrsFunc are seams for the iface-
+// enumeration fallback.
+var (
+	netInterfacesFunc     = net.Interfaces
+	netInterfaceAddrsFunc = func(iface net.Interface) ([]net.Addr, error) {
+		return iface.Addrs()
+	}
+)
+
+// defaultLocalOutboundIP resolves the IPv4 address goupnp uses as the
+// internal client for AddPortMapping. Tries env (BACKUPSWARM_LOCAL_IP),
+// 8.8.8.8 UDP probe, then first non-loopback IPv4 interface.
 func defaultLocalOutboundIP() (net.IP, error) {
+	if v := os.Getenv(EnvLocalIP); v != "" {
+		ip := net.ParseIP(v)
+		if ip == nil {
+			return nil, fmt.Errorf("nat: %s=%q is not a valid IP", EnvLocalIP, v)
+		}
+		ip4 := ip.To4()
+		if ip4 == nil {
+			return nil, fmt.Errorf("nat: %s=%q is not an IPv4 address", EnvLocalIP, v)
+		}
+		return ip4, nil
+	}
+	if ip, err := probeOutboundIP(); err == nil {
+		return ip, nil
+	}
+	return firstNonLoopbackIPv4()
+}
+
+func probeOutboundIP() (net.IP, error) {
 	conn, err := net.Dial("udp4", "8.8.8.8:80")
 	if err != nil {
 		return nil, err
@@ -248,4 +282,32 @@ func defaultLocalOutboundIP() (net.IP, error) {
 		return nil, fmt.Errorf("nat: unexpected local addr type %T", conn.LocalAddr())
 	}
 	return addr.IP, nil
+}
+
+func firstNonLoopbackIPv4() (net.IP, error) {
+	ifaces, err := netInterfacesFunc()
+	if err != nil {
+		return nil, fmt.Errorf("nat: enumerate interfaces: %w", err)
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := netInterfaceAddrsFunc(iface)
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip4 := ipNet.IP.To4()
+			if ip4 == nil || ip4.IsLoopback() {
+				continue
+			}
+			return ip4, nil
+		}
+	}
+	return nil, errors.New("nat: no non-loopback ipv4 interface available")
 }

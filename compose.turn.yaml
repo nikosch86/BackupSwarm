@@ -1,16 +1,16 @@
-# Two-node TURN cross-allocation smoke test.
+# Three-node TURN cross-allocation smoke test.
 #
 # inviter-net (172.30.0.0/16): node-b only.
 # joiner-net  (172.31.0.0/16): node-a only.
-# coturn-net  (172.29.0.0/16): node-a, node-b, coturn (172.29.0.5).
+# joiner2-net (172.32.0.0/16): node-c only.
+# coturn-net  (172.29.0.0/16): node-a, node-b, node-c, coturn (172.29.0.5).
 #
-# node-b binds on inviter-net so node-a cannot reach it directly. node-b
-# pre-permits the coturn IP on its allocation, so a direct dial to its
-# relay from node-a's coturn-net IP is dropped at coturn. node-a allocates
-# its own binding against the same coturn server; cross-allocation
-# forwarding presents the source as coturn's IP, the pre-permit matches,
-# and the QUIC handshake completes. Assertion target:
-# `method=relay_via_joiner_turn` in node-a's slog.
+# node-b binds on inviter-net so neither joiner can reach it directly.
+# Each node has --turn-server and publishes a relay.addr; bootstrap
+# joins land via cross-allocation forwarding (method=relay_via_joiner_turn).
+# Post-bootstrap, advertiseSelf on register propagates RelayAddrs
+# through the gossip mesh, and node-c dials node-a via the chainDial
+# relay rung (method=relay).
 
 services:
   seeder:
@@ -19,12 +19,15 @@ services:
       - shared-token-turn:/shared
       - node-a-data:/data-a
       - node-b-data:/data-b
+      - node-c-data:/data-c
+      - backup-a-turn:/backup-a
+      - backup-c-turn:/backup-c
     command:
       - sh
       - -c
       - |
         set -eu
-        chown -R 65532:65532 /shared /data-a /data-b
+        chown -R 65532:65532 /shared /data-a /data-b /data-c /backup-a /backup-c
         echo "prep done: chowned volumes to nonroot"
     restart: "no"
 
@@ -94,6 +97,7 @@ services:
     volumes:
       - node-a-data:/data
       - shared-token-turn:/shared
+      - backup-a-turn:/backup
     networks:
       joiner-net:
         ipv4_address: 172.31.0.21
@@ -110,6 +114,88 @@ services:
       - --then-run
       - --listen
       - 172.31.0.21:7778
+      - --backup-dir
+      - /backup
+      - --scan-interval
+      - 5s
+      - --turn-server
+      - 172.29.0.5:3478
+      - --turn-user
+      - swarm
+      - --turn-pass
+      - s3cret
+      - --turn-realm
+      - backupswarm.swarm
+
+  inviter-c:
+    image: backupswarm:dev
+    depends_on:
+      node-b:
+        condition: service_started
+    volumes:
+      - node-b-data:/data
+      - shared-token-turn:/shared
+    command:
+      - --data-dir
+      - /data
+      - invite
+      - --wait
+      - 30s
+      - --token-out
+      - /shared/token-c.txt
+    restart: "no"
+
+  # Hold node-c back until node-a has connected to node-b and
+  # advertiseSelf has populated node-b's peers.db with node-a's
+  # RelayAddr; otherwise node-c's PeerListMessage at join time omits it.
+  invite-pickup-delay-c:
+    image: busybox:1.37
+    depends_on:
+      inviter-c:
+        condition: service_completed_successfully
+    command: sh -c "sleep 25"
+    restart: "no"
+
+  node-c:
+    build: .
+    image: backupswarm:dev
+    depends_on:
+      seeder:
+        condition: service_completed_successfully
+      invite-pickup-delay-c:
+        condition: service_completed_successfully
+    volumes:
+      - node-c-data:/data
+      - shared-token-turn:/shared
+      - backup-c-turn:/backup
+    networks:
+      joiner2-net:
+        ipv4_address: 172.32.0.22
+      coturn-net:
+        ipv4_address: 172.29.0.22
+    command:
+      - --data-dir
+      - /data
+      - join
+      - --token-file
+      - /shared/token-c.txt
+      - --timeout
+      - 2m
+      - --then-run
+      - --listen
+      - 172.32.0.22:7779
+      - --backup-dir
+      - /backup
+      - --scan-interval
+      - 5s
+      - --turn-server
+      - 172.29.0.5:3478
+      - --turn-user
+      - swarm
+      - --turn-pass
+      - s3cret
+      - --turn-realm
+      - backupswarm.swarm
 
 networks:
   inviter-net:
@@ -122,6 +208,11 @@ networks:
     ipam:
       config:
         - subnet: 172.31.0.0/16
+  joiner2-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.32.0.0/16
   coturn-net:
     driver: bridge
     ipam:
@@ -131,4 +222,7 @@ networks:
 volumes:
   node-a-data:
   node-b-data:
+  node-c-data:
   shared-token-turn:
+  backup-a-turn:
+  backup-c-turn:

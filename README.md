@@ -208,6 +208,19 @@ also override via env vars: `BACKUPSWARM_TURN_SERVER`,
 `BACKUPSWARM_TURN_USER`, `BACKUPSWARM_TURN_PASS`, `BACKUPSWARM_TURN_REALM`
 (env takes precedence over token-embedded values).
 
+> **Security note on `--turn-cred-share=on` (default).** Anyone holding
+> a valid invite token gets the operator's TURN credentials, and TURN
+> servers are general UDP relays — the holder can use them for
+> arbitrary traffic, not just BackupSwarm. The default fits the
+> single-operator self-hosted swarm where one set of credentials is
+> shared across the swarm and zero-config joins matter more than
+> per-tenant isolation. For shared-tenant or untrusted-joiner
+> deployments, run with `--turn-cred-share=off` and distribute per-
+> joiner credentials out-of-band (the joiner picks them up via the
+> `BACKUPSWARM_TURN_*` env vars). Consider also coturn's
+> `--use-auth-secret` HMAC mode so leaked credentials expire on a
+> known TTL rather than persisting indefinitely.
+
 The bootstrap chain a joiner walks for the *initial* dial against an
 inviter is `direct → relay-direct → relay_via_joiner_turn`:
 

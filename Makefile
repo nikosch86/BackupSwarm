@@ -208,8 +208,10 @@ docker-compose-test:
 	docker compose down -v
 
 ## docker-compose-test-turn: cross-allocation TURN smoke test against a real
-# coturn container. Asserts node-a connects via the joiner-side TURN
-# allocation (`method=relay_via_joiner_turn`).
+# coturn container. Asserts node-a and node-c bootstrap via joiner-side
+# TURN (method=relay_via_joiner_turn) and node-c hits the chainDial
+# relay rung at least twice post-bootstrap (to node-b and node-a,
+# method=relay).
 docker-compose-test-turn:
 	docker compose -f compose.turn.yaml up -d --build
 	@echo "waiting for node-a to bootstrap via cross-allocation TURN..."
@@ -223,7 +225,33 @@ docker-compose-test-turn:
 		  docker compose -f compose.turn.yaml logs node-b; \
 		  docker compose -f compose.turn.yaml logs coturn; \
 		  docker compose -f compose.turn.yaml down -v; exit 1; }
-	@echo "docker-compose-test-turn: node-a joined node-b via joiner-side TURN cross-allocation"
+	@echo "waiting for node-c to bootstrap via cross-allocation TURN..."
+	@for i in $$(seq 1 90); do \
+		if docker compose -f compose.turn.yaml logs node-c 2>/dev/null | grep -q '"method":"relay_via_joiner_turn"'; then break; fi; \
+		sleep 1; \
+	done
+	@docker compose -f compose.turn.yaml logs node-c 2>/dev/null | grep -q '"method":"relay_via_joiner_turn"' || \
+		{ echo "node-c did not bootstrap via relay_via_joiner_turn"; \
+		  docker compose -f compose.turn.yaml logs node-c; \
+		  docker compose -f compose.turn.yaml logs node-b; \
+		  docker compose -f compose.turn.yaml logs coturn; \
+		  docker compose -f compose.turn.yaml down -v; exit 1; }
+	@echo "waiting for node-c to log >=2 'peer connected method=relay' (chainDial relay rung) ..."
+	@for i in $$(seq 1 120); do \
+		count=$$(docker compose -f compose.turn.yaml logs node-c 2>/dev/null | grep -c '"msg":"peer connected","method":"relay"'); \
+		if [ "$$count" -ge 2 ]; then break; fi; \
+		sleep 1; \
+	done
+	@count=$$(docker compose -f compose.turn.yaml logs node-c 2>/dev/null | grep -c '"msg":"peer connected","method":"relay"'); \
+	if [ "$$count" -lt 2 ]; then \
+		echo "node-c logged $$count 'peer connected method=relay' lines; want >=2 (node-b post-bootstrap + node-a via M4.10 chain rung)"; \
+		docker compose -f compose.turn.yaml logs node-c; \
+		docker compose -f compose.turn.yaml logs node-a; \
+		docker compose -f compose.turn.yaml logs node-b; \
+		docker compose -f compose.turn.yaml logs coturn; \
+		docker compose -f compose.turn.yaml down -v; exit 1; \
+	fi
+	@echo "docker-compose-test-turn: bootstrap (node-a, node-c) via joiner-side TURN; M4.10 chain relay rung (node-c \xe2\x86\x92 b, a) confirmed"
 	docker compose -f compose.turn.yaml down -v
 
 ## trivy-deps: scan source tree for vulnerable deps, secrets, and misconfigs (HIGH+CRITICAL)

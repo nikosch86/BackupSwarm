@@ -486,9 +486,8 @@ func TestChainDial_RelaySucceeds_WithTURNListener(t *testing.T) {
 	}
 }
 
-// Direct, punch fail, no turn listener; relay rung still attempts via
-// the direct-fallback path. The seam fires regardless of turnListener
-// presence — production code branches inside the seam.
+// allowDirectRelayDial=true with nil turnListener: relay seam dials
+// target.RelayAddr directly.
 func TestChainDial_RelaySucceeds_WithoutTURNListener(t *testing.T) {
 	want := fakeChainConn()
 	cnt := swapChainSeamsWithRelay(t,
@@ -515,7 +514,8 @@ func TestChainDial_RelaySucceeds_WithoutTURNListener(t *testing.T) {
 	opts.punchOrch = &punchOrchestrator{}
 	opts.connSet = swarm.NewConnSet()
 	stubRendezvousConn(t, opts.connSet)
-	opts.turnListener = nil // production seam falls back to bsquic.Dial
+	opts.turnListener = nil
+	opts.allowDirectRelayDial = true // explicit opt-in: target pre-permitted our IP
 
 	conn, method, err := chainDial(context.Background(), opts)
 	if err != nil {
@@ -532,6 +532,86 @@ func TestChainDial_RelaySucceeds_WithoutTURNListener(t *testing.T) {
 	}
 	if cnt.relay.Load() != 1 {
 		t.Errorf("relay step ran %d times, want 1", cnt.relay.Load())
+	}
+}
+
+// Both rungs would succeed; relay fires first and the TURN seam is
+// not invoked.
+func TestChainDial_PrefersRelayOverTURN_WhenRelayAddrSet(t *testing.T) {
+	want := fakeChainConn()
+	cnt := swapChainSeamsWithRelay(t,
+		func(context.Context, string, ed25519.PrivateKey, ed25519.PublicKey, *bsquic.TrustConfig) (*bsquic.Conn, error) {
+			return nil, errors.New("direct boom")
+		},
+		func(context.Context, *punchOrchestrator, ed25519.PublicKey, *bsquic.Conn) (*bsquic.Conn, error) {
+			return nil, errors.New("punch boom")
+		},
+		func(context.Context, turnRelayDialer, string, ed25519.PrivateKey, ed25519.PublicKey, *bsquic.TrustConfig) (*bsquic.Conn, error) {
+			return fakeChainConn(), nil // would succeed if reached — must not be
+		},
+		func(context.Context, turnRelayDialer, string, ed25519.PrivateKey, ed25519.PublicKey, *bsquic.TrustConfig) (*bsquic.Conn, error) {
+			return want, nil
+		})
+
+	target := chainTestTarget(t)
+	target.RelayAddr = "203.0.113.5:3478"
+	opts := chainTestOpts(target)
+	opts.punchOrch = &punchOrchestrator{}
+	opts.connSet = swarm.NewConnSet()
+	stubRendezvousConn(t, opts.connSet)
+	opts.turnListener = stubTurnDialer{}
+
+	conn, method, err := chainDial(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("chainDial err = %v, want nil", err)
+	}
+	if conn != want {
+		t.Errorf("conn = %p, want %p (relay seam result)", conn, want)
+	}
+	if method != chainMethodRelay {
+		t.Errorf("method = %q, want %q (relay must precede turn)", method, chainMethodRelay)
+	}
+	if cnt.relay.Load() != 1 {
+		t.Errorf("relay step ran %d times, want 1", cnt.relay.Load())
+	}
+	if cnt.turn.Load() != 0 {
+		t.Errorf("turn step ran %d times, want 0 (relay rung covers same path)", cnt.turn.Load())
+	}
+}
+
+// allowDirectRelayDial=false (default) with nil turnListener skips
+// the relay rung even when target.RelayAddr is set.
+func TestChainDial_NilTURNListener_RelayRungSkipped(t *testing.T) {
+	cnt := swapChainSeamsWithRelay(t,
+		func(context.Context, string, ed25519.PrivateKey, ed25519.PublicKey, *bsquic.TrustConfig) (*bsquic.Conn, error) {
+			return nil, errors.New("direct boom")
+		},
+		func(context.Context, *punchOrchestrator, ed25519.PublicKey, *bsquic.Conn) (*bsquic.Conn, error) {
+			return nil, errors.New("punch boom")
+		},
+		nil,
+		func(context.Context, turnRelayDialer, string, ed25519.PrivateKey, ed25519.PublicKey, *bsquic.TrustConfig) (*bsquic.Conn, error) {
+			return fakeChainConn(), nil // would succeed if reached — must not be reached
+		})
+
+	target := chainTestTarget(t)
+	target.RelayAddr = "203.0.113.5:3478"
+	opts := chainTestOpts(target)
+	opts.punchOrch = &punchOrchestrator{}
+	opts.connSet = swarm.NewConnSet()
+	stubRendezvousConn(t, opts.connSet)
+	opts.turnListener = nil
+	opts.allowDirectRelayDial = false
+
+	_, method, err := chainDial(context.Background(), opts)
+	if err == nil {
+		t.Fatal("chainDial err = nil, want non-nil (relay rung must skip)")
+	}
+	if method != "" {
+		t.Errorf("method = %q, want empty", method)
+	}
+	if cnt.relay.Load() != 0 {
+		t.Errorf("relay seam fired %d times despite nil turnListener + opt-out", cnt.relay.Load())
 	}
 }
 

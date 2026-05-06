@@ -644,3 +644,102 @@ func TestRealThirdPartyGlue_Smoke(t *testing.T) {
 		t.Fatal("natpmpNewClientFunc returned nil")
 	}
 }
+
+func TestDefaultLocalOutboundIP_EnvOverride(t *testing.T) {
+	t.Setenv(EnvLocalIP, "10.20.30.40")
+
+	ip, err := defaultLocalOutboundIP()
+	if err != nil {
+		t.Fatalf("defaultLocalOutboundIP: %v", err)
+	}
+	if got := ip.String(); got != "10.20.30.40" {
+		t.Errorf("ip = %q, want 10.20.30.40", got)
+	}
+}
+
+func TestDefaultLocalOutboundIP_EnvInvalidIP(t *testing.T) {
+	t.Setenv(EnvLocalIP, "not-an-ip")
+
+	if _, err := defaultLocalOutboundIP(); err == nil {
+		t.Fatal("defaultLocalOutboundIP accepted invalid IP")
+	}
+}
+
+func TestDefaultLocalOutboundIP_EnvIPv6Rejected(t *testing.T) {
+	t.Setenv(EnvLocalIP, "::1")
+
+	if _, err := defaultLocalOutboundIP(); err == nil {
+		t.Fatal("defaultLocalOutboundIP accepted IPv6 (UPnP IGD requires IPv4)")
+	}
+}
+
+func TestFirstNonLoopbackIPv4_PicksUpInterface(t *testing.T) {
+	prevIfaces := netInterfacesFunc
+	prevAddrs := netInterfaceAddrsFunc
+	t.Cleanup(func() {
+		netInterfacesFunc = prevIfaces
+		netInterfaceAddrsFunc = prevAddrs
+	})
+
+	loop := net.Interface{Name: "lo", Flags: net.FlagUp | net.FlagLoopback}
+	down := net.Interface{Name: "eth-down", Flags: net.FlagLoopback}
+	up := net.Interface{Name: "eth0", Flags: net.FlagUp}
+	netInterfacesFunc = func() ([]net.Interface, error) {
+		return []net.Interface{loop, down, up}, nil
+	}
+	netInterfaceAddrsFunc = func(iface net.Interface) ([]net.Addr, error) {
+		switch iface.Name {
+		case "lo":
+			return []net.Addr{&net.IPNet{IP: net.IPv4(127, 0, 0, 1), Mask: net.CIDRMask(8, 32)}}, nil
+		case "eth0":
+			return []net.Addr{
+				&net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)},
+				&net.IPNet{IP: net.IPv4(192, 168, 5, 17), Mask: net.CIDRMask(24, 32)},
+			}, nil
+		}
+		return nil, nil
+	}
+
+	ip, err := firstNonLoopbackIPv4()
+	if err != nil {
+		t.Fatalf("firstNonLoopbackIPv4: %v", err)
+	}
+	if got := ip.String(); got != "192.168.5.17" {
+		t.Errorf("ip = %q, want 192.168.5.17 (first up non-loopback IPv4)", got)
+	}
+}
+
+func TestFirstNonLoopbackIPv4_NoCandidates(t *testing.T) {
+	prevIfaces := netInterfacesFunc
+	prevAddrs := netInterfaceAddrsFunc
+	t.Cleanup(func() {
+		netInterfacesFunc = prevIfaces
+		netInterfaceAddrsFunc = prevAddrs
+	})
+
+	netInterfacesFunc = func() ([]net.Interface, error) {
+		return []net.Interface{
+			{Name: "lo", Flags: net.FlagUp | net.FlagLoopback},
+		}, nil
+	}
+	netInterfaceAddrsFunc = func(iface net.Interface) ([]net.Addr, error) {
+		return []net.Addr{&net.IPNet{IP: net.IPv4(127, 0, 0, 1), Mask: net.CIDRMask(8, 32)}}, nil
+	}
+
+	if _, err := firstNonLoopbackIPv4(); err == nil {
+		t.Fatal("firstNonLoopbackIPv4 succeeded with only loopback present")
+	}
+}
+
+func TestFirstNonLoopbackIPv4_InterfacesError(t *testing.T) {
+	prevIfaces := netInterfacesFunc
+	t.Cleanup(func() { netInterfacesFunc = prevIfaces })
+
+	sentinel := errors.New("interfaces sentinel")
+	netInterfacesFunc = func() ([]net.Interface, error) { return nil, sentinel }
+
+	_, err := firstNonLoopbackIPv4()
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err = %v, want wrapped %v", err, sentinel)
+	}
+}
