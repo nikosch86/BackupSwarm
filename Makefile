@@ -24,7 +24,7 @@ GOFLAGS      ?=
 
 .PHONY: all build test coverage coverage-report coverage-gaps lint fmt fmt-fix vet check clean \
         docker-build docker-run docker-compose-up docker-compose-down docker-compose-test \
-        docker-compose-test-turn \
+        docker-compose-test-turn docker-shutdown-test \
         publish-dryrun \
         trivy-deps trivy-image security-scan story-done help \
         mod-get mod-tidy
@@ -131,6 +131,38 @@ docker-compose-up:
 ## docker-compose-down: tear down the local swarm
 docker-compose-down:
 	docker compose down -v
+
+## docker-shutdown-test: assert SIGTERM cleanly shuts down the container
+# docker stop sends SIGTERM; the container must exit with code 0 within
+# the grace window. A code-137 exit (SIGKILL after grace) means the
+# binary is missing PID-1 signal handlers.
+docker-shutdown-test: docker-build
+	@name=bsw-shutdown-test-$$$$; \
+	docker rm -f $$name >/dev/null 2>&1 || true; \
+	trap "docker rm -f $$name >/dev/null 2>&1 || true" EXIT INT TERM; \
+	docker run -d --name $$name $(DOCKER_IMAGE) \
+		run --listen 127.0.0.1:0 --port-mapping=off >/dev/null; \
+	echo "waiting for daemon to log 'daemon starting'..."; \
+	for i in $$(seq 1 30); do \
+		if docker logs $$name 2>&1 | grep -q '"msg":"daemon starting'; then break; fi; \
+		sleep 0.5; \
+	done; \
+	docker logs $$name 2>&1 | grep -q '"msg":"daemon starting' || \
+		{ echo "daemon never started within 15s"; docker logs $$name; exit 1; }; \
+	echo "sending SIGTERM via docker stop --time 5..."; \
+	start=$$(date +%s); \
+	docker stop --time 5 $$name >/dev/null; \
+	elapsed=$$(($$(date +%s) - $$start)); \
+	code=$$(docker inspect --format '{{.State.ExitCode}}' $$name); \
+	if [ "$$code" -ne 0 ]; then \
+		echo "container exit code = $$code (want 0); docker stop took $${elapsed}s"; \
+		docker logs $$name; exit 1; \
+	fi; \
+	if [ "$$elapsed" -ge 5 ]; then \
+		echo "docker stop took $${elapsed}s; want < 5s (signal-handler regression: SIGKILL fired after grace window)"; \
+		docker logs $$name; exit 1; \
+	fi; \
+	echo "docker-shutdown-test: clean SIGTERM in $${elapsed}s, exit code 0"
 
 ## publish-dryrun: multi-arch buildx build (no push) — mirrors release.yml's build step
 # Builds the Dockerfile for both publish platforms via buildx.

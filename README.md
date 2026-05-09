@@ -71,6 +71,10 @@ Ready-to-run compose templates for the three node roles
 
 The image sets `BACKUPSWARM_DATA_DIR=/data` so a `-v <vol>:/data` mount (or compose `volumes: [data:/data]`) persists identity, swarm CA, `peers.db`, `invites.db`, the index, and the chunk store across `docker compose up --force-recreate`. Override with `--data-dir` or by setting `BACKUPSWARM_DATA_DIR` yourself.
 
+### Graceful shutdown
+
+The daemon installs SIGINT/SIGTERM handlers, so `docker stop`, `Ctrl-C`, and `kill` trigger a clean teardown: the listener drains, the TURN allocation unmaps, and `<data-dir>/listen.addr`, `<data-dir>/relay.addr`, `<data-dir>/runtime.json`, and `<data-dir>/turn.creds` are removed before the process exits with code 0. The signal is logged: `{"level":"INFO","msg":"received signal, shutting down","signal":"terminated"}`. A second signal during shutdown short-circuits to a hard exit with code 130, so a stuck cleanup never traps the operator.
+
 ### Configuration file
 
 `run --config FILE` reads a TOML config covering daemon-config concerns
@@ -597,6 +601,7 @@ All development operations go through the Makefile — never invoke `go` or `doc
 | `make docker-compose-down` | Tear down the local swarm |
 | `make docker-compose-test` | Containerised end-to-end test: assert two joiners reach the founder, the joiner backs up the seeded tree, and the announcement reaches the third node |
 | `make docker-compose-test-turn` | Cross-allocation TURN smoke test against a real coturn container; isolates the inviter and joiner on separate networks so both `direct` and `relay-direct` rungs fail and the join completes via `relay_via_joiner_turn` |
+| `make docker-shutdown-test` | Assert the binary handles SIGTERM cleanly when running as PID 1 in distroless: `docker stop --time 5` exits the container with code 0 well within the grace window |
 | `make publish-dryrun` | Multi-arch buildx build (`linux/amd64` + `linux/arm64`) without pushing — sanity-checks the release workflow's build command locally |
 
 ### Security
