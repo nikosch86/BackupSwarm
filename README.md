@@ -71,10 +71,24 @@ Ready-to-run compose templates for the three node roles
 
 The image sets `BACKUPSWARM_DATA_DIR=/data` so a `-v <vol>:/data` mount (or compose `volumes: [data:/data]`) persists identity, swarm CA, `peers.db`, `invites.db`, the index, and the chunk store across `docker compose up --force-recreate`. Override with `--data-dir` or by setting `BACKUPSWARM_DATA_DIR` yourself.
 
+### Configuration file
+
+`run --config FILE` reads a TOML config covering daemon-config concerns
+(`[storage]`, `[nat]`, `[turn]`, `[metrics]`, `[backup]`, `[log]`). When
+`--config` is omitted, `<data-dir>/config.toml` is auto-loaded if present;
+a missing file is non-fatal. Precedence: CLI flag > `BACKUPSWARM_*` env
+var > config file > built-in default. Unknown keys error at startup so
+typos surface immediately. Mode flags (`--invite`, `--restore`, `--purge`)
+and per-deployment flags (`--listen`, `--advertise-addr`, `--port`,
+`--backup-dir`, `--data-dir`) stay CLI-only.
+
+`configs/default.toml` documents every section and value.
+
 ### Log level
 
 All commands honour `--log-level debug|info|warn|error` (default `info`),
-or the `BACKUPSWARM_LOG_LEVEL` env var. The flag wins over the env.
+or the `BACKUPSWARM_LOG_LEVEL` env var, or `[log] level` in the config
+file. The flag wins over env, env over config, config over default.
 
 Every event is emitted as one structured `log/slog` JSON line on stderr.
 Per-file events (`msg=backed up file`, `msg=file unchanged`,

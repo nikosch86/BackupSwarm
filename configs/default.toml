@@ -1,0 +1,99 @@
+# BackupSwarm — default daemon configuration.
+#
+# Every key listed here matches a CLI flag on `backupswarm run` and resolves
+# under the precedence chain: CLI flag > BACKUPSWARM_<KEY> env var > config
+# file > built-in default. Mode flags (--invite, --restore, --purge,
+# --seed-file, --token-out) and per-deployment flags (--listen,
+# --advertise-addr, --port, --backup-dir, --data-dir) are intentionally NOT
+# in the config; pass them on the CLI per invocation.
+#
+# Pass this file with `--config configs/default.toml` or copy it to
+# `<data-dir>/config.toml` (auto-loaded when present). Unknown keys error at
+# startup so typos surface immediately.
+
+[storage]
+# Cap on bytes stored locally for swarm peers; "unlimited" places no cap;
+# "0" disables storage entirely (refuse all chunks for others).
+# Suffix-aware: "10g" means 10 GiB.
+max_storage = "unlimited"
+# Number of unique storage peers each chunk is placed on (must be >= 1).
+redundancy = 1
+# Period between incremental scan passes.
+scan_interval = "60s"
+# Period between local chunk-store integrity scrubs.
+scrub_interval = "6h"
+# Period between encrypted index-snapshot uploads to live storage peers.
+index_backup_interval = "5m"
+# Storage-side lifetime for each PutOwned blob; "0s" disables TTL safety net.
+chunk_ttl = "720h"
+# Cadence at which the owner re-sends RenewTTL for every chunk in the index.
+chunk_renew_interval = "144h"
+# Cadence at which the local store sweeps expired blobs out (storage-peer GC).
+chunk_expire_interval = "1h"
+
+[nat]
+# host:port of the STUN server used when --advertise-addr=auto.
+stun_server = "stun.l.google.com:19302"
+# Acquire a UPnP / NAT-PMP port mapping at startup. "auto" or "off".
+port_mapping = "auto"
+# Timeout for the direct dial step in the connection fallback chain.
+dial_timeout = "30s"
+# Timeout for the hole-punch step in the connection fallback chain.
+punch_timeout = "5s"
+# Timeout for the TURN-relay step in the connection fallback chain.
+turn_dial_timeout = "15s"
+# Timeout for the steady-state relay step in the connection fallback chain.
+relay_dial_timeout = "15s"
+# Period between liveness probes against every live conn.
+heartbeat_interval = "30s"
+# Consecutive missed heartbeats required to mark a peer unreachable.
+heartbeat_misses = 3
+# Duration a peer must stay unreachable before being treated as lost.
+grace_period = "24h"
+# Initial delay applied to a peer after a failed dial. "0s" disables the gate.
+backoff_base = "1s"
+# Per-peer cap on the exponential redial backoff.
+backoff_max = "30m"
+# Scale each backoff delay by a random factor in [0.5, 1.0].
+backoff_jitter = true
+# Cap node-wide outbound bytes/sec across every conn; "unlimited" = no cap.
+upload_rate = "unlimited"
+# Cap node-wide inbound bytes/sec across every conn; "unlimited" = no cap.
+download_rate = "unlimited"
+
+[turn]
+# host:port of a TURN server to allocate a relay against at startup.
+server = ""
+# TURN long-term credential username.
+user = ""
+# TURN long-term credential password.
+pass = ""
+# TURN long-term credential realm.
+realm = ""
+# Whether the daemon embeds its TURN credentials in issued invite tokens.
+# "on" (default) shares; "off" suppresses.
+cred_share = "on"
+
+[metrics]
+# host:port to serve Prometheus metrics on /metrics. Empty disables.
+addr = ""
+# Cadence for the periodic INFO 'activity' log line. "0s" disables.
+stats_interval = "2m"
+
+[backup]
+# Target chunk size in bytes (default 1 MiB).
+chunk_size = 1048576
+# Gitignore-style negation patterns that re-include paths previously excluded.
+include = []
+# Gitignore-style patterns to exclude from backup. Composes with
+# <backup-dir>/.backupignore; flag rules win on overlap.
+exclude = []
+# Force the structured-log progress emitter even on a TTY.
+no_progress = false
+# Cadence for the non-TTY progress 'progress' log line during one-shot phases.
+# "0s" disables periodic emission; the final line still fires on completion.
+progress_interval = "10s"
+
+[log]
+# Log level: "debug", "info", "warn", or "error".
+level = "info"
