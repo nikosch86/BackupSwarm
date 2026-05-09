@@ -15,6 +15,7 @@ import (
 
 	"backupswarm/internal/bootstrap"
 	"backupswarm/internal/ca"
+	"backupswarm/internal/cliprogress"
 	"backupswarm/internal/daemon"
 	"backupswarm/internal/nat"
 	"backupswarm/internal/node"
@@ -67,6 +68,9 @@ const envPort = "BACKUPSWARM_PORT"
 
 // envPortMapping is the env var read by `run` when --port-mapping is omitted.
 const envPortMapping = "BACKUPSWARM_PORT_MAPPING"
+
+// envMetricsAddr is the env var read by `run` when --metrics-addr is omitted.
+const envMetricsAddr = "BACKUPSWARM_METRICS_ADDR"
 
 // portMappingAuto and portMappingOff are the accepted --port-mapping values.
 const (
@@ -156,6 +160,11 @@ func newRunCmd(dataDir *string) *cobra.Command {
 		backoffMax          time.Duration
 		backoffJitter       bool
 		portMapping         string
+		metricsAddr         string
+		includePatterns     []string
+		excludePatterns     []string
+		noProgress          bool
+		progressInterval    time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -245,6 +254,11 @@ func newRunCmd(dataDir *string) *cobra.Command {
 			default:
 				return fmt.Errorf("--port-mapping must be %q or %q, got %q", portMappingAuto, portMappingOff, portMapping)
 			}
+			if !cmd.Flags().Changed("metrics-addr") {
+				if envVal := os.Getenv(envMetricsAddr); envVal != "" {
+					metricsAddr = envVal
+				}
+			}
 
 			var preBoundListener *bsquic.Listener
 			daemonSTUNServer := ""
@@ -333,6 +347,14 @@ func newRunCmd(dataDir *string) *cobra.Command {
 				NoShareTURNCreds: noShareTURNCreds,
 				PortMapping:      portMapResult,
 				PortMapper:       portMapper,
+				MetricsAddr:      metricsAddr,
+				IncludePatterns:  includePatterns,
+				ExcludePatterns:  excludePatterns,
+				ProgressTrackerFactory: buildProgressFactory(progressOptions{
+					stderr:     resolveStderr(cmd.ErrOrStderr()),
+					noProgress: noProgress,
+					interval:   progressInterval,
+				}),
 			})
 		},
 	}
@@ -377,6 +399,11 @@ func newRunCmd(dataDir *string) *cobra.Command {
 	cmd.Flags().DurationVar(&backoffMax, "backoff-max", 30*time.Minute, "Per-peer cap on the exponential redial backoff. Must be >= --backoff-base when both are set.")
 	cmd.Flags().BoolVar(&backoffJitter, "backoff-jitter", true, "Scale each backoff delay by a random factor in [0.5, 1.0] to avoid synchronized retry storms.")
 	cmd.Flags().StringVar(&portMapping, "port-mapping", portMappingAuto, "Acquire a UPnP / NAT-PMP port mapping for the bound port at startup; 'auto' (default) tries the local gateway and refreshes the lease, 'off' disables. The mapped external IP:port is preferred over STUN when --advertise-addr=auto.")
+	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", "", "host:port to serve Prometheus metrics on /metrics (e.g. ':9090'); falls back to $BACKUPSWARM_METRICS_ADDR. Empty disables the endpoint.")
+	cmd.Flags().StringSliceVar(&excludePatterns, "exclude", nil, "Gitignore-style pattern to exclude from backup (repeatable). Composes with <backup-dir>/.backupignore; flag rules win on overlap.")
+	cmd.Flags().StringSliceVar(&includePatterns, "include", nil, "Gitignore-style negation pattern that re-includes paths previously excluded (repeatable).")
+	cmd.Flags().BoolVar(&noProgress, "no-progress", false, "Force the structured-log progress emitter even on a TTY (covers CI logs and scripted runs).")
+	cmd.Flags().DurationVar(&progressInterval, "progress-interval", cliprogress.DefaultInterval, "Cadence for the non-TTY progress 'progress' log line during one-shot phases (first-backup, restore, purge). 0 disables periodic emission; the final line still fires on completion.")
 	return cmd
 }
 

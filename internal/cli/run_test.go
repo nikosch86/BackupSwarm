@@ -224,6 +224,39 @@ func TestRunCmd_RegistersBackoffFlags(t *testing.T) {
 	}
 }
 
+// TestRunCmd_RegistersProgressFlags asserts --no-progress and
+// --progress-interval are exposed on the run subcommand with the
+// documented defaults.
+func TestRunCmd_RegistersProgressFlags(t *testing.T) {
+	root := NewRootCmd()
+	var run *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Name() == "run" {
+			run = c
+			break
+		}
+	}
+	if run == nil {
+		t.Fatal("run subcommand missing")
+	}
+	for _, want := range []struct{ name, def, typ string }{
+		{"no-progress", "false", "bool"},
+		{"progress-interval", "10s", "duration"},
+	} {
+		f := run.Flags().Lookup(want.name)
+		if f == nil {
+			t.Errorf("run missing --%s flag", want.name)
+			continue
+		}
+		if f.DefValue != want.def {
+			t.Errorf("--%s default = %q, want %q", want.name, f.DefValue, want.def)
+		}
+		if f.Value.Type() != want.typ {
+			t.Errorf("--%s type = %q, want %q", want.name, f.Value.Type(), want.typ)
+		}
+	}
+}
+
 // TestRunCmd_RegistersMaxStorageFlag asserts the --max-storage flag is
 // exposed on the run subcommand so users can cap the local store.
 func TestRunCmd_RegistersMaxStorageFlag(t *testing.T) {
@@ -724,4 +757,175 @@ func TestRunCmd_RejectsNegativeStatsInterval(t *testing.T) {
 	if err := root.Execute(); err == nil {
 		t.Error("run accepted negative --stats-interval")
 	}
+}
+
+// TestRunCmd_RegistersMetricsAddrFlag asserts --metrics-addr is exposed
+// for operators that want to scrape Prometheus metrics from the daemon.
+func TestRunCmd_RegistersMetricsAddrFlag(t *testing.T) {
+	root := NewRootCmd()
+	var run *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Name() == "run" {
+			run = c
+			break
+		}
+	}
+	if run == nil {
+		t.Fatal("run subcommand missing")
+	}
+	if f := run.Flags().Lookup("metrics-addr"); f == nil {
+		t.Fatal("run is missing --metrics-addr flag")
+	}
+}
+
+// TestRunCmd_AcceptsMetricsAddr asserts a --metrics-addr value parses and
+// the daemon starts cleanly.
+func TestRunCmd_AcceptsMetricsAddr(t *testing.T) {
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--metrics-addr", "127.0.0.1:0",
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("run with --metrics-addr returned err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit within 5s of cancel")
+	}
+}
+
+// TestRunCmd_MetricsAddrEnv asserts BACKUPSWARM_METRICS_ADDR is honoured
+// when the flag is omitted.
+func TestRunCmd_MetricsAddrEnv(t *testing.T) {
+	t.Setenv("BACKUPSWARM_METRICS_ADDR", "127.0.0.1:0")
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("run with $BACKUPSWARM_METRICS_ADDR returned err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit within 5s of cancel")
+	}
+}
+
+// TestRunCmd_RegistersIncludeExcludeFlags asserts the selective-backup
+// flags are exposed on `run` as repeatable string slices.
+func TestRunCmd_RegistersIncludeExcludeFlags(t *testing.T) {
+	root := NewRootCmd()
+	var run *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Name() == "run" {
+			run = c
+			break
+		}
+	}
+	if run == nil {
+		t.Fatal("run subcommand missing")
+	}
+	for _, name := range []string{"include", "exclude"} {
+		f := run.Flags().Lookup(name)
+		if f == nil {
+			t.Fatalf("run is missing --%s flag", name)
+		}
+		if f.Value.Type() != "stringSlice" {
+			t.Errorf("--%s type = %q, want stringSlice", name, f.Value.Type())
+		}
+	}
+}
+
+// TestRunCmd_RejectsBlankExcludePattern asserts a whitespace-only
+// --exclude pattern errors before listener bind; pflag drops literal
+// empty strings, so the smallest invalid value is a whitespace run.
+func TestRunCmd_RejectsBlankExcludePattern(t *testing.T) {
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--exclude", "   ",
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := root.ExecuteContext(ctx)
+	if err == nil {
+		t.Fatal("expected blank --exclude pattern to error")
+	}
+	if !errorMatchesAny(err, "exclude") {
+		t.Errorf("err = %v, want containing 'exclude'", err)
+	}
+}
+
+// TestRunCmd_AcceptsExcludeAndIncludeFlags asserts the daemon starts
+// cleanly with valid --include / --exclude values.
+func TestRunCmd_AcceptsExcludeAndIncludeFlags(t *testing.T) {
+	root := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"--data-dir", t.TempDir(),
+		"run",
+		"--listen", "127.0.0.1:0",
+		"--exclude", "*.tmp",
+		"--exclude", "build/",
+		"--include", "keep.tmp",
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("run with --include/--exclude returned err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run did not exit within 5s of cancel")
+	}
+}
+
+func errorMatchesAny(err error, want ...string) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, w := range want {
+		if bytes.Contains([]byte(msg), []byte(w)) {
+			return true
+		}
+	}
+	return false
 }

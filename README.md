@@ -97,6 +97,68 @@ tick:
 | `up_bytes_per_sec` / `down_bytes_per_sec` | the bytes counters divided by `interval_seconds` |
 | `interval_seconds` | wall-clock seconds since the previous emit |
 
+### Progress display
+
+One-shot phases (first-backup, restore, purge) emit live progress to
+`stderr`. On a TTY it paints a single-line bar with byte rate and ETA;
+elsewhere (CI logs, redirected stderr, or `--no-progress`) it emits a
+structured `msg=progress` slog line every `--progress-interval`
+(default `10s`, `0` disables periodic emit) plus one final line on
+completion.
+
+| Field | Meaning |
+|---|---|
+| `phase` | `first-backup`, `restore`, or `purge` |
+| `files_done` / `files_total` | files completed vs upfront count |
+| `bytes_done` / `bytes_total` | plaintext bytes completed vs upfront total |
+| `rate` | EWMA of bytes/sec across emit boundaries (1024-based units) |
+| `eta_seconds` | remaining bytes / rate; `0` once complete or while rate is unknown |
+
+Both `run` and `restore` accept `--no-progress` and
+`--progress-interval`. Steady-state daemon scan ticks are not tracked;
+the activity-stats line above covers them.
+
+### Prometheus metrics
+
+`run --metrics-addr host:port` (env `BACKUPSWARM_METRICS_ADDR`, default
+empty = off) serves a Prometheus scrape endpoint at `GET /metrics`.
+Common values: `--metrics-addr=:9090` to expose on every interface, or
+`--metrics-addr=127.0.0.1:9090` to keep it loopback-only and front it with
+a reverse proxy. The endpoint has no authentication of its own.
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `backupswarm_files_backed_up_total` | counter | Source files backed up since process start. |
+| `backupswarm_chunks_stored_total` | counter | Chunks accepted into the local store on behalf of any owner. |
+| `backupswarm_bytes_up_total` / `backupswarm_bytes_down_total` | counter | Bytes sent / received over QUIC streams. |
+| `backupswarm_peers{state="reachable\|suspect\|unreachable\|unknown"}` | gauge | Known peer count partitioned by reachability state. |
+| `backupswarm_store_used_bytes` / `backupswarm_store_capacity_bytes` | gauge | Local chunk store usage; capacity `0` means unlimited. |
+| `backupswarm_own_backup_files` / `_bytes` / `_chunks` | gauge | Totals across files this node has indexed. |
+| `backupswarm_replication_min` / `_max` / `_avg` | gauge | Replication count distribution across this node's chunks. |
+
+The endpoint also exports the standard Go runtime collectors
+(`go_goroutines`, `go_memstats_*`) and process collectors
+(`process_cpu_seconds_total`, `process_open_fds`, …) for baseline service
+health.
+
+### Inspection commands
+
+Three read-only commands report swarm state without touching files the
+daemon holds open. All three prefer the daemon's `runtime.json` snapshot
+and fall back to read-only opens of `peers.db` / `index.db` when no
+daemon is running.
+
+| Command | Purpose |
+|---|---|
+| `backupswarm --data-dir DIR status` | Local node identity, store usage, own-backup totals, replication summary, daemon mode and last-scan timestamp. |
+| `backupswarm --data-dir DIR peers` | Known swarm peers with role, address, reachability, and last-probed remote capacity. |
+| `backupswarm --data-dir DIR verify [--redundancy N] [--json]` | Owner-side replication health: classifies every indexed chunk as `at_target` / `under_replicated` / `over_replicated` against `--redundancy` (default 1), lists affected files, and surfaces unreachable holders. With no daemon, reachability is reported as `unknown`. |
+
+`verify` opens `index.db` read-only to enumerate per-chunk placement;
+`peers` and `status` consume the snapshot only when the daemon is up.
+None of the three creates any file in the data dir on a fresh dir
+without identity — they error on `node.Load`.
+
 ### Auto-join from an env var
 
 For containerised joiners, `run` reads `BACKUPSWARM_INVITE_TOKEN` at startup
@@ -311,6 +373,41 @@ docker run … backupswarm run \
     --upload-rate 10m \
     --download-rate 50m
 ```
+
+### Selective backup
+
+Limit which files under `--backup-dir` get chunked and shipped using
+gitignore-style emulation. Three sources compose, last match wins:
+
+| Source | Notes |
+|---|---|
+| `<backup-dir>/.backupignore` | Optional file at the backup root. Same syntax as `.gitignore`. Comments start with `#`. |
+| `--exclude PATTERN` | Repeatable CLI flag. Higher priority than `.backupignore`. |
+| `--include PATTERN` | Repeatable CLI flag. Re-includes paths excluded by an earlier rule (gitignore `!` negation). Highest priority. |
+
+Supported syntax: globs (`*.tmp`), double-star recursive (`build/**`),
+dir-anchored (`node_modules/`), root-anchored leading-slash
+(`/secret.txt`), and negation (`!keep.tmp`). Bad patterns error before
+the listener binds. CLI flag composition is order-insensitive: every
+`--exclude` is evaluated first, then every `--include`, so an include
+flag always wins over an exclude flag for the same path regardless of
+the order they appear on the command line.
+
+```bash
+docker run … backupswarm run \
+    --backup-dir /data/src \
+    --exclude '*.tmp' \
+    --exclude 'build/' \
+    --include 'build/keep.tmp'
+```
+
+A pattern that matches a directory short-circuits its entire subtree
+— `--exclude build/` skips `build/` and everything under it. Restore
+and prune semantics are unchanged: a file already in the index when
+new rules land stays in the swarm until the operator deletes it from
+disk. The daemon emits one INFO log line at startup naming how many
+indexed entries the active rule set would now exclude (plus up to
+three sample paths) so rule drift after a config change is visible.
 
 ## Two-node swarm (local smoke test)
 

@@ -44,6 +44,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newRestoreIndexCmd(&dataDir))
 	root.AddCommand(newPeersCmd(&dataDir))
 	root.AddCommand(newStatusCmd(&dataDir))
+	root.AddCommand(newVerifyCmd(&dataDir))
 
 	return root
 }

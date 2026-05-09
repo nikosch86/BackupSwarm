@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"backupswarm/internal/backup"
+	"backupswarm/internal/cliprogress"
 	"backupswarm/internal/index"
 	"backupswarm/internal/invites"
 	"backupswarm/internal/peers"
@@ -545,7 +546,7 @@ func TestPurgeAll_ListFailure(t *testing.T) {
 		t.Fatalf("index.Close: %v", err)
 	}
 
-	err = purgeAll(context.Background(), idx, nil)
+	err = purgeAll(context.Background(), idx, nil, nil)
 	if err == nil {
 		t.Fatal("purgeAll returned nil on closed index")
 	}
@@ -575,7 +576,7 @@ func TestPurgeAll_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err = purgeAll(ctx, idx, nil)
+	err = purgeAll(ctx, idx, nil, nil)
 	if err == nil {
 		t.Fatal("purgeAll returned nil despite cancelled context")
 	}
@@ -634,7 +635,7 @@ func TestPurgeAll_PruneFailurePropagates(t *testing.T) {
 		t.Fatalf("seed index: %v", err)
 	}
 
-	err = purgeAll(context.Background(), idx, []*bsquic.Conn{conn})
+	err = purgeAll(context.Background(), idx, []*bsquic.Conn{conn}, nil)
 	if err == nil {
 		t.Fatal("purgeAll returned nil despite closed conn")
 	}
@@ -643,8 +644,150 @@ func TestPurgeAll_PruneFailurePropagates(t *testing.T) {
 	}
 }
 
-// immediateDialRig wraps a real listener + Serve loop with an accepts
-// counter for OnApplied closure tests.
+// TestPurgeAll_ForwardsOnFilePruned asserts the OnFilePruned callback is
+// threaded through to backup.Prune for each removed entry.
+func TestPurgeAll_ForwardsOnFilePruned(t *testing.T) {
+	peerPub, peerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("peer key: %v", err)
+	}
+	_, ownerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("owner key: %v", err)
+	}
+	peerStore, err := store.New(filepath.Join(t.TempDir(), "peer-chunks"))
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = peerStore.Close() })
+
+	listener, err := bsquic.Listen("127.0.0.1:0", peerPriv, nil, nil)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	serveCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = backup.Serve(serveCtx, listener, peerStore, nil, nil, nil, nil, nil) }()
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer dialCancel()
+	conn, err := bsquic.Dial(dialCtx, listener.Addr().String(), ownerPriv, peerPub, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	idx, err := index.Open(filepath.Join(t.TempDir(), "purge-cb.db"))
+	if err != nil {
+		t.Fatalf("index.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+
+	// Seed two entries with no chunks so Prune trivially "succeeds" (no
+	// peers to delete from, indexDelete fires, OnFilePruned runs).
+	for _, e := range []index.FileEntry{
+		{Path: "ghost-a.bin", Size: 4096},
+		{Path: "ghost-b.bin", Size: 8192},
+	} {
+		if err := idx.Put(e); err != nil {
+			t.Fatalf("seed %q: %v", e.Path, err)
+		}
+	}
+
+	type call struct {
+		path  string
+		bytes int64
+	}
+	var calls []call
+	if err := purgeAll(context.Background(), idx, []*bsquic.Conn{conn}, func(p string, b int64) {
+		calls = append(calls, call{path: p, bytes: b})
+	}); err != nil {
+		t.Fatalf("purgeAll: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("OnFilePruned calls = %d, want 2 (calls=%+v)", len(calls), calls)
+	}
+	got := map[string]int64{}
+	for _, c := range calls {
+		got[c.path] = c.bytes
+	}
+	if got["ghost-a.bin"] != 4096 || got["ghost-b.bin"] != 8192 {
+		t.Errorf("forwarded bytes wrong: %+v", got)
+	}
+}
+
+// TestRunFirstBackupPhase_NilFactoryNoTrackerScansOnce asserts the
+// first-backup phase runs ScanOnce even when no factory is wired.
+func TestRunFirstBackupPhase_NilFactoryNoTrackerScansOnce(t *testing.T) {
+	prevScanFunc := scanOnceFunc
+	t.Cleanup(func() { scanOnceFunc = prevScanFunc })
+	var calls atomic.Int32
+	scanOnceFunc = func(ctx context.Context, opts ScanOnceOptions) error {
+		calls.Add(1)
+		return nil
+	}
+	runFirstBackupPhase(context.Background(), nil, ScanOnceOptions{BackupDir: t.TempDir()}, nil, func() []*bsquic.Conn { return nil })
+	if got := calls.Load(); got != 1 {
+		t.Errorf("scanOnceFunc calls = %d, want 1", got)
+	}
+}
+
+// TestRunFirstBackupPhase_FactoryReceivesPhaseAndTotals asserts the
+// factory is invoked with phase="first-backup" and totals derived from
+// the source tree; the wired OnFileProgress hook propagates per-file
+// bytes; Done fires after the scan returns.
+func TestRunFirstBackupPhase_FactoryReceivesPhaseAndTotals(t *testing.T) {
+	prevScanFunc := scanOnceFunc
+	t.Cleanup(func() { scanOnceFunc = prevScanFunc })
+	var capturedOpts ScanOnceOptions
+	scanOnceFunc = func(ctx context.Context, opts ScanOnceOptions) error {
+		capturedOpts = opts
+		if opts.OnFileProgress != nil {
+			opts.OnFileProgress(123)
+		}
+		return nil
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "x.bin"), make([]byte, 4096), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	tr := &fakeTracker{}
+	var (
+		gotPhase  string
+		gotTotals cliprogress.Totals
+	)
+	factory := ProgressTrackerFactory(func(phase string, totals cliprogress.Totals) cliprogress.Tracker {
+		gotPhase = phase
+		gotTotals = totals
+		return tr
+	})
+
+	runFirstBackupPhase(context.Background(), factory, ScanOnceOptions{BackupDir: dir}, nil, func() []*bsquic.Conn { return nil })
+
+	if gotPhase != "first-backup" {
+		t.Errorf("phase = %q, want first-backup", gotPhase)
+	}
+	if gotTotals.Files != 1 || gotTotals.Bytes != 4096 {
+		t.Errorf("totals = %+v, want {1, 4096}", gotTotals)
+	}
+	if capturedOpts.BackupDir != dir {
+		t.Errorf("scanOpts.BackupDir = %q, want %q", capturedOpts.BackupDir, dir)
+	}
+	if capturedOpts.OnFileProgress == nil {
+		t.Errorf("OnFileProgress hook missing on scanOpts")
+	}
+	if !sliceEqI64(tr.adds, []int64{123}) {
+		t.Errorf("tracker.adds = %v, want [123]", tr.adds)
+	}
+	if tr.doneCalls != 1 {
+		t.Errorf("tracker.doneCalls = %d, want 1", tr.doneCalls)
+	}
+}
+
 type immediateDialRig struct {
 	addr    string
 	pub     ed25519.PublicKey
@@ -979,6 +1122,34 @@ func TestRun_RejectsBackoffMaxBelowBase(t *testing.T) {
 	}
 }
 
+// TestRun_RejectsEmptyExcludePattern: bad backup-rule pattern errors before
+// any listener bind.
+func TestRun_RejectsEmptyExcludePattern(t *testing.T) {
+	t.Parallel()
+	err := Run(context.Background(), Options{
+		DataDir:         t.TempDir(),
+		ListenAddr:      "127.0.0.1:0",
+		ExcludePatterns: []string{"foo", ""},
+	})
+	if err == nil || !strings.Contains(err.Error(), "exclude") {
+		t.Fatalf("Run err = %v, want empty-exclude rejection", err)
+	}
+}
+
+// TestRun_RejectsEmptyIncludePattern: bad backup-rule pattern errors before
+// any listener bind.
+func TestRun_RejectsEmptyIncludePattern(t *testing.T) {
+	t.Parallel()
+	err := Run(context.Background(), Options{
+		DataDir:         t.TempDir(),
+		ListenAddr:      "127.0.0.1:0",
+		IncludePatterns: []string{""},
+	})
+	if err == nil || !strings.Contains(err.Error(), "include") {
+		t.Fatalf("Run err = %v, want empty-include rejection", err)
+	}
+}
+
 // TestRedialMissingPeers_SkipsPeerInBackoff asserts a peer with an
 // active backoff window is skipped (DEBUG-logged) and no dial fires.
 func TestRedialMissingPeers_SkipsPeerInBackoff(t *testing.T) {
@@ -1257,5 +1428,207 @@ func TestRedialMissingPeers_LogsFailureAtWarnLevel(t *testing.T) {
 	}
 	if !strings.Contains(got, "level=WARN") {
 		t.Errorf("expected WARN level for dial failure, got:\n%s", got)
+	}
+}
+
+// TestLogBackupRuleDrift_EmitsCountAndSamples: when the active rule set
+// excludes some indexed files, one INFO log line names the count plus up
+// to three sample paths.
+func TestLogBackupRuleDrift_EmitsCountAndSamples(t *testing.T) {
+	idx, err := index.Open(filepath.Join(t.TempDir(), "drift.db"))
+	if err != nil {
+		t.Fatalf("index.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+	for _, p := range []string{"keep.txt", "scratch.tmp", "old.tmp", "stale.tmp", "junk.tmp"} {
+		if err := idx.Put(index.FileEntry{Path: p, Size: 1}); err != nil {
+			t.Fatalf("Put %s: %v", p, err)
+		}
+	}
+
+	filter, err := backup.NewFilter("", nil, []string{"*.tmp"})
+	if err != nil {
+		t.Fatalf("NewFilter: %v", err)
+	}
+
+	w := &syncWriter{}
+	captureSlog(t, w)
+	if err := logBackupRuleDrift(context.Background(), idx, filter); err != nil {
+		t.Fatalf("logBackupRuleDrift: %v", err)
+	}
+
+	got := w.String()
+	if !strings.Contains(got, "backup rules exclude") {
+		t.Errorf("missing drift log line; got:\n%s", got)
+	}
+	if !strings.Contains(got, "count=4") {
+		t.Errorf("expected count=4 (4 of 5 *.tmp files); got:\n%s", got)
+	}
+	if !strings.Contains(got, "samples=") {
+		t.Errorf("expected samples= attr; got:\n%s", got)
+	}
+	if !strings.Contains(got, "+1 more") {
+		t.Errorf("expected '+1 more' suffix when N=4 with 3 samples; got:\n%s", got)
+	}
+}
+
+// TestLogBackupRuleDrift_NilFilterIsNoOp: nil filter contributes no log.
+func TestLogBackupRuleDrift_NilFilterIsNoOp(t *testing.T) {
+	idx, err := index.Open(filepath.Join(t.TempDir(), "noop.db"))
+	if err != nil {
+		t.Fatalf("index.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+	if err := idx.Put(index.FileEntry{Path: "any.txt", Size: 1}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	w := &syncWriter{}
+	captureSlog(t, w)
+	if err := logBackupRuleDrift(context.Background(), idx, nil); err != nil {
+		t.Fatalf("logBackupRuleDrift: %v", err)
+	}
+	if strings.Contains(w.String(), "backup rules exclude") {
+		t.Errorf("nil filter should not emit drift log; got:\n%s", w.String())
+	}
+}
+
+// TestScanOnce_PropagatesFilterToBackupRun pins the ScanOnce → backup.Run
+// wiring: ScanOnceOptions.Filter must reach backup.RunOptions.Filter.
+func TestScanOnce_PropagatesFilterToBackupRun(t *testing.T) {
+	var got backup.RunOptions
+	prev := backupRunFunc
+	backupRunFunc = func(_ context.Context, opts backup.RunOptions) error {
+		got = opts
+		return nil
+	}
+	t.Cleanup(func() { backupRunFunc = prev })
+
+	filter, err := backup.NewFilter("", nil, []string{"*.tmp"})
+	if err != nil {
+		t.Fatalf("NewFilter: %v", err)
+	}
+	_ = ScanOnce(context.Background(), ScanOnceOptions{
+		BackupDir: t.TempDir(),
+		Filter:    filter,
+	})
+
+	if got.Filter == nil {
+		t.Fatal("ScanOnce did not forward Filter to backup.Run")
+	}
+	if got.Filter("scratch.tmp", false) {
+		t.Errorf("forwarded Filter does not match the configured rules")
+	}
+	if !got.Filter("keep.txt", false) {
+		t.Errorf("forwarded Filter rejects an unrelated file")
+	}
+}
+
+// TestRun_PropagatesFilterToScanOnce pins the daemon.Run → ScanOnce
+// wiring: ExcludePatterns must compile and reach ScanOnceOptions.Filter.
+func TestRun_PropagatesFilterToScanOnce(t *testing.T) {
+	var captured atomic.Bool
+	var got ScanOnceOptions
+	prev := scanOnceFunc
+	scanOnceFunc = func(_ context.Context, opts ScanOnceOptions) error {
+		if captured.CompareAndSwap(false, true) {
+			got = opts
+		}
+		return nil
+	}
+	t.Cleanup(func() { scanOnceFunc = prev })
+
+	backupDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(backupDir, "f.bin"), []byte("hi"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			DataDir:         t.TempDir(),
+			BackupDir:       backupDir,
+			ListenAddr:      "127.0.0.1:0",
+			ScanInterval:    50 * time.Millisecond,
+			ExcludePatterns: []string{"*.tmp"},
+		})
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if captured.Load() {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run err = %v, want nil after cancel", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not exit within 5s of cancel")
+	}
+
+	if !captured.Load() {
+		t.Fatal("scan loop never invoked scanOnceFunc")
+	}
+	if got.Filter == nil {
+		t.Fatal("Run did not propagate Filter into ScanOnceOptions")
+	}
+	if got.Filter("scratch.tmp", false) {
+		t.Errorf("propagated Filter does not behave like --exclude '*.tmp'")
+	}
+}
+
+// TestLogBackupRuleDrift_PropagatesListError: a closed index causes
+// idx.List to error and the failure surfaces as "list index".
+func TestLogBackupRuleDrift_PropagatesListError(t *testing.T) {
+	idx, err := index.Open(filepath.Join(t.TempDir(), "drift-list-fail.db"))
+	if err != nil {
+		t.Fatalf("index.Open: %v", err)
+	}
+	if err := idx.Close(); err != nil {
+		t.Fatalf("index.Close: %v", err)
+	}
+
+	filter, err := backup.NewFilter("", nil, []string{"*.tmp"})
+	if err != nil {
+		t.Fatalf("NewFilter: %v", err)
+	}
+	err = logBackupRuleDrift(context.Background(), idx, filter)
+	if err == nil {
+		t.Fatal("expected error from closed index, got nil")
+	}
+	if !strings.Contains(err.Error(), "list index") {
+		t.Errorf("err = %q, want 'list index' prefix", err)
+	}
+}
+
+// TestLogBackupRuleDrift_NoExcludesIsSilent: a filter whose rules don't
+// match any indexed entry emits no log.
+func TestLogBackupRuleDrift_NoExcludesIsSilent(t *testing.T) {
+	idx, err := index.Open(filepath.Join(t.TempDir(), "silent.db"))
+	if err != nil {
+		t.Fatalf("index.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+	if err := idx.Put(index.FileEntry{Path: "report.txt", Size: 1}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	filter, err := backup.NewFilter("", nil, []string{"*.tmp"})
+	if err != nil {
+		t.Fatalf("NewFilter: %v", err)
+	}
+
+	w := &syncWriter{}
+	captureSlog(t, w)
+	if err := logBackupRuleDrift(context.Background(), idx, filter); err != nil {
+		t.Fatalf("logBackupRuleDrift: %v", err)
+	}
+	if strings.Contains(w.String(), "backup rules exclude") {
+		t.Errorf("rule with no matches must not log; got:\n%s", w.String())
 	}
 }

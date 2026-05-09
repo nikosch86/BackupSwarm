@@ -326,6 +326,57 @@ func TestRun_LogsRestoredFile(t *testing.T) {
 	}
 }
 
+// TestRun_OnFileProgress_FiresPerRestoredFileWithBytes asserts the
+// progress callback fires once per restored file carrying the entry's
+// recorded plaintext byte size.
+func TestRun_OnFileProgress_FiresPerRestoredFileWithBytes(t *testing.T) {
+	rig := newRestoreRig(t)
+	srcRoot := t.TempDir()
+	rig.backupFile(srcRoot, "small.txt", []byte("hello"))
+	rig.backupFile(srcRoot, "large.bin", bytes.Repeat([]byte("Z"), 4096))
+
+	type call struct{ bytes int64 }
+	var calls []call
+
+	if err := restore.Run(context.Background(), restore.Options{
+		Dest:           t.TempDir(),
+		Conns:          []*bsquic.Conn{rig.ownerConn},
+		Index:          rig.ownerIndex,
+		RecipientPub:   rig.recipientPub,
+		RecipientPriv:  rig.recipientPriv,
+		OnFileProgress: func(b int64) { calls = append(calls, call{bytes: b}) },
+	}); err != nil {
+		t.Fatalf("restore.Run: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("OnFileProgress calls = %d, want 2 (calls=%+v)", len(calls), calls)
+	}
+	totals := int64(0)
+	for _, c := range calls {
+		totals += c.bytes
+	}
+	if want := int64(5 + 4096); totals != want {
+		t.Errorf("total bytes via OnFileProgress = %d, want %d", totals, want)
+	}
+}
+
+// TestRun_OnFileProgress_NilSafe asserts a nil callback is accepted.
+func TestRun_OnFileProgress_NilSafe(t *testing.T) {
+	rig := newRestoreRig(t)
+	srcRoot := t.TempDir()
+	rig.backupFile(srcRoot, "x.txt", []byte("y"))
+	if err := restore.Run(context.Background(), restore.Options{
+		Dest:           t.TempDir(),
+		Conns:          []*bsquic.Conn{rig.ownerConn},
+		Index:          rig.ownerIndex,
+		RecipientPub:   rig.recipientPub,
+		RecipientPriv:  rig.recipientPriv,
+		OnFileProgress: nil,
+	}); err != nil {
+		t.Fatalf("restore.Run: %v", err)
+	}
+}
+
 // TestRun_ContextCancellation asserts a pre-cancelled context bails out.
 func TestRun_ContextCancellation(t *testing.T) {
 	rig := newRestoreRig(t)

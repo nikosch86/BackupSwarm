@@ -137,6 +137,10 @@ type Options struct {
 	// Nil reuses the conns from the previous attempt. Errors from Redial
 	// are non-fatal — restore continues with the prior conn set.
 	Redial func(ctx context.Context) ([]*bsquic.Conn, error)
+	// OnFileProgress, when non-nil, fires once per restored file (rename
+	// to the final path completed) with the entry's plaintext byte size.
+	// Deferred and failed files do not fire.
+	OnFileProgress func(bytes int64)
 }
 
 // normalizeRel validates an index entry path. Index entries are written
@@ -391,6 +395,9 @@ func restoreFile(
 	}
 	if cerr := chtimesInRootFunc(root, rel, entry.ModTime, entry.ModTime); cerr != nil {
 		return nil, fmt.Errorf("chtimes: %w", cerr)
+	}
+	if opts.OnFileProgress != nil {
+		opts.OnFileProgress(entry.Size)
 	}
 	slog.InfoContext(ctx, "restored file",
 		"path", entry.Path,

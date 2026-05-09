@@ -1186,6 +1186,92 @@ func TestPrune_NilProgressDefaultsToDiscard(t *testing.T) {
 	}
 }
 
+// TestPrune_OnFilePrunedFiresPerEntry asserts the OnFilePruned callback
+// fires once per index entry actually removed, with the entry's path and
+// its recorded plaintext byte size.
+func TestPrune_OnFilePrunedFiresPerEntry(t *testing.T) {
+	rig := newTestRig(t)
+	root := t.TempDir()
+	pa := filepath.Join(root, "a.bin")
+	pb := filepath.Join(root, "b.bin")
+	writeFile(t, pa, 4096)
+	writeFile(t, pb, 8192)
+
+	if err := backup.Run(context.Background(), backup.RunOptions{
+		Path:         root,
+		Conns:        []*bsquic.Conn{rig.ownerConn},
+		RecipientPub: rig.recipientPub,
+		Index:        rig.ownerIndex,
+		ChunkSize:    1 << 20,
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if err := os.Remove(pa); err != nil {
+		t.Fatalf("rm a: %v", err)
+	}
+	if err := os.Remove(pb); err != nil {
+		t.Fatalf("rm b: %v", err)
+	}
+
+	type call struct {
+		path  string
+		bytes int64
+	}
+	var calls []call
+	if err := backup.Prune(context.Background(), backup.PruneOptions{
+		Root:  root,
+		Conns: []*bsquic.Conn{rig.ownerConn},
+		Index: rig.ownerIndex,
+		OnFilePruned: func(path string, b int64) {
+			calls = append(calls, call{path: path, bytes: b})
+		},
+	}); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("OnFilePruned calls = %d, want 2 (calls=%+v)", len(calls), calls)
+	}
+	gotBytes := map[string]int64{}
+	for _, c := range calls {
+		gotBytes[c.path] = c.bytes
+	}
+	if gotBytes["a.bin"] != 4096 {
+		t.Errorf("a.bin: bytes = %d, want 4096", gotBytes["a.bin"])
+	}
+	if gotBytes["b.bin"] != 8192 {
+		t.Errorf("b.bin: bytes = %d, want 8192", gotBytes["b.bin"])
+	}
+}
+
+// TestPrune_OnFilePrunedNotCalledForPresentFiles asserts the callback is
+// silent when entries' files still exist on disk.
+func TestPrune_OnFilePrunedNotCalledForPresentFiles(t *testing.T) {
+	rig := newTestRig(t)
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "stay.bin"), 1<<10)
+	if err := backup.Run(context.Background(), backup.RunOptions{
+		Path:         root,
+		Conns:        []*bsquic.Conn{rig.ownerConn},
+		RecipientPub: rig.recipientPub,
+		Index:        rig.ownerIndex,
+		ChunkSize:    1 << 20,
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var calls int
+	if err := backup.Prune(context.Background(), backup.PruneOptions{
+		Root:         root,
+		Conns:        []*bsquic.Conn{rig.ownerConn},
+		Index:        rig.ownerIndex,
+		OnFilePruned: func(string, int64) { calls++ },
+	}); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if calls != 0 {
+		t.Errorf("OnFilePruned called %d times for present files", calls)
+	}
+}
+
 // TestPrune_StatError asserts a non-ErrNotExist os.Stat error is surfaced as "stat" rather than triggering a delete.
 func TestPrune_StatError(t *testing.T) {
 	if os.Geteuid() == 0 {
@@ -1221,5 +1307,240 @@ func TestPrune_StatError(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(err.Error()), []byte("stat")) {
 		t.Errorf("err = %q, want 'stat' prefix", err)
+	}
+}
+
+func TestRun_FilterSkipsExcludedFile(t *testing.T) {
+	rig := newTestRig(t)
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "keep.txt"), 1<<10)
+	writeFile(t, filepath.Join(root, "drop.tmp"), 1<<10)
+
+	filter, err := backup.NewFilter("", nil, []string{"*.tmp"})
+	if err != nil {
+		t.Fatalf("NewFilter: %v", err)
+	}
+
+	opts := backup.RunOptions{
+		Path:         root,
+		Conns:        []*bsquic.Conn{rig.ownerConn},
+		RecipientPub: rig.recipientPub,
+		Index:        rig.ownerIndex,
+		ChunkSize:    1 << 20,
+		Filter:       filter,
+	}
+	if err := backup.Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if _, err := rig.ownerIndex.Get("keep.txt"); err != nil {
+		t.Errorf("keep.txt should be indexed: %v", err)
+	}
+	if _, err := rig.ownerIndex.Get("drop.tmp"); !errors.Is(err, index.ErrFileNotFound) {
+		t.Errorf("drop.tmp should not be indexed; err = %v", err)
+	}
+}
+
+func TestRun_FilterPrunesExcludedDirectorySubtree(t *testing.T) {
+	rig := newTestRig(t)
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "src", "main.go"), 1<<10)
+	writeFile(t, filepath.Join(root, "build", "out.bin"), 1<<10)
+	writeFile(t, filepath.Join(root, "build", "sub", "deep.bin"), 1<<10)
+
+	filter, err := backup.NewFilter("", nil, []string{"build/"})
+	if err != nil {
+		t.Fatalf("NewFilter: %v", err)
+	}
+
+	opts := backup.RunOptions{
+		Path:         root,
+		Conns:        []*bsquic.Conn{rig.ownerConn},
+		RecipientPub: rig.recipientPub,
+		Index:        rig.ownerIndex,
+		ChunkSize:    1 << 20,
+		Filter:       filter,
+	}
+	if err := backup.Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	listed, err := rig.ownerIndex.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, e := range listed {
+		if strings.HasPrefix(filepath.ToSlash(e.Path), "build/") {
+			t.Errorf("build/ subtree should be pruned; got entry %q", e.Path)
+		}
+	}
+	if _, err := rig.ownerIndex.Get(filepath.Join("src", "main.go")); err != nil {
+		t.Errorf("src/main.go should remain indexed: %v", err)
+	}
+}
+
+func TestRun_NilFilterIsPassThrough(t *testing.T) {
+	rig := newTestRig(t)
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "any.bin"), 1<<10)
+
+	opts := backup.RunOptions{
+		Path:         root,
+		Conns:        []*bsquic.Conn{rig.ownerConn},
+		RecipientPub: rig.recipientPub,
+		Index:        rig.ownerIndex,
+		ChunkSize:    1 << 20,
+		Filter:       nil,
+	}
+	if err := backup.Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, err := rig.ownerIndex.Get("any.bin"); err != nil {
+		t.Errorf("nil filter should index every file: %v", err)
+	}
+}
+
+func TestRun_FilterSilencesExcludedSymlink(t *testing.T) {
+	rig := newTestRig(t)
+	root := t.TempDir()
+	realFile := filepath.Join(root, "real.bin")
+	writeFile(t, realFile, 1<<10)
+	link := filepath.Join(root, "drop.link")
+	if err := os.Symlink(realFile, link); err != nil {
+		t.Skip("symlinks unsupported on this platform: " + err.Error())
+	}
+
+	var captured bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&captured, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	filter, err := backup.NewFilter("", nil, []string{"*.link"})
+	if err != nil {
+		t.Fatalf("NewFilter: %v", err)
+	}
+
+	opts := backup.RunOptions{
+		Path:         root,
+		Conns:        []*bsquic.Conn{rig.ownerConn},
+		RecipientPub: rig.recipientPub,
+		Index:        rig.ownerIndex,
+		ChunkSize:    1 << 20,
+		Filter:       filter,
+	}
+	if err := backup.Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if strings.Contains(captured.String(), "skipping non-regular file") {
+		t.Errorf("excluded symlink should not emit 'skipping non-regular file' WARN; got:\n%s", captured.String())
+	}
+	if _, err := rig.ownerIndex.Get("drop.link"); !errors.Is(err, index.ErrFileNotFound) {
+		t.Errorf("excluded symlink must not be indexed; err = %v", err)
+	}
+	if _, err := rig.ownerIndex.Get("real.bin"); err != nil {
+		t.Errorf("real.bin should be indexed: %v", err)
+	}
+}
+
+func TestRun_FilterDoesNotEvictAlreadyIndexedExcludedFile(t *testing.T) {
+	rig := newTestRig(t)
+	root := t.TempDir()
+	path := filepath.Join(root, "legacy.tmp")
+	writeFile(t, path, 1<<10)
+
+	if err := backup.Run(context.Background(), backup.RunOptions{
+		Path:         root,
+		Conns:        []*bsquic.Conn{rig.ownerConn},
+		RecipientPub: rig.recipientPub,
+		Index:        rig.ownerIndex,
+		ChunkSize:    1 << 20,
+	}); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	before, err := rig.ownerIndex.Get("legacy.tmp")
+	if err != nil {
+		t.Fatalf("legacy.tmp not indexed after first run: %v", err)
+	}
+
+	filter, err := backup.NewFilter("", nil, []string{"*.tmp"})
+	if err != nil {
+		t.Fatalf("NewFilter: %v", err)
+	}
+	if err := backup.Run(context.Background(), backup.RunOptions{
+		Path:         root,
+		Conns:        []*bsquic.Conn{rig.ownerConn},
+		RecipientPub: rig.recipientPub,
+		Index:        rig.ownerIndex,
+		ChunkSize:    1 << 20,
+		Filter:       filter,
+	}); err != nil {
+		t.Fatalf("second Run with filter: %v", err)
+	}
+	after, err := rig.ownerIndex.Get("legacy.tmp")
+	if err != nil {
+		t.Fatalf("filter must not evict already-indexed excluded file; err = %v", err)
+	}
+	if before.Size != after.Size || !before.ModTime.Equal(after.ModTime) || len(before.Chunks) != len(after.Chunks) {
+		t.Errorf("index entry mutated after filter re-run: before=%+v after=%+v", before, after)
+	}
+
+	if err := backup.Prune(context.Background(), backup.PruneOptions{
+		Root:  root,
+		Conns: []*bsquic.Conn{rig.ownerConn},
+		Index: rig.ownerIndex,
+	}); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if _, err := rig.ownerIndex.Get("legacy.tmp"); err != nil {
+		t.Errorf("Prune dropped an excluded-but-on-disk file: %v", err)
+	}
+}
+
+func TestRun_FilterSkipDirPrunesBeforeDescent(t *testing.T) {
+	rig := newTestRig(t)
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "src", "main.go"), 1<<10)
+	writeFile(t, filepath.Join(root, "build", "out.bin"), 1<<10)
+	writeFile(t, filepath.Join(root, "build", "sub", "deep.bin"), 1<<10)
+
+	inner, err := backup.NewFilter("", nil, []string{"build/"})
+	if err != nil {
+		t.Fatalf("NewFilter: %v", err)
+	}
+	var mu sync.Mutex
+	seen := map[string]bool{}
+	recorder := func(rel string, isDir bool) bool {
+		mu.Lock()
+		seen[rel] = true
+		mu.Unlock()
+		return inner(rel, isDir)
+	}
+
+	opts := backup.RunOptions{
+		Path:         root,
+		Conns:        []*bsquic.Conn{rig.ownerConn},
+		RecipientPub: rig.recipientPub,
+		Index:        rig.ownerIndex,
+		ChunkSize:    1 << 20,
+		Filter:       recorder,
+	}
+	if err := backup.Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, descendant := range []string{
+		filepath.Join("build", "out.bin"),
+		filepath.Join("build", "sub"),
+		filepath.Join("build", "sub", "deep.bin"),
+	} {
+		if seen[descendant] {
+			t.Errorf("SkipDir broken: filter was offered %q under excluded build/", descendant)
+		}
+	}
+	if !seen["build"] {
+		t.Errorf("expected filter to be offered the excluded directory itself; got %v", seen)
 	}
 }

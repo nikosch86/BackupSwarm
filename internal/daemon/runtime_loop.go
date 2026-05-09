@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"backupswarm/internal/backup"
+	"backupswarm/internal/metrics"
 	"backupswarm/internal/peers"
 	bsquic "backupswarm/internal/quic"
 	"backupswarm/internal/swarm"
@@ -142,7 +143,31 @@ type snapshotLoopOptions struct {
 	ownBackupFn  func() RuntimeOwnBackupSnapshot
 	reach        *swarm.ReachabilityMap
 	peerStore    *peers.Store
+	prom         *metrics.Prom
 	nowFn        func() time.Time
+}
+
+// snapshotToMetrics projects a RuntimeSnapshot into a metrics.SnapshotInput:
+// peer counts grouped by reachability state plus the store, own-backup,
+// and replication scalars.
+func snapshotToMetrics(s RuntimeSnapshot) metrics.SnapshotInput {
+	in := metrics.SnapshotInput{
+		StoreUsed:     s.LocalStore.Used,
+		StoreCapacity: s.LocalStore.Capacity,
+		OwnFiles:      s.OwnBackup.Files,
+		OwnBytes:      s.OwnBackup.Bytes,
+		OwnChunks:     s.OwnBackup.Chunks,
+		ReplMin:       s.OwnBackup.ReplMin,
+		ReplMax:       s.OwnBackup.ReplMax,
+		ReplAvg:       s.OwnBackup.ReplAvg,
+	}
+	if len(s.Peers) > 0 {
+		in.PeerStateCounts = make(map[string]int, 4)
+		for _, p := range s.Peers {
+			in.PeerStateCounts[p.Reach]++
+		}
+	}
+	return in
 }
 
 // runSnapshotLoop publishes runtime.json on entry and once per opts.interval.
@@ -176,6 +201,9 @@ func runSnapshotLoop(ctx context.Context, opts snapshotLoopOptions) {
 		snap := buildSnapshot(base, known, opts.reach, caps)
 		if err := WriteRuntimeSnapshot(opts.dataDir, snap); err != nil {
 			slog.WarnContext(ctx, "write runtime snapshot", "err", err)
+		}
+		if opts.prom != nil {
+			opts.prom.UpdateFromSnapshot(snapshotToMetrics(snap))
 		}
 	}
 	publish()

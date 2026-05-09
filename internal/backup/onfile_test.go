@@ -88,3 +88,72 @@ func TestRun_OnFileBackedUp_NilCallbackNoPanic(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 }
+
+// TestRun_OnFileProgress_FiresWithBytesPerFile asserts OnFileProgress
+// fires once per backed-up file carrying the file's plaintext byte size.
+func TestRun_OnFileProgress_FiresWithBytesPerFile(t *testing.T) {
+	rig := newTestRig(t)
+	root := t.TempDir()
+	sizes := map[string]int{"a.txt": 4096, "b.bin": 8192}
+	for name, sz := range sizes {
+		writeFile(t, filepath.Join(root, name), sz)
+	}
+
+	var (
+		mu        = struct{ b int64 }{}
+		fileBytes []int64
+	)
+	opts := backup.RunOptions{
+		Path:         root,
+		Conns:        []*bsquic.Conn{rig.ownerConn},
+		RecipientPub: rig.recipientPub,
+		Index:        rig.ownerIndex,
+		ChunkSize:    1 << 20,
+		OnFileProgress: func(b int64) {
+			mu.b += b
+			fileBytes = append(fileBytes, b)
+		},
+	}
+	if err := backup.Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	wantTotal := int64(0)
+	for _, sz := range sizes {
+		wantTotal += int64(sz)
+	}
+	if mu.b != wantTotal {
+		t.Errorf("total bytes via OnFileProgress = %d, want %d", mu.b, wantTotal)
+	}
+	if len(fileBytes) != len(sizes) {
+		t.Errorf("OnFileProgress calls = %d, want %d", len(fileBytes), len(sizes))
+	}
+}
+
+// TestRun_OnFileProgress_NotCalledForUnchanged asserts the progress
+// callback is silent on re-runs that detect unchanged files.
+func TestRun_OnFileProgress_NotCalledForUnchanged(t *testing.T) {
+	rig := newTestRig(t)
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "f.bin"), 1<<10)
+
+	opts := backup.RunOptions{
+		Path:         root,
+		Conns:        []*bsquic.Conn{rig.ownerConn},
+		RecipientPub: rig.recipientPub,
+		Index:        rig.ownerIndex,
+		ChunkSize:    1 << 20,
+	}
+	if err := backup.Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run #1: %v", err)
+	}
+
+	var calls int
+	opts.OnFileProgress = func(int64) { calls++ }
+	if err := backup.Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run #2: %v", err)
+	}
+	if calls != 0 {
+		t.Errorf("OnFileProgress called %d times for unchanged file", calls)
+	}
+}

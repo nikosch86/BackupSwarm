@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"backupswarm/internal/cliprogress"
 	"backupswarm/internal/index"
 	"backupswarm/internal/node"
 	"backupswarm/internal/peers"
@@ -22,9 +23,11 @@ var errNoStoragePeer = fmt.Errorf("no storage peer with a dialable address in pe
 
 func newRestoreCmd(dataDir *string) *cobra.Command {
 	var (
-		dialTimeout  time.Duration
-		retryTimeout time.Duration
-		retryBackoff time.Duration
+		dialTimeout      time.Duration
+		retryTimeout     time.Duration
+		retryBackoff     time.Duration
+		noProgress       bool
+		progressInterval time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:   "restore <dest>",
@@ -87,21 +90,45 @@ func newRestoreCmd(dataDir *string) *cobra.Command {
 				redial = nil
 			}
 
+			entries, err := idx.List()
+			if err != nil {
+				return fmt.Errorf("list index: %w", err)
+			}
+			var totals cliprogress.Totals
+			for _, e := range entries {
+				totals.Files++
+				totals.Bytes += e.Size
+			}
+			factory := buildProgressFactory(progressOptions{
+				stderr:     resolveStderr(cmd.ErrOrStderr()),
+				noProgress: noProgress,
+				interval:   progressInterval,
+			})
+			var onProgress func(int64)
+			if factory != nil {
+				progress := factory("restore", totals)
+				defer progress.Done()
+				onProgress = func(b int64) { progress.Add(b, 1) }
+			}
+
 			return restore.Run(cmd.Context(), restore.Options{
-				Dest:          dest,
-				Conns:         initial,
-				Index:         idx,
-				RecipientPub:  rk.PublicKey,
-				RecipientPriv: rk.PrivateKey,
-				RetryTimeout:  retryTimeout,
-				RetryBackoff:  retryBackoff,
-				Redial:        redial,
+				Dest:           dest,
+				Conns:          initial,
+				Index:          idx,
+				RecipientPub:   rk.PublicKey,
+				RecipientPriv:  rk.PrivateKey,
+				RetryTimeout:   retryTimeout,
+				RetryBackoff:   retryBackoff,
+				Redial:         redial,
+				OnFileProgress: onProgress,
 			})
 		},
 	}
 	cmd.Flags().DurationVar(&dialTimeout, "dial-timeout", 30*time.Second, "Timeout for each dial to a storage peer")
 	cmd.Flags().DurationVar(&retryTimeout, "retry-timeout", 0, "Maximum total time to retry deferred files when peers are unreachable (0 disables retries)")
 	cmd.Flags().DurationVar(&retryBackoff, "retry-backoff", time.Second, "Initial backoff between retry attempts; doubles up to 30s")
+	cmd.Flags().BoolVar(&noProgress, "no-progress", false, "Force the structured-log progress emitter even on a TTY (for CI logs and scripted runs)")
+	cmd.Flags().DurationVar(&progressInterval, "progress-interval", cliprogress.DefaultInterval, "Cadence for the non-TTY progress 'progress' log line. 0 disables periodic emission; the final line still fires on completion.")
 	return cmd
 }
 

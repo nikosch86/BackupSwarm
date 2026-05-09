@@ -62,6 +62,14 @@ type RunOptions struct {
 	// placed and index entry persists. Implementations must be safe for
 	// concurrent use.
 	OnFileBackedUp func()
+	// OnFileProgress, when non-nil, fires alongside OnFileBackedUp with the
+	// file's plaintext byte size for progress trackers. Skipped files (i.e.
+	// already backed up and unchanged) do not fire.
+	OnFileProgress func(bytes int64)
+	// Filter, when non-nil, decides whether each entry under Path is
+	// included. Returning false on a directory prunes its subtree;
+	// returning false on a file skips that file. Nil means include all.
+	Filter func(rel string, isDir bool) bool
 }
 
 // Run backs up every regular file under opts.Path across opts.Conns.
@@ -101,6 +109,19 @@ func Run(ctx context.Context, opts RunOptions) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		rel, err := filepath.Rel(opts.Path, path)
+		if err != nil {
+			return fmt.Errorf("rel %q under %q: %w", path, opts.Path, err)
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("backup: walk produced path %q outside root %q", path, opts.Path)
+		}
+		if opts.Filter != nil && !opts.Filter(rel, d.IsDir()) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if d.IsDir() {
 			return nil
 		}
@@ -110,13 +131,6 @@ func Run(ctx context.Context, opts RunOptions) error {
 				"mode", d.Type().String(),
 			)
 			return nil
-		}
-		rel, err := filepath.Rel(opts.Path, path)
-		if err != nil {
-			return fmt.Errorf("rel %q under %q: %w", path, opts.Path, err)
-		}
-		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("backup: walk produced path %q outside root %q", path, opts.Path)
 		}
 		return backupFile(ctx, opts, path, rel, candidates, rng)
 	})
@@ -188,6 +202,9 @@ func backupFile(ctx context.Context, opts RunOptions, path, rel string, candidat
 	}
 	if opts.OnFileBackedUp != nil {
 		opts.OnFileBackedUp()
+	}
+	if opts.OnFileProgress != nil {
+		opts.OnFileProgress(info.Size())
 	}
 	slog.InfoContext(ctx, "backed up file",
 		"path", rel,
@@ -282,6 +299,10 @@ type PruneOptions struct {
 	Conns []*bsquic.Conn
 	// Index is the local bbolt index.
 	Index *index.Index
+	// OnFilePruned, when non-nil, fires once per index entry whose chunks
+	// were deleted and index record removed. bytes is the entry's recorded
+	// plaintext size.
+	OnFilePruned func(path string, bytes int64)
 }
 
 // Prune sends DeleteChunk for every index entry under Root whose file is
@@ -325,6 +346,9 @@ func Prune(ctx context.Context, opts PruneOptions) error {
 		}
 		if err := indexDeleteFunc(opts.Index, entry.Path); err != nil {
 			return fmt.Errorf("index delete %q: %w", entry.Path, err)
+		}
+		if opts.OnFilePruned != nil {
+			opts.OnFilePruned(entry.Path, entry.Size)
 		}
 		slog.InfoContext(ctx, "pruned vanished file",
 			"path", entry.Path,

@@ -57,6 +57,35 @@ func TestRestoreCmd_HasRetryFlags(t *testing.T) {
 	}
 }
 
+// TestRestoreCmd_HasProgressFlags asserts the --no-progress and
+// --progress-interval flags are wired with the documented defaults.
+func TestRestoreCmd_HasProgressFlags(t *testing.T) {
+	root := NewRootCmd()
+	var cmd *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Name() == "restore" {
+			cmd = c
+			break
+		}
+	}
+	if cmd == nil {
+		t.Fatal("restore command not registered")
+	}
+	for _, want := range []struct{ name, def string }{
+		{"no-progress", "false"},
+		{"progress-interval", "10s"},
+	} {
+		f := cmd.Flags().Lookup(want.name)
+		if f == nil {
+			t.Errorf("restore missing --%s flag", want.name)
+			continue
+		}
+		if f.DefValue != want.def {
+			t.Errorf("--%s default = %q, want %q", want.name, f.DefValue, want.def)
+		}
+	}
+}
+
 func TestRestoreCmd_RequiresDestArg(t *testing.T) {
 	root := NewRootCmd()
 	root.SetOut(&bytes.Buffer{})

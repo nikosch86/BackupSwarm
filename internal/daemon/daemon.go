@@ -23,6 +23,7 @@ import (
 
 	"backupswarm/internal/backup"
 	"backupswarm/internal/ca"
+	"backupswarm/internal/cliprogress"
 	"backupswarm/internal/crypto"
 	"backupswarm/internal/index"
 	"backupswarm/internal/metrics"
@@ -103,12 +104,22 @@ type ScanOnceOptions struct {
 	// OnFileBackedUp, when non-nil, fires once per file backup.Run
 	// successfully ships and persists.
 	OnFileBackedUp func()
+	// OnFileProgress, when non-nil, fires alongside OnFileBackedUp with
+	// the file's plaintext byte size. Used for first-backup progress
+	// tracking; nil for steady-state scan ticks.
+	OnFileProgress func(bytes int64)
+	// Filter, when non-nil, decides whether each entry under BackupDir is
+	// included in the backup. Nil means include all.
+	Filter func(rel string, isDir bool) bool
 }
+
+// backupRunFunc is the package-level seam tests swap for the backup pass.
+var backupRunFunc = backup.Run
 
 // ScanOnce runs one incremental backup pass followed by one prune sweep
 // against opts.Conns. Each call is independent; safe to retry after failure.
 func ScanOnce(ctx context.Context, opts ScanOnceOptions) error {
-	if err := backup.Run(ctx, backup.RunOptions{
+	if err := backupRunFunc(ctx, backup.RunOptions{
 		Path:           opts.BackupDir,
 		Conns:          opts.Conns,
 		Redundancy:     opts.Redundancy,
@@ -116,6 +127,8 @@ func ScanOnce(ctx context.Context, opts ScanOnceOptions) error {
 		Index:          opts.Index,
 		ChunkSize:      opts.ChunkSize,
 		OnFileBackedUp: opts.OnFileBackedUp,
+		OnFileProgress: opts.OnFileProgress,
+		Filter:         opts.Filter,
 	}); err != nil {
 		return fmt.Errorf("backup run: %w", err)
 	}
@@ -243,6 +256,21 @@ type Options struct {
 	// PortMapper opens and refreshes PortMapping; required when
 	// PortMapping is non-nil.
 	PortMapper nat.PortMapper
+	// MetricsAddr is the host:port for the Prometheus /metrics HTTP endpoint.
+	// Empty disables the endpoint entirely (counters still flow into the
+	// activity-log loop).
+	MetricsAddr string
+	// IncludePatterns are gitignore-style negation rules ("--include" CLI
+	// flag values) that re-include paths previously excluded by file or
+	// flag rules.
+	IncludePatterns []string
+	// ExcludePatterns are gitignore-style exclusion rules ("--exclude" CLI
+	// flag values). Compose with the optional <BackupDir>/.backupignore;
+	// flag rules win on overlap.
+	ExcludePatterns []string
+	// ProgressTrackerFactory builds a one-shot progress tracker for the
+	// first-backup, restore, and purge phases. Nil disables progress.
+	ProgressTrackerFactory ProgressTrackerFactory
 }
 
 // TURNOptions configures the TURN client. All four fields are required
@@ -366,7 +394,16 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.BackoffBase > 0 && opts.BackoffMax < opts.BackoffBase {
 		return fmt.Errorf("backoff max %v must be >= backoff base %v", opts.BackoffMax, opts.BackoffBase)
 	}
+	backupFilter, err := backup.NewFilter(opts.BackupDir, opts.IncludePatterns, opts.ExcludePatterns)
+	if err != nil {
+		return fmt.Errorf("compile backup rules: %w", err)
+	}
 	counters := &metrics.Counters{}
+	var prom *metrics.Prom
+	if opts.MetricsAddr != "" {
+		prom = metrics.NewProm()
+		counters.SetProm(prom)
+	}
 
 	id, _, err := node.Ensure(opts.DataDir)
 	if err != nil {
@@ -382,6 +419,10 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("open index: %w", err)
 	}
 	defer func() { _ = idx.Close() }()
+
+	if err := logBackupRuleDrift(ctx, idx, backupFilter); err != nil {
+		return err
+	}
 
 	st, err := store.NewWithOptions(filepath.Join(opts.DataDir, storeDirName), store.Options{
 		MaxBytes:  opts.MaxStorageBytes,
@@ -641,6 +682,7 @@ func Run(ctx context.Context, opts Options) error {
 			ownBackupFn:  ownBackupFromIndex(snapCtx, idx),
 			reach:        reach,
 			peerStore:    peerStore,
+			prom:         prom,
 		})
 	}()
 	defer func() { _ = RemoveRuntimeSnapshot(opts.DataDir) }()
@@ -699,6 +741,28 @@ func Run(ctx context.Context, opts Options) error {
 	}()
 	defer statsWG.Wait()
 	defer statsCancel()
+
+	metricsCtx, metricsCancel := context.WithCancel(ctx)
+	var metricsWG sync.WaitGroup
+	var metricsListener net.Listener
+	if prom != nil && opts.MetricsAddr != "" {
+		ln, err := net.Listen("tcp", opts.MetricsAddr)
+		if err != nil {
+			slog.WarnContext(ctx, "metrics endpoint disabled", "addr", opts.MetricsAddr, "err", err)
+		} else {
+			metricsListener = ln
+		}
+	}
+	metricsWG.Add(1)
+	go func() {
+		defer metricsWG.Done()
+		runMetricsLoop(metricsCtx, metricsLoopOptions{
+			listener: metricsListener,
+			prom:     prom,
+		})
+	}()
+	defer metricsWG.Wait()
+	defer metricsCancel()
 
 	ibCtx, ibCancel := context.WithCancel(ctx)
 	var ibWG sync.WaitGroup
@@ -861,9 +925,34 @@ func Run(ctx context.Context, opts Options) error {
 		return waitForServe(ctx, serveErrCh)
 	}
 
+	scanOpts := ScanOnceOptions{
+		BackupDir:      opts.BackupDir,
+		Redundancy:     opts.Redundancy,
+		Index:          idx,
+		RecipientPub:   rk.PublicKey,
+		ChunkSize:      opts.ChunkSize,
+		OnFileBackedUp: counters.AddFilesBackedUp,
+		Filter:         backupFilter,
+	}
+
 	switch mode {
+	case ModeFirstBackup:
+		runFirstBackupPhase(ctx, opts.ProgressTrackerFactory, scanOpts, backupFilter, connsFn)
+		reconcileMode := "reconcile"
+		modeStr.Store(&reconcileMode)
 	case ModePurge:
-		if err := purgeAll(ctx, idx, connsFn()); err != nil {
+		totals, err := indexTotals(idx)
+		if err != nil {
+			return fmt.Errorf("purge totals: %w", err)
+		}
+		onProg, done := startTracker(opts.ProgressTrackerFactory, "purge", totals)
+		var onPruned func(string, int64)
+		if onProg != nil {
+			onPruned = func(_ string, bytes int64) { onProg(bytes) }
+		}
+		err = purgeAll(ctx, idx, connsFn(), onPruned)
+		done()
+		if err != nil {
 			return fmt.Errorf("purge: %w", err)
 		}
 		slog.InfoContext(ctx, "purge complete; daemon continuing in idle mode")
@@ -877,16 +966,24 @@ func Run(ctx context.Context, opts Options) error {
 				return connsFn(), nil
 			}
 		}
-		if err := restore.Run(ctx, restore.Options{
-			Dest:          opts.BackupDir,
-			Conns:         connsFn(),
-			Index:         idx,
-			RecipientPub:  rk.PublicKey,
-			RecipientPriv: rk.PrivateKey,
-			RetryTimeout:  opts.RestoreRetryTimeout,
-			RetryBackoff:  opts.RestoreRetryBackoff,
-			Redial:        redial,
-		}); err != nil {
+		totals, err := indexTotals(idx)
+		if err != nil {
+			return fmt.Errorf("restore totals: %w", err)
+		}
+		onProg, done := startTracker(opts.ProgressTrackerFactory, "restore", totals)
+		err = restore.Run(ctx, restore.Options{
+			Dest:           opts.BackupDir,
+			Conns:          connsFn(),
+			Index:          idx,
+			RecipientPub:   rk.PublicKey,
+			RecipientPriv:  rk.PrivateKey,
+			RetryTimeout:   opts.RestoreRetryTimeout,
+			RetryBackoff:   opts.RestoreRetryBackoff,
+			Redial:         redial,
+			OnFileProgress: onProg,
+		})
+		done()
+		if err != nil {
 			return fmt.Errorf("restore: %w", err)
 		}
 		slog.InfoContext(ctx, "restore complete; daemon continuing in reconcile mode")
@@ -894,14 +991,6 @@ func Run(ctx context.Context, opts Options) error {
 		modeStr.Store(&reconcileMode)
 	}
 
-	scanOpts := ScanOnceOptions{
-		BackupDir:      opts.BackupDir,
-		Redundancy:     opts.Redundancy,
-		Index:          idx,
-		RecipientPub:   rk.PublicKey,
-		ChunkSize:      opts.ChunkSize,
-		OnFileBackedUp: counters.AddFilesBackedUp,
-	}
 	sweep := func() {
 		redialMissingPeers(ctx, peerStore, dialer, connSet)
 	}
@@ -909,6 +998,27 @@ func Run(ctx context.Context, opts Options) error {
 		lastScanAtNanos.Store(time.Now().UnixNano())
 		replicateOnce(ctx, idx, connsFn(), reach, opts.Redundancy)
 	})
+}
+
+// runFirstBackupPhase runs one ScanOnce pass with a progress tracker
+// before the daemon enters the regular scan loop. Totals errors degrade
+// to zero totals; scan errors log and return.
+func runFirstBackupPhase(ctx context.Context, factory ProgressTrackerFactory, scanOpts ScanOnceOptions, filter func(rel string, isDir bool) bool, connsFn func() []*bsquic.Conn) {
+	totals, err := backupDirTotals(scanOpts.BackupDir, filter)
+	if err != nil {
+		slog.WarnContext(ctx, "first-backup totals", "err", err)
+		totals = cliprogress.Totals{}
+	}
+	onProg, done := startTracker(factory, "first-backup", totals)
+	defer done()
+	first := scanOpts
+	first.Conns = connsFn()
+	if onProg != nil {
+		first.OnFileProgress = onProg
+	}
+	if err := scanOnceFunc(ctx, first); err != nil {
+		slog.WarnContext(ctx, "first-backup scan failed", "err", err)
+	}
 }
 
 // replicateOnce runs one re-replication sweep against the live storage
@@ -1221,6 +1331,10 @@ func liveStorageConns(connSet *swarm.ConnSet, peerStore *peers.Store) []*bsquic.
 	return out
 }
 
+// scanOnceFunc is the package-level seam test code swaps to capture or
+// fail-inject the per-tick scan invocation.
+var scanOnceFunc = ScanOnce
+
 // runScanLoop runs ScanOnce every interval; each tick runs sweep, refreshes
 // Conns, and runs onScanSuccess on success.
 func runScanLoop(ctx context.Context, opts ScanOnceOptions, interval time.Duration, serveErrCh <-chan error, connsFn func() []*bsquic.Conn, sweep func(), onScanSuccess func()) error {
@@ -1232,7 +1346,7 @@ func runScanLoop(ctx context.Context, opts ScanOnceOptions, interval time.Durati
 			sweep()
 		}
 		opts.Conns = connsFn()
-		if err := ScanOnce(ctx, opts); err != nil {
+		if err := scanOnceFunc(ctx, opts); err != nil {
 			slog.WarnContext(ctx, "scan failed", "err", err)
 			return
 		}
@@ -1254,8 +1368,9 @@ func runScanLoop(ctx context.Context, opts ScanOnceOptions, interval time.Durati
 }
 
 // purgeAll sends DeleteChunk for every chunk of every index entry, then
-// clears the index.
-func purgeAll(ctx context.Context, idx *index.Index, conns []*bsquic.Conn) error {
+// clears the index. onFilePruned, when non-nil, fires once per removed
+// entry with its path and recorded plaintext byte size.
+func purgeAll(ctx context.Context, idx *index.Index, conns []*bsquic.Conn, onFilePruned func(path string, bytes int64)) error {
 	entries, err := idx.List()
 	if err != nil {
 		return fmt.Errorf("list index: %w", err)
@@ -1265,9 +1380,10 @@ func purgeAll(ctx context.Context, idx *index.Index, conns []*bsquic.Conn) error
 			return err
 		}
 		if err := backup.Prune(ctx, backup.PruneOptions{
-			Root:  filepath.Dir(e.Path),
-			Conns: conns,
-			Index: idx,
+			Root:         filepath.Dir(e.Path),
+			Conns:        conns,
+			Index:        idx,
+			OnFilePruned: onFilePruned,
 		}); err != nil {
 			return err
 		}
@@ -1303,6 +1419,43 @@ func warnIfOverCap(ctx context.Context, used, capacity int64) {
 		"over_by_bytes", used-capacity,
 	)
 }
+
+// logBackupRuleDrift emits one INFO line naming how many indexed entries
+// the active filter would now exclude, plus up to driftSampleCap samples.
+// nil filter or zero excluded entries are silent.
+func logBackupRuleDrift(ctx context.Context, idx *index.Index, filter func(rel string, isDir bool) bool) error {
+	if filter == nil {
+		return nil
+	}
+	entries, err := idx.List()
+	if err != nil {
+		return fmt.Errorf("list index: %w", err)
+	}
+	var excluded []string
+	for _, e := range entries {
+		if !filter(e.Path, false) {
+			excluded = append(excluded, e.Path)
+		}
+	}
+	if len(excluded) == 0 {
+		return nil
+	}
+	samples := excluded
+	attrs := []any{
+		slog.Int("count", len(excluded)),
+	}
+	if len(samples) > driftSampleCap {
+		attrs = append(attrs,
+			slog.String("more", fmt.Sprintf("+%d more", len(samples)-driftSampleCap)),
+		)
+		samples = samples[:driftSampleCap]
+	}
+	attrs = append(attrs, slog.Any("samples", samples))
+	slog.InfoContext(ctx, "backup rules exclude indexed files", attrs...)
+	return nil
+}
+
+const driftSampleCap = 3
 
 // BackupDirHasRegularFiles returns true once a regular file is found in dir.
 func BackupDirHasRegularFiles(dir string) (bool, error) {
