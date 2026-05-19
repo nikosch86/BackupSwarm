@@ -3,7 +3,7 @@ module backupswarm
 go 1.26.2
 
 require (
-	github.com/go-git/go-git/v5 v5.19.0
+	github.com/go-git/go-git/v5 v5.19.1
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/huin/goupnp v1.3.0
 	github.com/jackpal/gateway v1.2.0
